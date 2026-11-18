@@ -201,6 +201,8 @@ internal sealed class Conversation
             Talk old = _talk;
             _talk = new Talk();
             _entries.Clear();
+            _inputTokens = 0;
+            _outputTokens = 0;
             Add(_talk, "note", "The conversation was cleared.");
             old.Stopping = true;
             Cancel(old);
@@ -334,6 +336,10 @@ internal sealed class Conversation
                 BetaMessage reply = await client.Beta.Messages.Create(Request(talk), stop).ConfigureAwait(false);
                 lock (_lock)
                 {
+                    if (!ReferenceEquals(talk, _talk))
+                    {
+                        break; // (cleared meanwhile: this reply is no part of the new conversation, nor of its counts)
+                    }
                     _inputTokens += reply.Usage.InputTokens + (reply.Usage.CacheReadInputTokens ?? 0) +
                                     (reply.Usage.CacheCreationInputTokens ?? 0);
                     _outputTokens += reply.Usage.OutputTokens;

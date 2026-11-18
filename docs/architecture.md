@@ -4114,7 +4114,9 @@ The Chat panel (`EditorPanels::draw_chat`, LW6b part 2) keeps its own
 copy of the lines (`ChatView`) and reads `get_chat` only when
 `EditorState::chat_stamp` moved: the bridge bumps it when the C# side's
 stamp (the newest line's serial and whether Claude is working, returned by
-its per-frame update) changes, and on every send, stop and clear. A frame
+its per-frame update) changes, and on every send, stop and clear, refused
+or not (`ChatStamp`; never on a read, or the panel would read every frame).
+A frame
 in which nothing happened costs the panel one comparison. New lines are
 read from the view's cursor, a few pages a frame; lines the conversation
 no longer keeps (cleared, or older than its 2,000) leave the view too. It

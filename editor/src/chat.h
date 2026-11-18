@@ -44,6 +44,32 @@ struct ChatToolReply {
 // command (commands cannot run commands).
 ChatToolReply run_chat_tool(ai::CommandRegistry& registry, std::string_view name, const ai::Json& input);
 
+// When the Chat panel reads the conversation anew: a number that moves
+// whenever the conversation may have changed, and only then (a read must
+// not move it, or the panel would read every frame).
+class ChatStamp {
+public:
+    // The chat was asked something ("send", "read", "stop", "clear"),
+    // whether or not it worked (a refused message changes what is shown too).
+    void asked(std::string_view what) {
+        if (what != "read") {
+            ++m_value;
+        }
+    }
+    // The C# side's own stamp this frame (the newest line and whether Claude works).
+    void updated(int managed) {
+        if (managed != m_managed) {
+            m_managed = managed;
+            ++m_value;
+        }
+    }
+    u64 value() const { return m_value; }
+
+private:
+    u64 m_value = 0;
+    int m_managed = 0;
+};
+
 // The Chat panel's copy of the conversation: read again (get_chat) only
 // when EditorState::chat_stamp says it may have changed, so a frame in
 // which nothing happened costs a comparison.

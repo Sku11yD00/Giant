@@ -56,9 +56,10 @@ It needs two things:
   see your usage in the Claude Console for the bill).
 - **The .NET 10 runtime**, as C# scripts do.
 
-The **Chat panel** (Window menu, docked on the right) is where you use it:
-write in the box at the bottom and press Enter (Ctrl+Enter starts a new
-line). Claude's answers appear above, with a dim line for each command it
+The **Chat panel** (View menu; on the right in the default layout, so use
+View, Reset layout if you do not see it docked) is where you use it: write
+in the box at the bottom, up to about 4,000 characters, and press Enter
+(Ctrl+Enter or Shift+Enter starts a new line). Claude's answers appear above, with a dim line for each command it
 runs; one that did not work is shown in yellow with why. **Stop** halts
 its work, **Clear** starts a new conversation, and **Details** shows what
 each command was given and gave back. If a message cannot be sent (no key

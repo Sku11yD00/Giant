@@ -33,7 +33,7 @@ public:
     bool busy() const { return m_busy; }
     // Another number whenever the conversation may have changed (for
     // EditorState::chat_stamp: the Chat panel reads it anew then).
-    u64 stamp() const { return m_stamp; }
+    u64 stamp() const { return m_stamp.value(); }
 
 private:
     bool start();
@@ -44,8 +44,7 @@ private:
     int (*m_update)() = nullptr;
     bool m_started = false;
     bool m_busy = false;
-    int m_last = 0;   // the C# side's stamp at the last update
-    u64 m_stamp = 0;
+    ChatStamp m_stamp;
     std::string m_failed; // why the chat could not start, once it could not
 };
 
