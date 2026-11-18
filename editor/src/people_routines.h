@@ -160,24 +160,38 @@ public:
     };
     bool activity(const world::Scene& scene, world::PersonId id, Activity& out) const;
 
-    // What a game save keeps of a person's routine: what it last acted on,
-    // so that a loaded game does not send everyone again. (What a
-    // behaviour's state had it do is not kept yet: `kept` gives none.)
+    // What a game save keeps of a person's routine and behaviour: what it
+    // last acted on, so that a loaded game does not send everyone again,
+    // and the state of its behaviour it is in, so that one hiding goes on
+    // hiding for as long as it had left.
     struct Kept {
-        u32 said = 0;          // what it acted on (never 0)
-        u8 entry = 0;          // its routine's entry then
+        u32 said = 0;          // what it acted on (0: nothing; then only the state is kept)
+        u8 entry = 0;          // its routine's entry then (`own`: the state's place among its behaviour's)
+        bool own = false;      // what it acted on was its behaviour's state's own, not its routine's (told as own_trip is)
         bool failed = false;
-        bool own_trip = false; // the trip it is on is the routine's
+        bool own_trip = false; // the trip it is on is the routine's (or the state's); told even when `kept` gives nothing else
         std::string place;     // where it was sent ("" for nowhere)
+        std::string behaviour; // its behaviour ("": no state is kept)
+        std::string state;     // the state it is in, by name
+        double in_state = 0.0; // seconds since it entered it
+        bool settled = false;  // the state has been acted on
     };
+    // The person at `index` is in a state that a save must keep though it stands where the scene has
+    // it (a later state than the first, or one it has acted on as the state's own).
+    bool in_later_state(const world::Scene& scene, usize index) const;
     // Before `kept` is asked of many (a save's): the slots as the people are now (people made or
     // removed since the last frame: an edit's cost).
     void ready(const world::Scene& scene, const PeopleTravel& travel);
-    // The person at `index` of the scene's people: false when it has acted on nothing.
+    // The person at `index` of the scene's people: false when it has acted on nothing and is in no state.
     bool kept(const world::Scene& scene, const PeopleTravel& travel, usize index, Kept& out) const;
-    // Puts back what a person had acted on (after its trip, if any, was sent again). False: no such
-    // person, or it has no routine with that entry now, or the entry says something else now.
-    bool restore(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, const Kept& had);
+    // Puts back the state a person was in and what it had acted on (after its trip, if any, was
+    // sent again). The state is put back when its behaviour still has one of that name (else it
+    // begins the behaviour afresh). False: no such person, or what it had acted on is not put back
+    // (it has no routine with that entry now, or no such state, or it says something else now); with
+    // nothing acted on to put back (`said` 0, or `state_only`: the state alone, to be acted on
+    // again), whether the state was.
+    bool restore(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, const Kept& had,
+                 bool state_only = false);
     // While set nobody is looked at (a loaded game's people are being put back: game_saves.h).
     bool hold = false;
     // The hour a person keeps at `hours` (late by its share of spread_minutes; 0 to under 24).

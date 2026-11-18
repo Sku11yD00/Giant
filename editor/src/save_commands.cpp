@@ -127,7 +127,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
          "camera and the weather come back (shown over the scene's own until set_weather, clear_weather or "
          "close_game), and play (or simulating) starts again if it was on (the player as it was), the moved bodies put back where they were (a share a "
          "frame, after `wait` too: each once its body is made) and the walkers walking again from where they were "
-         "(the way looked for again; each once its entity and the ground under it are in), and the ragdolls lying again as they lay (four a frame, each once its entity, the ground under it and its file are in), and the people where they were, going where they were going, their routines knowing what each had done (1024 a frame, 64 of them sent on: `people_waiting` in get_save). A save of another world, or of the world with "
+         "(the way looked for again; each once its entity and the ground under it are in), and the ragdolls lying again as they lay (four a frame, each once its entity, the ground under it and its file are in), and the people where they were, going where they were going, their routines knowing what each had done and each in the state of its behaviour it was in (1024 a frame, 64 of them sent on: `people_waiting` in get_save). A save of another world, or of the world with "
          "other kits, scatter or ground samples, is refused unless `force`. Read on a job: `wait` (default false) returns once it "
          "is all shown. Returns get_save.",
          Json{{"type", "object"},
