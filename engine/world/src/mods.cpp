@@ -1,10 +1,13 @@
 #include "giant/world/mods.h"
+#include "giant/world/people.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <charconv>
+#include <functional>
 #include <initializer_list>
+#include <map>
 #include <string_view>
 #include <set>
 #include <system_error>
@@ -489,6 +492,97 @@ ModOrder order_mods(std::span<const Mod> mods, std::span<const u8> on) {
         }
     }
     return result;
+}
+
+std::string_view mod_thing_name(ModThing thing) {
+    switch (thing) {
+    case ModThing::place: return "place";
+    case ModThing::person_look: return "person_look";
+    case ModThing::routine: return "routine";
+    case ModThing::behaviour: return "behaviour";
+    }
+    return "place";
+}
+
+namespace {
+
+// Who set each thing of a kind last, by name: a mod's place in the list (the world's own are not in it).
+using SetBy = std::map<std::string, usize, std::less<>>;
+
+// Lays `from` over `into` by name, noting each change (and who set what, in `set_by`).
+template <typename T>
+void lay_over(const std::vector<T>& from, std::vector<T>& into, SetBy& set_by, usize mod, ModThing thing,
+              std::vector<ModChange>& changes) {
+    if (from.empty()) {
+        return;
+    }
+    // (Found by a map made once: a mod may bring as many as a world keeps.)
+    // (Its own copies of the names: adding to `into` moves the things it holds.)
+    std::map<std::string, usize, std::less<>> at;
+    for (usize i = 0; i < into.size(); ++i) {
+        at.emplace(into[i].name, i);
+    }
+    for (const T& one : from) {
+        ModChange change{mod, thing, one.name, ModChange::Did::added, 0};
+        if (const auto found = at.find(one.name); found != at.end()) {
+            if (const auto by = set_by.find(one.name); by != set_by.end()) {
+                change.did = ModChange::Did::replaced_mod;
+                change.over = by->second;
+            } else {
+                change.did = ModChange::Did::replaced_world;
+            }
+            into[found->second] = one;
+        } else {
+            // (A name twice within a mod is refused when its file is loaded; given here all the same,
+            // the second is added too, and the check of the whole then refuses the mod.)
+            into.push_back(one);
+        }
+        set_by.insert_or_assign(one.name, mod);
+        changes.push_back(std::move(change));
+    }
+}
+
+} // namespace
+
+ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<Place>& places, std::vector<PersonLook>& person_looks,
+                             std::vector<Routine>& routines, std::vector<Behaviour>& behaviours, std::span<const Person> people,
+                             PersonId next_person_id) {
+    ModsApplied applied;
+    SetBy set_places, set_looks, set_routines, set_behaviours;
+    for (usize m = 0; m < mods.size(); ++m) {
+        if (mods[m] == nullptr || mods[m]->empty()) {
+            continue;
+        }
+        const ModWorld& mod = *mods[m];
+        // As they were, for the kinds it touches: back to this when it cannot go in.
+        const std::vector<Place> places_before = mod.places.empty() ? std::vector<Place>() : places;
+        const std::vector<PersonLook> looks_before = mod.person_looks.empty() ? std::vector<PersonLook>() : person_looks;
+        const std::vector<Routine> routines_before = mod.routines.empty() ? std::vector<Routine>() : routines;
+        const std::vector<Behaviour> behaviours_before = mod.behaviours.empty() ? std::vector<Behaviour>() : behaviours;
+        const SetBy set_before[4] = {set_places, set_looks, set_routines, set_behaviours};
+        const usize changes_before = applied.changes.size();
+        lay_over(mod.places, places, set_places, m, ModThing::place, applied.changes);
+        lay_over(mod.person_looks, person_looks, set_looks, m, ModThing::person_look, applied.changes);
+        lay_over(mod.routines, routines, set_routines, m, ModThing::routine, applied.changes);
+        lay_over(mod.behaviours, behaviours, set_behaviours, m, ModThing::behaviour, applied.changes);
+        std::optional<std::string> wrong = check_people(places, person_looks, routines, people, next_person_id);
+        if (!wrong) {
+            wrong = check_behaviours(behaviours, people);
+        }
+        if (wrong) {
+            if (!mod.places.empty()) places = places_before;
+            if (!mod.person_looks.empty()) person_looks = looks_before;
+            if (!mod.routines.empty()) routines = routines_before;
+            if (!mod.behaviours.empty()) behaviours = behaviours_before;
+            set_places = set_before[0];
+            set_looks = set_before[1];
+            set_routines = set_before[2];
+            set_behaviours = set_before[3];
+            applied.changes.resize(changes_before);
+            applied.problems.push_back({m, "its world changes were left out: with them, " + *wrong});
+        }
+    }
+    return applied;
 }
 
 } // namespace giant::world

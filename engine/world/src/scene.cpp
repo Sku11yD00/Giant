@@ -1,6 +1,7 @@
 #include "giant/world/scene.h"
 #include "giant/world/clock.h"
 #include "giant/world/far_ground.h"
+#include "giant/world/mods.h"
 #include "giant/world/scatter.h"
 #include "giant/world/people.h"
 #include "giant/world/routes.h"
@@ -2079,8 +2080,10 @@ void read_entity(const Json& json, const std::string& path, Entity& e, std::stri
 
 // The people's keys of a scene or a world index: places, person_looks,
 // routines and people, each checked alone and then together (people.h).
+// (`with_people` false: a mod's file, which has no people of its own; then
+// only the names are checked together.)
 void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLook>& looks, std::vector<Routine>& routines,
-                 std::vector<Person>& people, PersonId& next_person_id, std::string& error) {
+                 std::vector<Person>& people, PersonId& next_person_id, std::string& error, bool with_people = true) {
     if (const Json* list = root.get("places", false); list != nullptr && root.ok()) {
         if (!list->is_array() || list->size() > k_max_places) {
             root.fail("places", "must be an array of at most " + std::to_string(k_max_places));
@@ -2226,7 +2229,7 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
             routines.push_back(std::move(routine));
         }
     }
-    if (const Json* json = root.get("people", false); json != nullptr && root.ok()) {
+    if (const Json* json = with_people ? root.get("people", false) : nullptr; json != nullptr && root.ok()) {
         Reader r(*json, "people", error);
         u64 next = 1;
         if (const Json* v = r.get("next_id", true)) {
@@ -3061,6 +3064,7 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
 namespace {
 
 constexpr const char* k_world_format = "giant-world";
+constexpr const char* k_mod_world_format = "giant-mod-world";
 constexpr const char* k_cell_format = "giant-cell";
 
 Json cell_json(CellCoord c) { return Json::array({c.x, c.z}); }
@@ -3070,6 +3074,38 @@ Json cell_json(CellCoord c) { return Json::array({c.x, c.z}); }
 
 std::string cell_file_name(CellCoord cell) {
     return std::to_string(cell.x) + "_" + std::to_string(cell.z) + ".cell.json";
+}
+
+std::string save_mod_world(const ModWorld& world) {
+    Json out;
+    out["format"] = k_mod_world_format;
+    out["version"] = k_version;
+    write_people(out, world.places, world.person_looks, world.routines, {}, 1);
+    if (!world.behaviours.empty()) {
+        out["behaviours"] = behaviours_json(world.behaviours);
+    }
+    return out.dump(2) + "\n";
+}
+
+std::optional<LoadError> load_mod_world(std::string_view text, ModWorld& out) {
+    Json json;
+    if (auto bad = parse(text, json)) {
+        return bad;
+    }
+    std::string error;
+    Reader root(json, "", error);
+    read_header(root, k_mod_world_format, "mod worlds");
+    ModWorld world;
+    std::vector<Person> nobody;
+    PersonId next_person_id = 1;
+    read_people(root, world.places, world.person_looks, world.routines, nobody, next_person_id, error, false);
+    read_behaviours(root, world.behaviours, nobody, error);
+    root.finish();
+    if (!error.empty()) {
+        return LoadError{error};
+    }
+    out = std::move(world);
+    return std::nullopt;
 }
 
 std::string save_world_index(const WorldIndex& world) {

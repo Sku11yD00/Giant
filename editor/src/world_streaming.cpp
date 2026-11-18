@@ -7,6 +7,8 @@
 #include "giant/core/text.h"
 #include "giant/core/text_files.h"
 #include "giant/world/far_ground.h"
+#include "giant/world/mods.h"
+#include "giant/world/people.h"
 
 #include <algorithm>
 #include <charconv>
@@ -222,7 +224,10 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
     base.reserve_ids_below(index.next_id);
     base.terrain.set_samples(index.terrain_samples);
     base.terrain.material = index.terrain_material;
+    // The world's mods over it (the index stays what the file holds).
+    ModsLaid mods = lay_mods(folder, base);
     scene = std::move(base);
+    m_mods = std::move(mods);
     m_scene = scene.identity();
     m_folder = folder;
     m_generation = generation;
@@ -251,6 +256,7 @@ void WorldStreaming::close() {
     m_folder.clear();
     m_generation = 0;
     m_index = {};
+    m_mods = {};
     m_cells.clear();
     m_ground.clear();
     for (auto& level : m_far) level.clear();
@@ -713,8 +719,30 @@ WorldStreaming::Saved WorldStreaming::save(const world::Scene& scene, std::vecto
     return write(scene, std::move(meshes));
 }
 
+WorldStreaming::Own WorldStreaming::own(const world::Scene& scene) const {
+    if (!m_mods.any) {
+        return {scene.places, scene.person_looks, scene.routines, scene.behaviours};
+    }
+    return {world::world_own<world::Place>(m_index.places, m_mods.places, scene.places),
+            world::world_own<world::PersonLook>(m_index.person_looks, m_mods.person_looks, scene.person_looks),
+            world::world_own<world::Routine>(m_index.routines, m_mods.routines, scene.routines),
+            world::world_own<world::Behaviour>(m_index.behaviours, m_mods.behaviours, scene.behaviours)};
+}
+
 WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vector<std::string> meshes) {
     Saved saved;
+    // The world's own, without what mods laid over it: it must load without them.
+    Own owned = own(scene);
+    if (m_mods.any) {
+        std::optional<std::string> wrong = world::check_people(owned.places, owned.person_looks, owned.routines, scene.people, scene.next_person_id);
+        if (!wrong) {
+            wrong = world::check_behaviours(owned.behaviours, scene.people);
+        }
+        if (wrong) {
+            return {"the world cannot be saved while its people use what only a mod brings (without the mods, " + *wrong +
+                    "): give them the world's own, or make the thing the world's by changing it"};
+        }
+    }
     // What the scene holds, by cell.
     std::unordered_map<CellCoord, std::vector<Entity>, world::CellCoordHash> members;
     for (const Entity& e : scene.entities()) {
@@ -954,10 +982,16 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     m_index.weather = scene.weather;
     m_index.clock = scene.clock;
     m_index.water = scene.water;
-    m_index.places = scene.places;
-    m_index.person_looks = scene.person_looks;
-    m_index.routines = scene.routines;
-    m_index.behaviours = scene.behaviours;
+    m_index.places = std::move(owned.places);
+    m_index.person_looks = std::move(owned.person_looks);
+    m_index.routines = std::move(owned.routines);
+    m_index.behaviours = std::move(owned.behaviours);
+    if (m_mods.any) { // (from here on, what there is now is what the mods and the world's own make)
+        m_mods.places = scene.places;
+        m_mods.person_looks = scene.person_looks;
+        m_mods.routines = scene.routines;
+        m_mods.behaviours = scene.behaviours;
+    }
     m_index.people = scene.people;
     m_index.next_person_id = scene.next_person_id;
     m_index.routes = scene.routes;
@@ -1145,11 +1179,15 @@ u32 WorldStreaming::unsaved_cells(const world::Scene& scene) const {
 }
 
 bool WorldStreaming::unsaved_settings(const world::Scene& scene) const {
+    // (With mods on, the scene's are not the file's: the world's own among them are what is compared.)
+    const bool same_people_things =
+        m_mods.any ? scene.places == m_mods.places && scene.person_looks == m_mods.person_looks && scene.routines == m_mods.routines &&
+                         scene.behaviours == m_mods.behaviours
+                   : scene.places == m_index.places && scene.person_looks == m_index.person_looks && scene.routines == m_index.routines &&
+                         scene.behaviours == m_index.behaviours;
     return !(scene.lighting == m_index.lighting) || !(scene.kits == m_index.kits) ||
            !(scene.scatter == m_index.scatter) || !(scene.weather == m_index.weather) ||
-           !(scene.clock == m_index.clock) || !(scene.water == m_index.water) ||
-           !(scene.places == m_index.places) || !(scene.person_looks == m_index.person_looks) ||
-           !(scene.routines == m_index.routines) || !(scene.behaviours == m_index.behaviours) ||
+           !(scene.clock == m_index.clock) || !(scene.water == m_index.water) || !same_people_things ||
            !(scene.people == m_index.people) || scene.next_person_id != m_index.next_person_id ||
            !(scene.routes == m_index.routes) ||
            !(scene.particle_looks == m_index.particle_looks) || !(scene.effects == m_index.effects);

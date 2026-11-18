@@ -4,9 +4,9 @@ A mod changes or adds to a world without touching the world's own files:
 you can turn it off and the world is as it was. This page is for people
 who make mods and people who install them.
 
-So far the engine knows what mods there are, which are on, and what order
-they load in. What a mod holds (changes to the world, new assets, scripts)
-is loaded by parts still being built; this page will grow with them.
+So far a mod can change a world's places, the looks of its people, their
+routines and their behaviours. People of a mod's own, new assets and
+scripts are parts still being built; this page will grow with them.
 
 ## Where mods go
 
@@ -20,6 +20,7 @@ my_world/
     enabled.json          which mods are on (the editor writes this)
     winter/
       mod.json            the mod's manifest
+      world.json          what it changes of the world (optional)
     better_roads/
       mod.json
 ```
@@ -58,6 +59,60 @@ must be a real folder, not a link to one.
 A key the engine does not know is an error, so a typing mistake is told
 to you instead of being ignored.
 
+## What a mod changes: world.json
+
+A mod's `world.json` holds places, person looks, routines and behaviours,
+written exactly as a world's own `world.json` writes them (the easiest way
+to make one is to build the things in the editor, save the world, and copy
+them out of its `world.json`):
+
+```json
+{
+  "format": "giant-mod-world",
+  "version": 1,
+  "places": [
+    {"name": "tavern", "position": [30, 0, -30], "radius": 4, "tags": ["rest"]}
+  ],
+  "routines": [],
+  "person_looks": [],
+  "behaviours": []
+}
+```
+
+Things go by name:
+
+- A thing whose name the world does not have is **added**.
+- A thing whose name the world already has **takes its place**, whole. So
+  a mod can move the smithy, give the villagers a new look, or rewrite
+  what the guards do when they hear a shot.
+
+The world's own files are never changed by a mod. The changes are laid
+over the world each time it is opened, in the load order, so a later mod's
+thing wins over an earlier mod's of the same name. Every such clash is
+reported: `list_mods` shows under `world` what each mod added and
+replaced, with the clashes first.
+
+A mod's changes go in whole or not at all. If they would leave the world
+broken (more looks than a world keeps, say), that mod's changes are left
+out and `list_mods` says why under `world.problems`. The same goes for a
+`world.json` with a mistake in it.
+
+After turning mods on or off, open the world again to see the change
+(`list_mods` says `reopen` when the world on screen is not what the mods
+now give).
+
+### Working on a world while mods are on
+
+You can keep building a world with mods on. When you save:
+
+- What the mods brought and you left alone is not written into the
+  world's files.
+- What you changed or made is the world's own and is saved, including a
+  mod's thing that you changed (it becomes the world's).
+- The world must still open without the mods. If one of the world's
+  people uses a look, home, routine or behaviour that only a mod brings,
+  the save is refused and says which.
+
 ## Turning mods on and off
 
 In the editor (or over MCP, or by asking Claude in the Chat panel):
@@ -74,9 +129,9 @@ world.
 
 ## Load order
 
-Mods load one after another (when mods come to change the world, a later
-mod's change will win over an earlier one's, and the clash will be
-reported). The order is worked out from the manifests:
+Mods load one after another, and a later mod's thing wins over an earlier
+one's of the same name (the clash is reported). The order is worked out
+from the manifests:
 
 1. A mod loads after every mod it `needs`.
 2. A mod loads after every mod in its `after` list that is loaded.
@@ -108,4 +163,7 @@ At most 256 mods beside one world: only the first 256 folders in `mods`
 (by name, broken ones included) are looked at, and `list_mods` says
 `too_many` when there are more. A `mod.json` and `enabled.json` are at most
 64 KB each, a name or author at most 128 bytes, a description at most
-2,048 bytes, and a mod names at most 32 `needs` and 32 `after`.
+2,048 bytes, and a mod names at most 32 `needs` and 32 `after`. A mod's
+`world.json` is at most 64 MB, and the world with its mods keeps to a
+world's own limits (65,536 places, 1,024 looks, 1,024 routines, 256
+behaviours).

@@ -1,11 +1,14 @@
 // The mods beside the open world (world/mods.h; living-world plan LW7):
 // <world>/mods/<id>/mod.json for each, and <world>/mods/enabled.json for
 // which are on. Read when asked (list_mods, enable_mod), never by a frame.
-// So far a mod is its manifest: what mods hold is loaded by later parts.
+// A mod's world.json (places, person looks, routines, behaviours) is laid
+// over the world when it is opened (lay_mods); assets and scripts are parts
+// to come.
 #pragma once
 
 #include "giant/core/types.h"
 #include "giant/world/mods.h"
+#include "giant/world/scene.h"
 
 #include <filesystem>
 #include <optional>
@@ -33,6 +36,24 @@ struct ModList {
     std::string folder_error;         // mods/ is there and could not be read through: why (the lists may be short)
     bool too_many = false;            // more folders than world::k_max_mods: the rest were not looked at
 };
+
+// What the mods that load changed of a world as it was opened (their
+// world.json files, world/mods.h), and the world's things as they were just
+// then: what save_world tells the world's own from (world::world_own).
+struct ModsLaid {
+    bool any = false; // a mod changed something: the four lists are what there was then
+    std::vector<world::Place> places;
+    std::vector<world::PersonLook> person_looks;
+    std::vector<world::Routine> routines;
+    std::vector<world::Behaviour> behaviours;
+    std::vector<std::string> mods; // the ids of the mods loaded then, in order
+    world::ModsApplied applied;    // what each did, and those left out (places in `mods`)
+};
+// Lays the world's loaded mods over the scene's places, person looks,
+// routines and behaviours (the world's own, just read). A mod with no
+// world.json changes nothing; one whose world.json cannot be used is left
+// out with why (in `applied.problems`). Reads the disk.
+ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene);
 
 // Where a world's mods are: <world>/mods.
 std::filesystem::path mods_folder(const std::filesystem::path& world_folder);

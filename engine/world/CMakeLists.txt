@@ -32,4 +32,5 @@ giant_module_tests(world
     tests/test_routes.cpp
     tests/test_effects.cpp
     tests/test_mods.cpp
+    tests/test_mod_worlds.cpp
 )

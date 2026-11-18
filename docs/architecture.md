@@ -4149,9 +4149,32 @@ listed with why (links to folders among them; names beginning with `.` or
 said, not shown as empty. Names and descriptions hold no control
 characters: they are shown to people and to Claude. A list of enabled mods that cannot be read turns none on
 and is never overwritten. At most 256 mods, manifests of at most 64 KB.
-So far a mod is its manifest and its place in the order: world changes,
-data overrides, assets and scripts are the parts to come, applied in this
-order.
+
+A mod's `world.json` (format `giant-mod-world`, LW7 part 2:
+`world::ModWorld`, `load_mod_world`) holds places, person looks, routines
+and behaviours, read by the same readers as a world's own.
+`world::apply_mod_worlds` lays the mods over a world's lists in the load
+order: by name, a thing there already is replaced whole, any other added.
+Each change is recorded (`ModChange`: added, replaced the world's, or
+replaced an earlier mod's, which is a clash), and a mod goes in whole or
+not at all: after each mod the lists are checked as a world's are
+(`check_people`, `check_behaviours`), and a mod that fails is undone and
+given a problem.
+
+The editor lays the mods when a world is opened (`lay_mods`, from
+`WorldStreaming::open`), over the scene only: `WorldStreaming`'s index
+stays what `world.json` holds. So that saving with mods on keeps the
+world's files its own, the lists as they were just after laying are kept
+(`ModsLaid`), and `world::world_own` tells the world's own from the mods'
+by three-way compare (the file's, as laid, now): a thing as the mods left
+it is the mods'; one changed or made since is the world's; one gone is
+gone. `save_world` writes those, refuses when the world's people would
+need what only a mod brings (the world must load without its mods), and
+`unsaved_settings` compares against the lists as laid. Turning a mod on or
+off changes only the list: the scene changes when the world is next
+opened (`list_mods` reports `reopen`), which keeps the undo history
+honest. People of a mod's own, kits, assets and scripts are the parts to
+come.
 
 Whole text files are read and written by `giant/core/text_files.h`
 (written beside and renamed over); game saves keep their own writer, which
