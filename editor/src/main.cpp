@@ -53,6 +53,8 @@
 #include "giant/ai/mcp_server.h"
 #include "giant/core/log.h"
 #include "giant/core/log_history.h"
+#include "giant/core/text.h"
+#include "giant/core/text_files.h"
 #include "giant/core/thread_time.h"
 #include "giant/platform/line_reader.h"
 #include "giant/platform/window.h"
@@ -67,6 +69,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -210,6 +213,21 @@ std::filesystem::path find_managed_dir() {
     return exe / "managed";
 }
 
+// The editor's settings on this machine, the person's own (where the chat's key is too): %APPDATA%\Giant,
+// or $XDG_CONFIG_HOME/Giant, or ~/.config/Giant. Empty when none of those is set.
+std::filesystem::path settings_folder() {
+#if defined(_WIN32)
+    const std::filesystem::path base = environment_path("APPDATA");
+#else
+    std::filesystem::path base = environment_path("XDG_CONFIG_HOME");
+    if (base.empty() || !base.is_absolute()) {
+        const std::filesystem::path home = environment_path("HOME");
+        base = home.empty() ? std::filesystem::path() : home / ".config";
+    }
+#endif
+    return base.empty() || !base.is_absolute() ? std::filesystem::path() : base / "Giant";
+}
+
 // C# scripts: starts .NET when first needed, applies load/unload requests
 // from commands, and runs a frame of the scripts.
 class ScriptRunner {
@@ -236,7 +254,8 @@ public:
                 m_events_missed = false;
             }
         }
-        if (m_host != nullptr && !m_state.scripts_loaded.empty()) {
+        update_mods_scripts();
+        if (m_host != nullptr && (!m_state.scripts_loaded.empty() || !m_state.mods_scripts_loaded.empty())) {
             tell_person_events();
             m_host->update(delta_seconds);
         }
@@ -247,6 +266,41 @@ public:
     script::ScriptHost* host() { return start() ? m_host.get() : nullptr; }
 
 private:
+    // The open world's mods' scripts (EditorState::mods_scripts, found by open_world): loaded beside the
+    // world's own when the world is opened, unloaded when it is closed or opened again.
+    void update_mods_scripts() {
+        const editor::ModsScripts& found = m_state.mods_scripts;
+        const bool open = m_state.world != nullptr && m_state.world->is_open() && found.session == m_state.world->session();
+        const u64 want = open && !found.run.empty() ? found.session : 0;
+        if (want == m_mods_session) {
+            return;
+        }
+        m_mods_session = want;
+        if (m_host != nullptr && !m_state.mods_scripts_loaded.empty()) {
+            m_host->unload_added_scripts();
+        }
+        m_state.mods_scripts_loaded.clear();
+        if (want == 0) {
+            return;
+        }
+        if (!start()) {
+            log_error("editor", "the mods' scripts were not loaded: .NET could not be started");
+            return;
+        }
+        for (const editor::ModsScripts::Run& run : found.run) {
+            if (m_host->add_scripts(path_from_utf8(run.path))) {
+                m_state.mods_scripts_loaded.push_back(run.mod);
+            } else {
+                log_error("editor", "the scripts of the mod \"" + run.mod + "\" could not be loaded (see above)");
+            }
+        }
+        if (m_state.scripts_loaded.empty()) {
+            // (Scripts hear of what happens from when they are loaded.)
+            m_events_told = m_state.routines != nullptr ? m_state.routines->changes() : 0;
+            m_events_missed = false;
+        }
+    }
+
     // What happened to people's behaviours since the scripts were last told, a share a frame
     // (many at once are told over the frames after: never more script time in one).
     void tell_person_events() {
@@ -298,6 +352,7 @@ private:
     static constexpr usize k_events_a_frame = 256;
     u64 m_events_told = 0;
     bool m_events_missed = false;
+    u64 m_mods_session = 0; // the world's opening whose mods' scripts are loaded (0: none)
     std::vector<editor::PeopleRoutines::Change> m_changes; // (kept: nothing is allocated a frame)
     std::vector<script::PersonEvent> m_events;
 };
@@ -465,6 +520,13 @@ int run(const Options& options) {
         ~ChatGone() { state.chat = nullptr; }
     } chat_gone{state};
     state.scripts_to_load = options.scripts;
+    if (const std::filesystem::path settings = settings_folder(); !settings.empty()) {
+        try {
+            state.mods_scripts_allowed_file = path_to_utf8(settings / "mods_scripts_allowed.json");
+        } catch (const std::exception&) {
+            // (A folder whose name is not text: no mod's scripts can be allowed.)
+        }
+    }
     editor::TerrainBrushTool terrain_brush;
     // Records the scene and the panels into `target` (an sRGB image).
     // Where the main thread's time goes each frame (get_engine_info's

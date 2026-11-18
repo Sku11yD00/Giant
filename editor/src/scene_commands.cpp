@@ -1830,6 +1830,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                  }
              }
              Json mesh_errors = import_meshes(state, meshes);
+             // The mods' scripts that run with this opening (the main loop loads them after this frame).
+             state.mods_scripts = mods_scripts(folder, state.world->mods_laid(),
+                                               state.mods_scripts_allowed_file.empty() ? std::filesystem::path()
+                                                                                       : path_from_utf8(state.mods_scripts_allowed_file));
+             state.mods_scripts.session = state.world->session();
              std::error_code error;
              Json result = {{"folder", path_to_utf8(std::filesystem::absolute(folder, error))},
                             {"cells", state.world->index().cells.size()}};

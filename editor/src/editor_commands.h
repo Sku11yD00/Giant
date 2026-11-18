@@ -8,6 +8,7 @@
 #include "giant/render/renderer.h"
 #include "giant/rhi/rhi.h"
 #include "giant/world/scene.h"
+#include "mods.h"
 
 #include <algorithm>
 #include <array>
@@ -322,6 +323,13 @@ struct EditorState {
     // Tools and tests: the world folder (UTF-8) whose mods are meant (list_mods, enable_mod), whatever is open.
     // Empty: the open world's.
     std::string mods_world;
+    // The machine's list of mods whose scripts may run (world::ModScriptsAllowed; UTF-8), in the editor's
+    // settings folder. Set by main (and tests). Empty: no mod's scripts run, and none can be allowed.
+    std::string mods_scripts_allowed_file;
+    // The scripts of the mods the open world was opened with (open_world finds them); the main loop
+    // loads those that run while that world is open, and says which it loaded.
+    ModsScripts mods_scripts;
+    std::vector<std::string> mods_scripts_loaded; // ids, in the order loaded
 
     u64 chat_stamp = 0;     // another number whenever the conversation may have changed (the main loop's)
     bool chat_busy = false; // Claude is working on a message (the main loop's)

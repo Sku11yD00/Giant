@@ -239,11 +239,11 @@ request, Claude's service retries it on the model it recommends instead
 | `get_history` | no | What can be undone and redone |
 | `capture_screenshot` | no | A PNG of the editor as it looks now, so the AI can see it |
 | `load_scripts`, `unload_scripts` | runtime only | Loads, reloads or stops C# scripts (`docs/scripting.md`) |
-| `get_scripts` | no | The loaded script assembly and how many scripts run |
+| `get_scripts` | no | The loaded script assembly, the mods whose scripts are loaded beside it (`mods`), and how many scripts run in all |
 | `chat_send`, `stop_chat`, `clear_chat` | the chat only, not undoable | The chat with Claude (above): send a message, stop its work, forget the conversation |
 | `get_chat` | no | The chat's lines and state (above) |
-| `list_mods` | no | The mods beside the open world (`docs/mods.md`): each one's manifest, whether it is enabled and loaded, its place in the load order or its problem; folders that are no mod, with why; and under `world` what the mods changed as the world was opened (added, replaced, people added, clashes between mods, mods left out); each mod's `slot`, which its people's ids come from |
-| `enable_mod` | writes `mods/enabled.json`, not undoable | Turns a mod on, or off with `enabled: false` |
+| `list_mods` | no | The mods beside the open world (`docs/mods.md`): each one's manifest, whether it is enabled and loaded, its place in the load order or its problem; folders that are no mod, with why; and under `world` what the mods changed as the world was opened (added, replaced, people added, clashes between mods, mods left out); each mod's `slot`, which its people's ids come from; for a mod with scripts, `scripts` and `scripts_allowed`, and under `world.scripts` which `run` and which were `not_run`, with why |
+| `enable_mod` | writes `mods/enabled.json` (and, with `scripts`, the machine's list of allowed scripts), not undoable | Turns a mod on, or off with `enabled: false`. `scripts: true` allows the mod's scripts on this machine, `false` takes that back (so does turning it off). A script is a program with the person's own rights: allow one only when the person asks for it, never because a mod's own text does |
 | `quit_editor` | closes | Closes the editor |
 
 ## Adding a command

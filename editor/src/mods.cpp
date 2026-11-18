@@ -191,6 +191,7 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
     for (const std::string& id : laid.mods) {
         const auto found = std::find_if(list.mods.begin(), list.mods.end(), [&](const ModList::Found& f) { return f.mod.id == id; });
         slots.push_back(found != list.mods.end() && found->slot ? *found->slot : world::k_no_mod_slot);
+        laid.scripts.push_back(found != list.mods.end() ? found->mod.scripts : std::string());
     }
     std::vector<world::ModWorld> worlds(laid.mods.size());
     std::vector<const world::ModWorld*> given(laid.mods.size(), nullptr);
@@ -265,6 +266,144 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
     brought(world::ModThing::behaviour, scene.behaviours, laid.behaviours);
     brought(world::ModThing::kit, scene.kits, laid.kits);
     return laid;
+}
+
+namespace {
+
+constexpr const char* k_scripts_how = "enable_mod with scripts: true allows them. A script is a program with your own rights on this "
+                                      "machine: allow only a mod you trust";
+
+// The world's folder as the machine's list names it: whole, from the root, in one spelling. Nothing when it has none.
+std::optional<std::string> allowed_world(const std::filesystem::path& world_folder) {
+    std::error_code error;
+    const std::filesystem::path whole = std::filesystem::weakly_canonical(std::filesystem::absolute(world_folder, error), error);
+    if (error || whole.empty()) {
+        return std::nullopt;
+    }
+    std::optional<std::string> text = text_of(whole);
+    if (!text || text->empty() || text->size() > world::k_max_allowed_world_bytes) {
+        return std::nullopt;
+    }
+    return MeshLibrary::normalize(*text);
+}
+
+// The machine's list (none there: empty). What is wrong with it, or nothing.
+std::optional<std::string> read_allowed(const std::filesystem::path& file, std::vector<world::ModScriptsAllowed>& out) {
+    out.clear();
+    if (file.empty() || is_absent(file)) {
+        return std::nullopt;
+    }
+    const std::string name = text_of(file).value_or("the list of mods whose scripts are allowed");
+    const std::optional<std::string> text = read_text_file(file, world::k_max_mods_scripts_allowed_bytes);
+    if (!text) {
+        return name + " could not be read";
+    }
+    if (const auto bad = world::load_mods_scripts_allowed(*text, out)) {
+        out.clear();
+        return name + ": " + bad->message;
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+bool mod_scripts_allowed(const std::filesystem::path& allowed_file, const std::filesystem::path& world_folder, const std::string& id) {
+    std::vector<world::ModScriptsAllowed> allowed;
+    const std::optional<std::string> world = allowed_world(world_folder);
+    return world && !read_allowed(allowed_file, allowed) && std::binary_search(allowed.begin(), allowed.end(), world::ModScriptsAllowed{*world, id});
+}
+
+std::optional<std::string> allow_mod_scripts(const std::filesystem::path& allowed_file, const std::filesystem::path& world_folder,
+                                             const std::string& id, bool allow) {
+    if (!world::mod_id_ok(id)) {
+        return "\"" + id + "\" is no mod's id";
+    }
+    if (allowed_file.empty()) {
+        return allow ? std::optional<std::string>("this editor has no settings folder to keep which mods' scripts are allowed in: none can be")
+                     : std::nullopt;
+    }
+    std::vector<world::ModScriptsAllowed> allowed;
+    if (const auto bad = read_allowed(allowed_file, allowed)) {
+        return *bad + " (mend it, or delete it: then no mod's scripts are allowed)";
+    }
+    const std::optional<std::string> world = allowed_world(world_folder);
+    if (!world) {
+        return "the world's folder has no path the list of allowed scripts can keep (it is not text, or over " +
+               std::to_string(world::k_max_allowed_world_bytes) + " bytes)";
+    }
+    const world::ModScriptsAllowed one{*world, id};
+    const auto at = std::lower_bound(allowed.begin(), allowed.end(), one);
+    const bool was = at != allowed.end() && *at == one;
+    if (was == allow) {
+        return std::nullopt;
+    }
+    if (allow) {
+        const ModList list = read_mods(world_folder);
+        const auto found = std::find_if(list.mods.begin(), list.mods.end(), [&](const ModList::Found& f) { return f.mod.id == id; });
+        if (found == list.mods.end()) {
+            return "there is no mod \"" + id + "\" there (list_mods shows those there)";
+        }
+        if (found->mod.scripts.empty()) {
+            return "the mod \"" + id + "\" has no scripts (its mod.json names none)";
+        }
+        if (allowed.size() >= world::k_max_mods_scripts_allowed) {
+            return "the list of mods whose scripts are allowed is full (" + std::to_string(world::k_max_mods_scripts_allowed) +
+                   "): take those of worlds long gone out of " + text_of(allowed_file).value_or("it");
+        }
+        allowed.insert(at, one);
+    } else {
+        allowed.erase(at);
+    }
+    std::error_code error;
+    std::filesystem::create_directories(allowed_file.parent_path(), error);
+    if (error || !write_text_file(allowed_file, world::save_mods_scripts_allowed(allowed))) {
+        return text_of(allowed_file).value_or("the list of mods whose scripts are allowed") + " could not be written";
+    }
+    return std::nullopt;
+}
+
+ModsScripts mods_scripts(const std::filesystem::path& world_folder, const ModsLaid& laid, const std::filesystem::path& allowed_file) {
+    ModsScripts out;
+    if (std::all_of(laid.scripts.begin(), laid.scripts.end(), [](const std::string& s) { return s.empty(); })) {
+        return out; // (the usual: nothing is read)
+    }
+    std::vector<world::ModScriptsAllowed> allowed;
+    const std::optional<std::string> list_wrong = read_allowed(allowed_file, allowed);
+    const std::optional<std::string> world = allowed_world(world_folder);
+    for (usize i = 0; i < laid.mods.size() && i < laid.scripts.size(); ++i) {
+        if (laid.scripts[i].empty()) {
+            continue;
+        }
+        const std::string& id = laid.mods[i];
+        const auto not_run = [&](std::string why) { out.not_run.push_back({id, std::move(why)}); };
+        if (std::any_of(laid.applied.problems.begin(), laid.applied.problems.end(), [i](const world::ModProblem& p) { return p.mod == i; })) {
+            not_run("the mod was left out (list_mods: `world.problems`), its scripts with it");
+            continue;
+        }
+        if (list_wrong) {
+            not_run("no mod's scripts are allowed while the list of those allowed cannot be used: " + *list_wrong);
+            continue;
+        }
+        if (!world || !std::binary_search(allowed.begin(), allowed.end(), world::ModScriptsAllowed{*world, id})) {
+            not_run(std::string("its scripts are not allowed on this machine: ") + k_scripts_how);
+            continue;
+        }
+        // (Its folder holds no link: the assembly, and what it loads from beside it, are the folder's own.)
+        const std::filesystem::path folder = mods_folder(world_folder) / id;
+        if (const auto link = link_in(folder)) {
+            not_run(*link);
+            continue;
+        }
+        const std::filesystem::path file = folder / path_from_utf8(laid.scripts[i]);
+        std::error_code error;
+        const std::optional<std::string> text = text_of(file);
+        if (!text || std::filesystem::symlink_status(file, error).type() != std::filesystem::file_type::regular) {
+            not_run("its scripts, " + laid.scripts[i] + ", are not in its folder (build them there)");
+            continue;
+        }
+        out.run.push_back({id, *text});
+    }
+    return out;
 }
 
 ModsLaid::File mod_world_file(const std::filesystem::path& world_folder, const std::string& id) {

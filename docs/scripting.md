@@ -90,6 +90,11 @@ The full sample is `scripts/samples/HelloGiant`. The build puts it in
 - In the editor: the Engine panel shows the loaded scripts with Reload and
   Unload buttons.
 
+A mod can bring scripts too (`docs/mods.md`): they are written the same
+way, run beside these while the mod's world is open, and only after the
+person at the machine has allowed that mod's scripts. `load_scripts` and
+`unload_scripts` leave them alone; `get_scripts` lists them under `mods`.
+
 Reloading: rebuild the assembly (`dotnet build`) and load it again. The old
 scripts get `OnStop`, their load context is unloaded, and the new ones start.
 The file is read into memory, so it can be rebuilt while it runs. If
@@ -105,8 +110,11 @@ scripts and the editor keep running.
 `engine/script` starts .NET inside the engine process through `hostfxr` (the
 official hosting API; no SDK headers are needed to build the engine), loads
 `Giant.Scripting.dll` from the `managed` folder next to the editor, and calls
-its `[UnmanagedCallersOnly]` entry points. Script assemblies load into a
-collectible `AssemblyLoadContext` that shares the engine's API assembly.
+its `[UnmanagedCallersOnly]` entry points. Each script assembly loads into
+its own collectible `AssemblyLoadContext` that shares the engine's API
+assembly: the one `load_scripts` loaded, and one for each mod's scripts
+added beside it (`ScriptHost::add_scripts`), each with its own queue for
+`await`, so one is unloaded without the others.
 
 .NET can start only once per process. Under ThreadSanitizer the .NET tests
 are skipped (it cannot follow .NET's threads); under AddressSanitizer they

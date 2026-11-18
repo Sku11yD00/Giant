@@ -23,6 +23,7 @@ using Json = nlohmann::ordered_json;
 
 constexpr const char* k_mod_format = "giant-mod";
 constexpr const char* k_mods_format = "giant-mods";
+constexpr const char* k_scripts_allowed_format = "giant-mods-scripts";
 constexpr int k_version = 1;
 constexpr u32 k_max_version_part = 999999;
 
@@ -42,9 +43,9 @@ bool plain_text(std::string_view text, bool lines) {
 
 // The text parsed as an object of `format`, with only the keys named.
 std::optional<LoadError> parse_object(std::string_view text, const char* format, const char* what,
-                                      std::initializer_list<std::string_view> keys, Json& out) {
-    if (text.size() > k_max_mod_file_bytes) {
-        return bad(std::string(what) + " is over " + std::to_string(k_max_mod_file_bytes) + " bytes");
+                                      std::initializer_list<std::string_view> keys, Json& out, usize max_bytes = k_max_mod_file_bytes) {
+    if (text.size() > max_bytes) {
+        return bad(std::string(what) + " is over " + std::to_string(max_bytes) + " bytes");
     }
     out = Json::parse(text, nullptr, false);
     if (out.is_discarded()) {
@@ -206,6 +207,19 @@ std::optional<std::string> check_mod(const Mod& mod) {
             return where + ": \"" + mod.after[i] + "\" is named twice (a mod that is needed is loaded before already)";
         }
     }
+    if (!mod.scripts.empty()) {
+        const std::string rule = " (the path of a .dll in the mod's own folder, like \"scripts/MyMod.dll\")";
+        if (mod.scripts.size() > k_max_mod_scripts_bytes) {
+            return "scripts: must be at most " + std::to_string(k_max_mod_scripts_bytes) + " bytes" + rule;
+        }
+        if (!mod.scripts.ends_with(".dll") || mod.scripts.size() == 4 || mod.scripts[mod.scripts.size() - 5] == '/') {
+            return "scripts: must name a .dll" + rule;
+        }
+        // (Held to the mod's folder as its other files are.)
+        if (const auto wrong = check_mod_file_path(std::string(k_mod_file_prefix) + mod.scripts)) {
+            return "scripts: " + wrong->substr(0, wrong->find(" (")) + rule;
+        }
+    }
     return std::nullopt;
 }
 
@@ -231,13 +245,16 @@ std::string save_mod(const Mod& mod) {
     if (!mod.after.empty()) {
         json["after"] = mod.after;
     }
+    if (!mod.scripts.empty()) {
+        json["scripts"] = mod.scripts;
+    }
     return json.dump(2, ' ', false, Json::error_handler_t::replace) + "\n";
 }
 
 std::optional<LoadError> load_mod(std::string_view text, Mod& out) {
     Json json;
     if (auto error = parse_object(text, k_mod_format, "the mod's mod.json",
-                                  {"id", "name", "version", "author", "description", "needs", "after"}, json)) {
+                                  {"id", "name", "version", "author", "description", "needs", "after", "scripts"}, json)) {
         return error;
     }
     Mod mod;
@@ -300,10 +317,84 @@ std::optional<LoadError> load_mod(std::string_view text, Mod& out) {
             mod.after.push_back((*after)[i].get<std::string>());
         }
     }
+    if (auto error = read_string(json, "scripts", false, mod.scripts)) {
+        return error;
+    }
+    if (json.contains("scripts") && mod.scripts.empty()) {
+        return bad("scripts: names no file (leave it out when the mod has no scripts)");
+    }
     if (const auto wrong = check_mod(mod)) {
         return bad(*wrong);
     }
     out = std::move(mod);
+    return std::nullopt;
+}
+
+namespace {
+bool allowed_ok(const ModScriptsAllowed& one) {
+    return !one.world.empty() && one.world.size() <= k_max_allowed_world_bytes && plain_text(one.world, false) && mod_id_ok(one.mod);
+}
+} // namespace
+
+std::string save_mods_scripts_allowed(std::span<const ModScriptsAllowed> allowed) {
+    std::vector<ModScriptsAllowed> sorted;
+    for (const ModScriptsAllowed& one : allowed) {
+        if (allowed_ok(one)) {
+            sorted.push_back(one);
+        }
+    }
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    if (sorted.size() > k_max_mods_scripts_allowed) {
+        sorted.resize(k_max_mods_scripts_allowed);
+    }
+    Json list = Json::array();
+    for (const ModScriptsAllowed& one : sorted) {
+        list.push_back({{"world", one.world}, {"mod", one.mod}});
+    }
+    const Json json = {{"format", k_scripts_allowed_format}, {"format_version", k_version}, {"allowed", std::move(list)}};
+    return json.dump(2, ' ', false, Json::error_handler_t::replace) + "\n";
+}
+
+std::optional<LoadError> load_mods_scripts_allowed(std::string_view text, std::vector<ModScriptsAllowed>& out) {
+    Json json;
+    if (auto error = parse_object(text, k_scripts_allowed_format, "the list of mods whose scripts are allowed", {"allowed"}, json,
+                                  k_max_mods_scripts_allowed_bytes)) {
+        return error;
+    }
+    const auto allowed = json.find("allowed");
+    if (allowed == json.end() || !allowed->is_array() || allowed->size() > k_max_mods_scripts_allowed) {
+        return bad("allowed: must be an array of at most " + std::to_string(k_max_mods_scripts_allowed) + " {world, mod}");
+    }
+    std::vector<ModScriptsAllowed> list;
+    for (usize i = 0; i < allowed->size(); ++i) {
+        const Json& a = (*allowed)[i];
+        const std::string where = "allowed[" + std::to_string(i) + "]";
+        if (!a.is_object()) {
+            return bad(where + ": must be an object {world, mod}");
+        }
+        for (const auto& [key, value] : a.items()) {
+            if (key != "world" && key != "mod") {
+                return bad(where + "." + shown_key(key) + ": unknown key");
+            }
+        }
+        const auto world = a.find("world");
+        const auto mod = a.find("mod");
+        if (world == a.end() || !world->is_string() || mod == a.end() || !mod->is_string()) {
+            return bad(where + ": must have `world` (the world's folder) and `mod` (the mod's id), both text");
+        }
+        ModScriptsAllowed one{world->get<std::string>(), mod->get<std::string>()};
+        if (!allowed_ok(one)) {
+            return bad(where + ": `world` must be a folder's path of 1 to " + std::to_string(k_max_allowed_world_bytes) +
+                       " bytes on one line, and `mod` a mod's id");
+        }
+        list.push_back(std::move(one));
+    }
+    std::sort(list.begin(), list.end());
+    if (std::adjacent_find(list.begin(), list.end()) != list.end()) {
+        return bad("allowed: one is there twice");
+    }
+    out = std::move(list);
     return std::nullopt;
 }
 

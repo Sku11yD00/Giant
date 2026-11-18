@@ -58,8 +58,9 @@ public:
     ScriptHost(const ScriptHost&) = delete;
     ScriptHost& operator=(const ScriptHost&) = delete;
 
-    // Loads a script assembly (replacing any loaded one, which is stopped
-    // and unloaded first) and starts its scripts. False on failure (logged).
+    // Loads a script assembly (replacing the one loaded before, which is
+    // stopped and unloaded first; those added stay) and starts its scripts.
+    // False on failure (logged).
     [[nodiscard]] bool load_scripts(const std::filesystem::path& assembly);
     // Calls OnUpdate on every running script.
     void update(float delta_seconds);
@@ -69,9 +70,17 @@ public:
     // k_most_person_events a call (the rest are not told).
     static constexpr usize k_most_person_events = 1024;
     void person_events(std::span<const PersonEvent> events);
-    // Stops and unloads the loaded scripts, if any.
+    // Stops and unloads the loaded scripts, if any (not those added).
     void unload_scripts();
-    // Scripts running now (a script that threw is stopped and not counted).
+    // Loads another script assembly beside those loaded (a mod's scripts)
+    // and starts its scripts; the others run on. Each assembly is on its
+    // own: unloaded apart, its awaits its own. False on failure (logged);
+    // at most 256 added at a time.
+    [[nodiscard]] bool add_scripts(const std::filesystem::path& assembly);
+    // Stops and unloads every assembly add_scripts added (last added first),
+    // leaving the one load_scripts loaded.
+    void unload_added_scripts();
+    // Scripts running now, of every assembly (a script that threw is stopped and not counted).
     u32 running_scripts() const;
 
     // A function of another C# assembly, for parts of the editor written in

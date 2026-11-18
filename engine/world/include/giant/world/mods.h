@@ -26,6 +26,7 @@ constexpr usize k_max_mod_id_bytes = 64;
 constexpr usize k_max_mod_needs = 32;         // and as many `after`
 constexpr usize k_max_mod_text_bytes = 2048;  // a description
 constexpr usize k_max_mod_file_bytes = 65536; // a manifest, or the list of those on
+constexpr usize k_max_mod_scripts_bytes = 256; // the path of a mod's scripts
 
 // A version as people write it: "1.4.2" (each part 0 to 999999, written without a 0 before it).
 struct ModVersion {
@@ -49,6 +50,10 @@ struct Mod {
     std::string description; // at most k_max_mod_text_bytes; no control characters but new lines and tabs
     std::vector<ModNeed> needs;     // each id once, never its own; loaded before it
     std::vector<std::string> after; // mods it loads after when they are on (need not be there); each once, none it needs
+    // Its scripts (part 3d): a C# assembly in its own folder, by its path there ("scripts/MyMod.dll": a .dll,
+    // under the rules of a mod's own files, check_mod_file_path), or none. Scripts are programs: they run
+    // only where the person at the machine allowed them (ModScriptsAllowed).
+    std::string scripts;
     bool operator==(const Mod&) const = default;
 };
 
@@ -83,6 +88,24 @@ std::optional<LoadError> load_enabled_mods(std::string_view text, ModsOn& out);
 std::optional<u32> find_mod_slot(const ModsOn& on, std::string_view id);
 // The mod's slot, given now when it had none (the lowest free); nothing when none is free.
 std::optional<u32> give_mod_slot(ModsOn& on, std::string_view id);
+
+// A mod whose scripts may run on this machine. A script is a program with
+// the person's own rights, so that is theirs to say, and it is kept with
+// the machine (the editor's settings folder), never with the world: a
+// world got from someone else runs nothing until it is allowed here.
+struct ModScriptsAllowed {
+    std::string world; // the world's folder, as the editor names it (whole, from the root): 1 to k_max_allowed_world_bytes
+    std::string mod;   // the mod's id
+    auto operator<=>(const ModScriptsAllowed&) const = default;
+};
+constexpr usize k_max_mods_scripts_allowed = 1024;
+constexpr usize k_max_allowed_world_bytes = 1024;
+constexpr usize k_max_mods_scripts_allowed_bytes = usize{4} << 20; // the file
+// JSON text (format "giant-mods-scripts"), sorted, each once, with a trailing newline. (Leaves out what
+// would not load: one past the most, a world's folder that is empty or too long, an id that is none.)
+std::string save_mods_scripts_allowed(std::span<const ModScriptsAllowed> allowed);
+// Replaces `out` only on success; strict. Sorted.
+std::optional<LoadError> load_mods_scripts_allowed(std::string_view text, std::vector<ModScriptsAllowed>& out);
 
 // Why a mod that is on is not loaded.
 struct ModProblem {

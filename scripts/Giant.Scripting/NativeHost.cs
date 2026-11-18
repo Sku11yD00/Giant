@@ -48,13 +48,13 @@ internal unsafe struct NativePersonEvent
 public static unsafe class NativeHost
 {
     private static NativeApi s_api;
+    // The assembly loaded by LoadScripts (one: loading another replaces it).
     private static ScriptSet? s_scripts;
+    // Those added beside it by AddScripts (mods' scripts), in the order added.
+    private static readonly List<ScriptSet> s_added = new();
     private static int s_mainThread;
     // True while script code runs; scripts cannot load or unload scripts.
     private static bool s_busy;
-    // Where `await` in a script resumes: queued, then run on the main thread
-    // at the start of the next update. One per load, closed on unload.
-    private static MainThreadContext? s_context;
 
     /// <summary>Receives the engine's functions; 0 on success.</summary>
     [UnmanagedCallersOnly]
@@ -88,8 +88,7 @@ public static unsafe class NativeHost
             UnloadCurrent();
             string path = Marshal.PtrToStringUTF8((IntPtr)pathUtf8) ?? "";
             s_scripts = ScriptSet.Load(path);
-            s_context = new MainThreadContext();
-            RunScripts(s_scripts.Start);
+            RunScripts(s_scripts, static (scripts, _) => scripts.Start(), 0f);
             return 0;
         }
         catch (Exception e)
@@ -100,22 +99,80 @@ public static unsafe class NativeHost
         }
     }
 
+    /// <summary>
+    /// Loads a script assembly beside those loaded (a mod's scripts) and starts
+    /// its scripts; 0 on success, otherwise logged (the others run on).
+    /// </summary>
+    [UnmanagedCallersOnly]
+    public static int AddScripts(byte* pathUtf8)
+    {
+        if (s_busy)
+        {
+            Log(3, "scripts cannot load scripts while they run");
+            return 1;
+        }
+        if (s_added.Count >= MostAdded)
+        {
+            Log(3, $"at most {MostAdded} script assemblies can be added");
+            return 1;
+        }
+        try
+        {
+            string path = Marshal.PtrToStringUTF8((IntPtr)pathUtf8) ?? "";
+            ScriptSet added = ScriptSet.Load(path);
+            s_added.Add(added);
+            RunScripts(added, static (scripts, _) => scripts.Start(), 0f);
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Log(3, "could not load scripts: " + e);
+            return 1;
+        }
+    }
+
+    private const int MostAdded = 256; // (as many as a world has mods)
+
+    /// <summary>Stops and unloads the assemblies AddScripts added (not the one LoadScripts loaded).</summary>
+    [UnmanagedCallersOnly]
+    public static int UnloadAddedScripts()
+    {
+        if (s_busy)
+        {
+            Log(3, "scripts cannot unload scripts while they run");
+            return 1;
+        }
+        try
+        {
+            UnloadAdded();
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Log(3, "could not unload scripts: " + e);
+            s_added.Clear();
+            return 1;
+        }
+    }
+
     /// <summary>Calls OnUpdate on every running script.</summary>
     [UnmanagedCallersOnly]
     public static int Update(float deltaSeconds)
     {
-        if (s_busy || s_scripts == null)
+        if (s_busy || (s_scripts == null && s_added.Count == 0))
         {
             return 0;
         }
         try
         {
-            // A static lambda with its state passed in: no allocation per frame.
-            RunScripts(static (scripts, delta) =>
+            if (s_scripts != null)
             {
-                s_context?.Drain(); // continuations of earlier awaits first
-                scripts.Update(delta);
-            }, s_scripts, deltaSeconds);
+                RunScripts(s_scripts, s_update, deltaSeconds);
+            }
+            for (int i = 0; i < s_added.Count; i++)
+            {
+                RunScripts(s_added[i], s_update, deltaSeconds);
+            }
             return 0;
         }
         catch (Exception e)
@@ -130,6 +187,29 @@ public static unsafe class NativeHost
     private static int s_eventCount;
     private static readonly NameCache s_names = new();
 
+    // (Made once: nothing allocates per frame.)
+    private static readonly Action<ScriptSet, float> s_update = static (scripts, delta) =>
+    {
+        scripts.Context.Drain(); // continuations of earlier awaits first
+        scripts.Update(delta);
+    };
+
+    private static readonly Action<ScriptSet, float> s_tellEvents = static (scripts, _) =>
+    {
+        for (int i = 0; i < s_eventCount; i++)
+        {
+            ref readonly NativePersonEvent e = ref s_events[i];
+            // Names seen before are the same strings again: nothing allocates for them.
+            var told = new PersonEvent(
+                e.Person,
+                s_names.Get(e.Behaviour, e.BehaviourLength),
+                s_names.Get(e.From, e.FromLength),
+                s_names.Get(e.To, e.ToLength),
+                e.Seconds);
+            scripts.PersonEvent(in told);
+        }
+    };
+
     /// <summary>Calls OnPersonEvent on every running script, for each event in order.</summary>
     [UnmanagedCallersOnly]
     public static int PersonEvents(void* events, int count, int size)
@@ -138,7 +218,7 @@ public static unsafe class NativeHost
         {
             return 1; // engine and API built from different sources
         }
-        if (s_busy || s_scripts == null || count <= 0)
+        if (s_busy || (s_scripts == null && s_added.Count == 0) || count <= 0)
         {
             return 0;
         }
@@ -146,22 +226,15 @@ public static unsafe class NativeHost
         {
             s_events = (NativePersonEvent*)events;
             s_eventCount = count;
-            // A static lambda with its state passed in: no allocation per call.
-            RunScripts(static (scripts, _) =>
+            // (Each assembly hears all of them in order, one assembly after another.)
+            if (s_scripts != null)
             {
-                for (int i = 0; i < s_eventCount; i++)
-                {
-                    ref readonly NativePersonEvent e = ref s_events[i];
-                    // Names seen before are the same strings again: nothing allocates for them.
-                    var told = new PersonEvent(
-                        e.Person,
-                        s_names.Get(e.Behaviour, e.BehaviourLength),
-                        s_names.Get(e.From, e.FromLength),
-                        s_names.Get(e.To, e.ToLength),
-                        e.Seconds);
-                    scripts.PersonEvent(in told);
-                }
-            }, s_scripts, 0f);
+                RunScripts(s_scripts, s_tellEvents, 0f);
+            }
+            for (int i = 0; i < s_added.Count; i++)
+            {
+                RunScripts(s_added[i], s_tellEvents, 0f);
+            }
             return 0;
         }
         catch (Exception e)
@@ -190,7 +263,15 @@ public static unsafe class NativeHost
 
     /// <summary>Scripts currently running (not stopped by an error).</summary>
     [UnmanagedCallersOnly]
-    public static int RunningScriptCount() => s_scripts?.RunningCount ?? 0;
+    public static int RunningScriptCount()
+    {
+        int running = s_scripts?.RunningCount ?? 0;
+        for (int i = 0; i < s_added.Count; i++)
+        {
+            running += s_added[i].RunningCount;
+        }
+        return running;
+    }
 
     internal static (bool Ok, string Reply) Execute(string command, string argsJson)
     {
@@ -233,16 +314,15 @@ public static unsafe class NativeHost
         }
     }
 
-    private static void RunScripts(Action action) => RunScripts(static (a, _) => a(), action, 0);
-
-    private static void RunScripts<T>(Action<T, float> action, T state, float value)
+    // Runs code of one assembly's scripts: awaits in it come back through that assembly's own context.
+    private static void RunScripts(ScriptSet scripts, Action<ScriptSet, float> action, float value)
     {
         SynchronizationContext? previous = SynchronizationContext.Current;
-        SynchronizationContext.SetSynchronizationContext(s_context);
+        SynchronizationContext.SetSynchronizationContext(scripts.Context);
         s_busy = true;
         try
         {
-            action(state, value);
+            action(scripts, value);
         }
         finally
         {
@@ -276,13 +356,64 @@ public static unsafe class NativeHost
         }
         WeakReference context = StopAndRelease(scripts);
         scripts = null;
-        // Let the collectible context go, so a rebuilt assembly can load.
-        for (int i = 0; i < 10 && context.IsAlive; i++)
+        LetGo(context, null);
+    }
+
+    private static void UnloadAdded()
+    {
+        if (s_added.Count == 0)
+        {
+            return;
+        }
+        var contexts = new List<WeakReference>();
+        StopAndReleaseAdded(contexts);
+        LetGo(null, contexts);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)] // no references left in the caller's frame
+    private static void StopAndReleaseAdded(List<WeakReference> contexts)
+    {
+        // (Taken out of the list first, so nothing reaches a half-stopped set; last added, first stopped.)
+        ScriptSet[] added = s_added.ToArray();
+        s_added.Clear();
+        for (int i = added.Length - 1; i >= 0; i--)
+        {
+            try
+            {
+                contexts.Add(StopAndRelease(added[i]));
+            }
+            catch (Exception e)
+            {
+                Log(3, "could not unload scripts: " + e);
+            }
+            added[i] = null!;
+        }
+    }
+
+    // Lets the collectible contexts go, so a rebuilt assembly can load.
+    private static void LetGo(WeakReference? one, List<WeakReference>? several)
+    {
+        static bool Alive(WeakReference? one, List<WeakReference>? several)
+        {
+            if (one != null && one.IsAlive)
+            {
+                return true;
+            }
+            for (int i = 0; several != null && i < several.Count; i++)
+            {
+                if (several[i].IsAlive)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        for (int i = 0; i < 10 && Alive(one, several); i++)
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
         }
-        if (context.IsAlive)
+        if (Alive(one, several))
         {
             // Something (a static, an event handler, a thread) still holds
             // the old scripts; their memory stays until that lets go.
@@ -296,19 +427,18 @@ public static unsafe class NativeHost
         WeakReference context = null!;
         try
         {
-            RunScripts(() =>
+            RunScripts(scripts, static (stopping, _) =>
             {
-                context = scripts.Stop();
-                s_context?.Drain(); // e.g. an async void OnStop's exception, so it is logged
-            });
+                stopping.StopScripts();
+                stopping.Context.Drain(); // e.g. an async void OnStop's exception, so it is logged
+            }, 0f);
         }
         finally
         {
             // Awaits still pending belong to the old scripts; drop them so
-            // they neither run against the new scripts nor keep the old ones
-            // alive.
-            s_context?.Close();
-            s_context = null;
+            // they neither run later nor keep the old scripts alive.
+            scripts.Context.Close();
+            context = scripts.Unload();
         }
         return context;
     }
@@ -332,12 +462,24 @@ internal sealed class ScriptSet
     private readonly HashSet<Script> _stopped = new();
     private ScriptLoadContext? _context;
 
+    // Where `await` in one of its scripts resumes: queued, then run on the main
+    // thread at the start of the next update. Closed when the set is unloaded.
+    public MainThreadContext Context { get; } = new();
+
     public int RunningCount => _scripts.Count - _stopped.Count;
 
     public static ScriptSet Load(string path)
     {
         var set = new ScriptSet();
-        set.LoadInto(path);
+        try
+        {
+            set.LoadInto(path);
+        }
+        catch
+        {
+            set.Unload(); // (what was loaded of it goes: nothing of it runs)
+            throw;
+        }
         return set;
     }
 
@@ -385,10 +527,11 @@ internal sealed class ScriptSet
         }
     }
 
+    public void StopScripts() => Each("OnStop", static (s, _) => s.OnStop(), 0f);
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    public WeakReference Stop()
+    public WeakReference Unload()
     {
-        Each("OnStop", static (s, _) => s.OnStop(), 0f);
         _scripts.Clear();
         _stopped.Clear();
         var weak = new WeakReference(_context);

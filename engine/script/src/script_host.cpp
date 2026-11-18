@@ -2,6 +2,7 @@
 
 #include "giant/core/assert.h"
 #include "giant/core/log.h"
+#include "giant/core/text_files.h"
 #include "giant/core/text.h"
 
 #include <algorithm>
@@ -186,35 +187,16 @@ Fn symbol(void* library, const char* name) {
     return reinterpret_cast<Fn>(find_symbol(library, name));
 }
 
-// An environment variable as a path; empty when unset. Windows reads the
-// wide value (non-ASCII folders) without the CRT's deprecated getenv.
-std::filesystem::path env_path(const char* name) {
-#if defined(_WIN32)
-    const std::wstring wide(name, name + std::strlen(name));
-    wchar_t* value = nullptr;
-    usize length = 0;
-    std::filesystem::path result;
-    if (_wdupenv_s(&value, &length, wide.c_str()) == 0 && value != nullptr) {
-        result = value;
-    }
-    std::free(value);
-    return result;
-#else
-    const char* value = std::getenv(name);
-    return value != nullptr ? std::filesystem::path(value) : std::filesystem::path();
-#endif
-}
-
 } // namespace
 
 std::filesystem::path find_dotnet_root() {
     std::error_code error;
-    if (auto env = env_path("DOTNET_ROOT"); !env.empty()) {
+    if (auto env = environment_path("DOTNET_ROOT"); !env.empty()) {
         return env;
     }
     std::vector<std::filesystem::path> candidates;
 #if defined(_WIN32)
-    if (auto program_files = env_path("ProgramFiles"); !program_files.empty()) {
+    if (auto program_files = environment_path("ProgramFiles"); !program_files.empty()) {
         candidates.emplace_back(program_files / "dotnet");
     }
     candidates.emplace_back("C:/Program Files/dotnet");
@@ -223,7 +205,7 @@ std::filesystem::path find_dotnet_root() {
 #else
     candidates = {"/usr/lib/dotnet", "/usr/share/dotnet", "/usr/local/share/dotnet",
                   "/opt/dotnet"};
-    if (auto home = env_path("HOME"); !home.empty()) {
+    if (auto home = environment_path("HOME"); !home.empty()) {
         candidates.emplace_back(home / ".dotnet");
     }
     const char* exe = "dotnet";
@@ -235,7 +217,7 @@ std::filesystem::path find_dotnet_root() {
         }
     }
     // Last, the folder of `dotnet` on the PATH (following symlinks).
-    if (const auto path = env_path("PATH"); !path.empty()) {
+    if (const auto path = environment_path("PATH"); !path.empty()) {
         const auto all = path.native();
         usize start = 0;
         while (start <= all.size()) {
@@ -259,6 +241,8 @@ struct ScriptHost::Api {
     int (*load_scripts)(const char* path) = nullptr;
     int (*update)(float delta_seconds) = nullptr;
     int (*unload_scripts)() = nullptr;
+    int (*add_scripts)(const char* path) = nullptr;
+    int (*unload_added_scripts)() = nullptr;
     int (*running_script_count)() = nullptr;
     int (*person_events)(const NativePersonEvent* events, int count, int size) = nullptr;
     // What person_events hands over: made once, and grown to the most ever told at a time.
@@ -360,6 +344,8 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
     get(GIANT_NAME("LoadScripts"), api->load_scripts);
     get(GIANT_NAME("Update"), api->update);
     get(GIANT_NAME("UnloadScripts"), api->unload_scripts);
+    get(GIANT_NAME("AddScripts"), api->add_scripts);
+    get(GIANT_NAME("UnloadAddedScripts"), api->unload_added_scripts);
     get(GIANT_NAME("RunningScriptCount"), api->running_script_count);
     get(GIANT_NAME("PersonEvents"), api->person_events);
 #undef GIANT_NAME
@@ -381,6 +367,7 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
 }
 
 ScriptHost::~ScriptHost() {
+    unload_added_scripts();
     unload_scripts();
     g_commands = nullptr;
 }
@@ -428,6 +415,12 @@ void ScriptHost::person_events(std::span<const PersonEvent> events) {
 }
 
 void ScriptHost::unload_scripts() { m_api->unload_scripts(); }
+
+bool ScriptHost::add_scripts(const std::filesystem::path& assembly) {
+    return m_api->add_scripts(path_to_utf8(assembly).c_str()) == 0;
+}
+
+void ScriptHost::unload_added_scripts() { m_api->unload_added_scripts(); }
 
 void* ScriptHost::function(const std::filesystem::path& assembly, std::string_view type, std::string_view method) {
     // (ASCII names: each character is itself in the host's character type.)

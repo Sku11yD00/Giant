@@ -164,6 +164,46 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     GIANT_CHECK(host->load_scripts(scripts)); // (all running again for what follows)
     calls.clear();
 
+    // Assemblies added beside it (mods' scripts): each started, told and unloaded on its own.
+    const auto count = [&calls](const std::string& needle) {
+        usize found = 0;
+        for (const auto& call : calls) {
+            found += call.find(needle) != std::string::npos ? usize{1} : usize{0};
+        }
+        return found;
+    };
+    GIANT_CHECK(host->add_scripts(scripts) && host->running_scripts() == 16 && count("\"what\":\"start\"") == 1);
+    GIANT_CHECK(host->add_scripts(scripts) && host->running_scripts() == 24 && count("\"what\":\"start\"") == 2);
+    calls.clear();
+    {
+        const PersonEvent events[] = {{11, "b", "x", "y", 0.0}};
+        host->person_events(events);
+    }
+    GIANT_CHECK(count("\"what\":\"person\",\"person\":11") == 3); // (the Listener of each)
+    // One that cannot be loaded leaves the rest running.
+    set_console_logging(false);
+    GIANT_CHECK(!host->add_scripts("does/not/exist.dll") && host->running_scripts() == 24);
+    set_console_logging(true);
+    // The one loaded is replaced without those added, and those added go without it.
+    calls.clear();
+    GIANT_CHECK(host->load_scripts(scripts) && host->running_scripts() == 24 && count("\"what\":\"stop\"") == 1 &&
+                count("\"what\":\"start\"") == 1);
+    calls.clear();
+    host->unload_added_scripts();
+    GIANT_CHECK(host->running_scripts() == 8 && count("\"what\":\"stop\"") == 2);
+    host->unload_added_scripts(); // (none: nothing to do)
+    // Added with none loaded, they run all the same.
+    host->unload_scripts();
+    calls.clear();
+    GIANT_CHECK(host->add_scripts(scripts) && host->running_scripts() == 8);
+    set_console_logging(false);
+    host->update(0.016f);
+    set_console_logging(true);
+    GIANT_CHECK(has("\"frame\":1"));
+    host->unload_added_scripts();
+    GIANT_CHECK(host->running_scripts() == 0 && host->load_scripts(scripts));
+    calls.clear();
+
     host->unload_scripts();
     GIANT_CHECK(host->running_scripts() == 0);
     // Old assemblies were really unloaded (nothing kept them alive).

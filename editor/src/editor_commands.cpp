@@ -284,7 +284,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     add(registry,
         {"load_scripts",
          "Loads a compiled C# script assembly (.dll built against Giant.Scripting) and starts its "
-         "scripts; replaces any loaded scripts (they get OnStop first). Rebuild the .dll and call "
+         "scripts; replaces the assembly loaded before (its scripts get OnStop first; the open world's mods' scripts run on). Rebuild the .dll and call "
          "this again to reload. Scripts change the scene through commands, but as game logic: "
          "their changes are not added to the undo history. Check get_log afterwards for script "
          "errors.",
@@ -308,7 +308,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
          }});
 
     add(registry,
-        {"unload_scripts", "Stops (OnStop) and unloads the loaded C# scripts.",
+        {"unload_scripts", "Stops (OnStop) and unloads the loaded C# scripts (not those of the open world's mods: they go when the world is closed, or the mod's scripts are no longer allowed and the world is opened again).",
          Json{{"type", "object"}, {"additionalProperties", false}}, false,
          [&state](const Json&, CommandContext&) {
              state.scripts_unload_requested = true;
@@ -318,11 +318,13 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
 
     add(registry,
         {"get_scripts",
-         "Reports the loaded C# script assembly and how many of its scripts are running (a "
-         "script that throws is stopped and logged).",
+         "Reports the loaded C# script assembly, the open world's mods whose scripts are loaded beside it (`mods`: "
+         "ids, in the order loaded; list_mods `world.scripts` tells which were to run and which not, with why) and how many "
+         "scripts are running in all (a script that throws is stopped and logged).",
          Json{{"type", "object"}, {"additionalProperties", false}}, true,
          [&state](const Json&, CommandContext&) {
              return CommandResult::success({{"loaded", state.scripts_loaded},
+                                            {"mods", state.mods_scripts_loaded},
                                             {"running", state.scripts_running},
                                             {"dotnet_available", state.dotnet_available}});
          }});

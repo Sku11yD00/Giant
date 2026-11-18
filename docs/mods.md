@@ -6,8 +6,8 @@ who make mods and people who install them.
 
 So far a mod can change a world's places, the looks of its people, their
 routines and their behaviours, its kits, and bring people of its own,
-with its own art files. Scripts are the part still being built; this
-page will grow with them.
+with its own art files. A mod can also bring scripts (C# game logic),
+which run only once you have allowed them on your machine.
 
 ## Where mods go
 
@@ -22,6 +22,7 @@ my_world/
     winter/
       mod.json            the mod's manifest
       world.json          what it changes of the world (optional)
+      scripts/Winter.dll  its scripts (optional)
     better_roads/
       mod.json
 ```
@@ -43,7 +44,8 @@ must be a real folder, not a link to one.
   "author": "Someone",
   "description": "Snow on everything, and frozen lakes.",
   "needs": [{"id": "better_roads", "at_least": "2.0.0"}],
-  "after": ["lanterns"]
+  "after": ["lanterns"],
+  "scripts": "scripts/Winter.dll"
 }
 ```
 
@@ -56,6 +58,7 @@ must be a real folder, not a link to one.
 | `author`, `description` | no | For people: plain text, the author one line of at most 128 bytes |
 | `needs` | no | Mods this one cannot work without. Each has an `id` and may have `at_least`, the oldest version that will do. They load before this mod |
 | `after` | no | Mods this one loads after when they are on. It works without them |
+| `scripts` | no | The mod's scripts: a `.dll` in the mod's folder, by its path there (see Scripts below) |
 
 A key the engine does not know is an error, so a typing mistake is told
 to you instead of being ignored.
@@ -273,6 +276,62 @@ If you close a world (`close_world`) the scene keeps what the mods
 brought, as plain things: saved as a new world, they would be that
 world's own.
 
+## Scripts
+
+A mod's scripts are C# game logic, written and built exactly as a
+world's own are (`docs/scripting.md`): a class library that references
+`Giant.Scripting`, with `Script` subclasses in it. Build it into the
+mod's folder and name the `.dll` in `mod.json`:
+
+```json
+"scripts": "scripts/Winter.dll"
+```
+
+The path is one inside the mod's folder, under the rules of a mod's own
+files (no `..`, drive, root or backslash), and at most 256 bytes. Other
+libraries the scripts use go beside the `.dll`.
+
+While the world is open, every loaded mod's scripts run beside the
+world's own, each mod's apart from the others: they start when the world
+is opened (in the load order), and stop when it is closed or opened
+again. They reach the engine only through commands, like every script,
+so they can place the mod's kits, send its people about, and hear what
+people do (`OnPersonEvent`). `load_scripts` and `unload_scripts` do not
+touch them; `get_scripts` lists the mods whose scripts are loaded.
+
+### Scripts must be allowed first
+
+**A script is a program. It runs with your own rights on your machine:
+it can read and write your files and use the network, not only change
+the game.** Art and a `world.json` cannot do that, which is why a mod's
+scripts are treated differently from the rest of it:
+
+- Turning a mod on does not run its scripts. They run only after you
+  allow them: `enable_mod {"id": "winter", "scripts": true}`.
+- What you allowed is kept on your machine, in the editor's settings
+  (`mods_scripts_allowed.json` in `%APPDATA%\Giant`, or
+  `~/.config/Giant`), for that world's folder and that mod. It is never
+  kept with the world, so a world you got from someone else runs nothing
+  until you allow it yourself, and a world you moved or copied asks
+  again.
+- `{"scripts": false}` takes it back, and so does turning the mod off.
+- After allowing or forbidding, open the world again (`list_mods` says
+  `reopen`).
+
+Allow only a mod whose maker you trust, as you would any program you
+download. If you ask Claude in the Chat panel to turn a mod on, it
+should not allow scripts unless you say so.
+
+`list_mods` tells for each mod with scripts whether they are allowed
+(`scripts_allowed`), and under `world.scripts` which were to `run` as the
+world was opened and which were `not_run`, with why: not allowed, the mod
+was left out, the `.dll` is not there (build it), or the mod's folder
+holds a link (a mod with scripts must be all real files and folders).
+
+Allowing is by folder and id, not by what the `.dll` holds: a mod you
+allowed stays allowed when its files change, so update a mod only from
+where you got it.
+
 ## Turning mods on and off
 
 In the editor (or over MCP, or by asking Claude in the Chat panel):
@@ -285,7 +344,7 @@ In the editor (or over MCP, or by asking Claude in the Chat panel):
   "enabled": false}` turns it off.
 
 Which mods are on is kept in `mods/enabled.json`, so it travels with the
-world.
+world. Whether a mod's scripts may run does not (see Scripts above).
 
 ## Load order
 
@@ -323,7 +382,8 @@ At most 256 mods beside one world: only the first 256 folders in `mods`
 (by name, broken ones included) are looked at, and `list_mods` says
 `too_many` when there are more. A `mod.json` and `enabled.json` are at most
 64 KB each, a name or author at most 128 bytes, a description at most
-2,048 bytes, and a mod names at most 32 `needs` and 32 `after`. A mod's
+2,048 bytes, and a mod names at most 32 `needs` and 32 `after`. One
+script assembly per mod, and at most 1,024 allowed mods on a machine. A mod's
 `world.json` is at most 64 MB, and the world with its mods keeps to a
 world's own limits (65,536 places, 1,024 looks, 1,024 routines, 256
 behaviours).

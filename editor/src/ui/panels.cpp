@@ -1717,6 +1717,13 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
                 run("unload_scripts");
             }
         }
+        // The open world's mods' scripts (loaded with it; allowed by enable_mod).
+        if (!m_state.mods_scripts_loaded.empty()) {
+            ImGui::Text("Mods' scripts (%u running in all):", m_state.scripts_running);
+            for (const std::string& mod : m_state.mods_scripts_loaded) {
+                ImGui::BulletText("%s", mod.c_str());
+            }
+        }
     }
     ImGui::End();
 }

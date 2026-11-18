@@ -438,6 +438,9 @@ Open-world systems:
   so a mod is one folder that can be copied whole.
 - LW7 part 3c: a mod brings kits: one of a name the world has gives every
   placement of it the mod's pieces, any other is added.
+- LW7 part 3d: a mod brings C# scripts, run beside the world's own while
+  it is open, and only once allowed on the machine (a script is a
+  program; `docs/mods.md`).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
