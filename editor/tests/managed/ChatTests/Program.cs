@@ -465,6 +465,9 @@ internal static class Program
         Check(messages.GetArrayLength() == 1 && messages[0].GetProperty("content").ToString().Contains("second", StringComparison.Ordinal), "and only the new message is sent");
         Check(Until(() => !c.Working), "the old conversation's work ends");
         Check(Kinds(c) == "note you claude", "the old work adds nothing: " + Kinds(c));
+        using JsonDocument read = JsonDocument.Parse(c.Read(0, 1, true));
+        Check(read.RootElement.GetProperty("input_tokens").GetInt64() == 10 && read.RootElement.GetProperty("output_tokens").GetInt64() == 5,
+              "the tokens counted are the new conversation's alone");
     }
 
     private static void TheServicesErrorsAreSaid()

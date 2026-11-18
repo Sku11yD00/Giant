@@ -107,6 +107,7 @@ ai::CommandResult ChatBridge::ask(std::string_view what, const ai::Json& args) {
         }
         return ai::CommandResult::success(what == "stop" ? ai::Json{{"stopped", false}} : ai::Json::object());
     }
+    m_stamp.asked(what); // (whatever comes of it: a message refused shows too)
     if (!start()) {
         return ai::CommandResult::failure(m_failed);
     }
@@ -132,7 +133,9 @@ ai::CommandResult ChatBridge::ask(std::string_view what, const ai::Json& args) {
 
 void ChatBridge::update() {
     if (m_started) {
-        m_busy = m_update() != 0;
+        const int now = m_update();
+        m_busy = (now & 1) != 0;
+        m_stamp.updated(now);
     }
 }
 
