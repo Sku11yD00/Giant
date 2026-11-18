@@ -426,6 +426,10 @@ Open-world systems:
   your Claude key: `docs/ai-control.md`.
 - LW6b part 2: the Chat panel: the conversation, a box to write in,
   Stop and Clear.
+- LW6b part 3: the editor asks you before Claude changes anything
+  ("Ask me before changes" in the Chat panel: Allow, Allow everything
+  for this message, or Don't allow), and before any command loads a
+  script file. Only the buttons in the editor's window answer.
 - LW7 part 1: mods as folders beside a world, each with a manifest (id,
   version, the mods it needs), a load order that is the same every time,
   and every problem said (`list_mods`, `enable_mod`; `docs/mods.md`).

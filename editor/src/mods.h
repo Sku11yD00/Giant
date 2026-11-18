@@ -126,13 +126,19 @@ std::optional<std::string> can_allow_mod_scripts(const std::filesystem::path& al
 // never allowed is nothing wrong.
 std::optional<std::string> allow_mod_scripts(const std::filesystem::path& allowed_file, const std::filesystem::path& world_folder,
                                              const std::string& id, bool allow);
-// Who may allow a mod's scripts. A script is a program with the person's
-// rights, so by default it is the person's to say, in the editor's window
-// (`ask`): a command only asks, since a command may come from the chat's
-// AI, an MCP client or a script. `by_command` is for automated runs
-// (--allow-mods-scripts-by-command, tests); `none`: there is no window to
-// ask in, so none can be allowed.
-enum class ModsScriptsConsent { none, ask, by_command };
+// Who may allow scripts to run: a mod's (enable_mod), or a file a command
+// names (load_scripts); each has its own setting. A script is a program
+// with the person's rights, so by default it is the person's to say, in
+// the editor's window (`ask`): a command only asks, since a command may
+// come from the chat's AI, an MCP client or a script. `by_command` is for
+// automated runs (--allow-mods-scripts-by-command,
+// --allow-scripts-by-command, tests); `none`: there is no window to ask
+// in, so none can be allowed.
+enum class ScriptsConsent { none, ask, by_command };
+// Why a command cannot have scripts allowed under ScriptsConsent::none.
+inline constexpr const char* k_no_window_to_ask =
+    "this editor has no window to ask the person in. A script is a program with their rights, so it is theirs "
+    "to allow: they must run the editor with its window and allow it there";
 struct ModsScriptsRequest {
     std::string world; // the world's folder (UTF-8), as the command had it
     std::string mod;

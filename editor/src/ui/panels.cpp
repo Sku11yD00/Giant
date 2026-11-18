@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -38,6 +40,7 @@ constexpr const char* k_chat = "Chat";
 constexpr const char* k_log = "Log";
 constexpr const char* k_commands = "Commands";
 constexpr const char* k_engine = "Engine";
+constexpr float k_question_width = 520.0f; // a question window's (draw_questions)
 
 const char* const k_levels[] = {"trace", "info", "warning", "error"};
 
@@ -112,60 +115,168 @@ void EditorPanels::draw(const FrameInfo& frame) {
     if (m_show_commands) draw_commands();
     if (m_show_engine) draw_engine(frame);
     if (m_show_demo) ImGui::ShowDemoWindow(&m_show_demo);
-    draw_mods_scripts_request();
+    draw_questions();
 
     if (!ImGui::IsAnyItemActive()) {
         ++m_edit_epoch; // the next edit starts a new undo step
     }
 }
 
-// A mod's scripts a command asked to have allowed: the person's to answer, here and nowhere else
-// (not a command: a command may come from the chat's AI, an MCP client or a script).
-void EditorPanels::draw_mods_scripts_request() {
-    if (!m_state.mods_scripts_request) {
-        m_scripts_asked = {};
-        return;
-    }
-    const ModsScriptsRequest request = *m_state.mods_scripts_request;
-    if (!(m_scripts_asked == request)) {
-        m_scripts_asked = request;
-        m_scripts_asked_at = ImGui::GetTime();
-    }
+namespace {
+
+struct QuestionButton {
+    const char* label;
+    bool waits; // a yes: it can be pressed only a moment after the question appeared
+};
+
+// A question put to the person in the middle of the editor's window: `body` draws what is asked,
+// then the buttons. The button pressed (its place), or -1. `ready`: the buttons that wait can be
+// pressed. (It does not take the keyboard or the mouse's click as it appears: what was being
+// typed or pressed elsewhere is not an answer.)
+template <typename Body>
+int question_window(const char* title, const std::string& key, bool ready, const Body& body, std::initializer_list<QuestionButton> buttons) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_Always);
-    bool answered = false, allow = false;
-    // (It does not take the keyboard or the mouse's click as it appears: what was being typed or
-    // pressed elsewhere is not an answer.)
-    if (ImGui::Begin("Allow this mod's scripts?", nullptr,
+    ImGui::SetNextWindowSize(ImVec2(k_question_width, 0.0f), ImGuiCond_Always);
+    int pressed = -1;
+    if (ImGui::Begin(title, nullptr,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
-        ImGui::PushID(request.world.c_str());
-        ImGui::PushID(request.mod.c_str());
-        ImGui::TextWrapped("The mod \"%s\" of the world in", request.mod.c_str());
-        ImGui::TextWrapped("%s", request.world.c_str());
-        ImGui::TextWrapped("wants to run scripts on this machine.");
+        ImGui::PushID(key.c_str());
+        body();
         ImGui::Spacing();
-        ImGui::TextWrapped("A script is a program. It runs with your own rights: it can read and change your files and use the "
-                           "network, not only change the game. Allow it only if you trust who made this mod.");
-        ImGui::Spacing();
-        if (ImGui::Button("Don't allow")) {
-            answered = true;
+        int place = 0;
+        for (const QuestionButton& button : buttons) {
+            if (place > 0) {
+                ImGui::SameLine();
+            }
+            // (Not at once: time to read what is asked, and no click already on its way lands here.)
+            const bool can = ready || !button.waits;
+            ImGui::BeginDisabled(!can);
+            if (ImGui::Button(button.label) && can) {
+                pressed = place;
+            }
+            ImGui::EndDisabled();
+            ++place;
         }
-        ImGui::SameLine();
-        // (Not at once: time to read what is asked, and no click already on its way lands here.)
-        const bool ready = ImGui::GetTime() - m_scripts_asked_at >= k_scripts_ask_seconds;
-        ImGui::BeginDisabled(!ready);
-        if (ImGui::Button("Allow this mod's scripts") && ready) {
-            answered = allow = true;
-        }
-        ImGui::EndDisabled();
-        ImGui::PopID();
         ImGui::PopID();
     }
     ImGui::End();
-    if (answered) {
-        log_info("editor", answer_mods_scripts_request(m_state, allow));
+    return pressed;
+}
+
+} // namespace
+
+// What a command asked the person: theirs to answer, here and nowhere else (not a command: a
+// command may come from the chat's AI, an MCP client or a script). One question at a time.
+void EditorPanels::draw_questions() {
+    const ChatGate::Request* change = m_state.chat_gate.answered() ? nullptr : m_state.chat_gate.request();
+    if (m_state.mods_scripts_request) {
+        draw_mods_scripts_request();
+    } else if (m_state.scripts_request) {
+        draw_scripts_request();
+    } else if (change != nullptr) {
+        draw_chat_request(*change);
+    } else {
+        m_question.clear();
+    }
+}
+
+// Whether the question `key` has been shown for `seconds` (its yes can be pressed then).
+bool EditorPanels::question_ready(const std::string& key, double seconds) {
+    if (m_question != key) {
+        m_question = key;
+        m_question_at = ImGui::GetTime();
+    }
+    return ImGui::GetTime() - m_question_at >= seconds;
+}
+
+namespace {
+constexpr const char* k_script_warning = "A script is a program. It runs with your own rights: it can read and change your files and use the "
+                                         "network, not only change the game.";
+}
+
+// A mod's scripts a command asked to have allowed (EditorState::mods_scripts_request).
+void EditorPanels::draw_mods_scripts_request() {
+    const ModsScriptsRequest request = *m_state.mods_scripts_request;
+    const std::string key = "mod\n" + request.world + "\n" + request.mod;
+    const int pressed = question_window(
+        "Allow this mod's scripts?", key, question_ready(key, k_scripts_ask_seconds),
+        [&request] {
+            ImGui::TextWrapped("The mod \"%s\" of the world in", request.mod.c_str());
+            ImGui::TextWrapped("%s", request.world.c_str());
+            ImGui::TextWrapped("wants to run scripts on this machine.");
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s Allow it only if you trust who made this mod.", k_script_warning);
+        },
+        {{"Don't allow", false}, {"Allow this mod's scripts", true}});
+    if (pressed >= 0) {
+        log_info("editor", answer_mods_scripts_request(m_state, pressed == 1));
+        m_question.clear(); // (asked again, even at once, it is a new question: its yes waits anew)
+    }
+}
+
+// A script file a command asked to load (EditorState::scripts_request).
+void EditorPanels::draw_scripts_request() {
+    const std::string file = *m_state.scripts_request;
+    const std::string key = "scripts\n" + file;
+    const int pressed = question_window(
+        "Load these scripts?", key, question_ready(key, k_scripts_ask_seconds),
+        [&file] {
+            ImGui::TextWrapped("A command asked the editor to load and run the scripts in");
+            ImGui::TextWrapped("%s", file.c_str());
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s Load it only if it is yours, or you trust who made it. Once you allow it, this file can be "
+                               "loaded again without asking until you close the editor.",
+                               k_script_warning);
+        },
+        {{"Don't load", false}, {"Load these scripts", true}});
+    if (pressed >= 0) {
+        log_info("editor", answer_scripts_request(m_state, pressed == 1));
+        m_question.clear();
+    }
+}
+
+// A command of Claude's that changes something, held until the person has answered (ChatGate).
+void EditorPanels::draw_chat_request(const ChatGate::Request& request) {
+    const std::string key = "chat\n" + std::to_string(request.serial);
+    const bool ready = question_ready(key, k_change_ask_seconds);
+    if (m_change_measured != request.serial) {
+        // (Once a question, not every frame: the arguments may be long.)
+        m_change_measured = request.serial;
+        const float wrap = k_question_width - 2.0f * ImGui::GetStyle().WindowPadding.x - ImGui::GetStyle().ScrollbarSize -
+                           2.0f * ImGui::GetStyle().FramePadding.x;
+        m_change_height = std::min(ImGui::CalcTextSize(request.args.c_str(), nullptr, false, wrap).y + 2.0f * ImGui::GetStyle().WindowPadding.y, 260.0f);
+    }
+    const float height = m_change_height;
+    const int pressed = question_window(
+        "Let Claude do this?", key, ready,
+        [&request, height] {
+            ImGui::TextWrapped("Claude wants to run the command");
+            ImGui::TextColored({0.55f, 0.8f, 1.0f, 1.0f}, "%s", request.command.c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", request.about.c_str());
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+            ImGui::TextUnformatted("with:");
+            // (All of it can be read: scrolled when it is long.)
+            if (ImGui::BeginChild("args", ImVec2(0.0f, height), ImGuiChildFlags_Borders)) {
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextUnformatted(request.args.c_str());
+                ImGui::PopTextWrapPos();
+            }
+            ImGui::EndChild();
+            if (request.args_hidden > 0) {
+                ImGui::TextColored(level_color(LogLevel::warning), "The rest is too long to show here: %llu more bytes.",
+                                   static_cast<unsigned long long>(request.args_hidden));
+            }
+            ImGui::Spacing();
+            ImGui::TextWrapped("Changes to the scene can be undone afterwards; changes to files cannot.");
+        },
+        {{"Don't allow", false}, {"Allow", true}, {"Allow everything for this message", true}});
+    if (pressed >= 0) {
+        m_state.chat_gate.answer(pressed >= 1, pressed == 2);
+        m_question.clear();
     }
 }
 
@@ -1335,8 +1446,14 @@ void EditorPanels::draw_chat() {
     ImGui::SameLine();
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 0.0f)); // (as low as the small buttons)
     ImGui::Checkbox("Details", &m_chat_details);
+    ImGui::SameLine();
+    // (The person's own setting, and no command's: Claude cannot switch its being asked off.)
+    ImGui::Checkbox("Ask me before changes", &m_state.chat_gate.asks);
+    ImGui::SetItemTooltip("Claude waits for your yes before each command that changes something.\nLooking at the scene (and taking a screenshot of it) never asks.");
     ImGui::PopStyleVar();
-    if (busy) {
+    if (busy && !m_state.chat_gate.answered()) {
+        ImGui::TextColored(level_color(LogLevel::warning), "Claude is waiting for your answer");
+    } else if (busy) {
         ImGui::TextColored({0.55f, 0.8f, 1.0f, 1.0f}, "Claude is working...");
     } else if (m_chat.started() && !m_chat.key_found()) {
         ImGui::TextColored(level_color(LogLevel::warning), "No Claude key found");

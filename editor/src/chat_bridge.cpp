@@ -15,13 +15,21 @@ namespace {
 
 // What the C# side calls back into (NativeChatApi in Native.cs).
 struct ChatApi {
+    // 0: done, 1: failed (the reply says what or why), 2: held until the
+    // person has answered (no reply; held_tool then).
     int (*run_tool)(const char* name, const char* input, char** reply);
+    // The tool held. `what` 0: has the person answered? (0 yes, 2 not yet.)
+    // 1: its reply, running it if they allowed it (0 done, 1 failed).
+    // 2: it is withdrawn (Claude's work was stopped); 0.
+    int (*held_tool)(int what, char** reply); // (HeldAsk, chat.h)
     void (*log)(int level, const char* text);
     void (*free_string)(char* text);
 };
 
-// The registry of the one bridge. Main thread only.
+// The registry and the gate of the one bridge. Main thread only.
 ai::CommandRegistry* g_registry = nullptr;
+ChatGate* g_gate = nullptr;
+
 
 char* copy_string(const std::string& text) {
     auto* out = static_cast<char*>(std::malloc(text.size() + 1));
@@ -39,10 +47,31 @@ int chat_run_tool(const char* name, const char* input, char** reply) {
     } else if (!parsed) {
         result = {false, "the tool's input is not valid JSON"};
     } else {
-        result = run_chat_tool(*g_registry, name != nullptr ? name : "", *parsed);
+        result = run_chat_tool(*g_registry, name != nullptr ? name : "", *parsed, g_gate);
+    }
+    if (result.held) {
+        *reply = nullptr;
+        return k_chat_tool_held;
     }
     *reply = copy_string(result.text);
-    return result.ok ? 0 : 1;
+    return result.ok ? k_chat_tool_done : k_chat_tool_failed;
+}
+
+int chat_held_tool(int what, char** reply) {
+    *reply = nullptr;
+    const bool finish = what == static_cast<int>(HeldAsk::finish);
+    if (g_registry == nullptr || g_gate == nullptr) {
+        if (finish) {
+            *reply = copy_string("the editor cannot run commands right now");
+        }
+        return finish ? k_chat_tool_failed : k_chat_tool_done;
+    }
+    std::string text;
+    const int status = held_chat_tool(*g_registry, *g_gate, what, text);
+    if (finish) {
+        *reply = copy_string(text);
+    }
+    return status;
 }
 
 void chat_log(int level, const char* text) {
@@ -52,18 +81,22 @@ void chat_log(int level, const char* text) {
 
 void chat_free_string(char* text) { std::free(text); }
 
-const ChatApi k_api{&chat_run_tool, &chat_log, &chat_free_string};
+const ChatApi k_api{&chat_run_tool, &chat_held_tool, &chat_log, &chat_free_string};
 
 } // namespace
 
-ChatBridge::ChatBridge(ai::CommandRegistry& registry, std::function<script::ScriptHost*()> host,
+ChatBridge::ChatBridge(ai::CommandRegistry& registry, ChatGate& gate, std::function<script::ScriptHost*()> host,
                        std::filesystem::path managed_dir)
-    : m_host(std::move(host)), m_managed_dir(std::move(managed_dir)) {
+    : m_gate(gate), m_host(std::move(host)), m_managed_dir(std::move(managed_dir)) {
     GIANT_ASSERT(g_registry == nullptr, "one chat per process");
     g_registry = &registry;
+    g_gate = &gate;
 }
 
-ChatBridge::~ChatBridge() { g_registry = nullptr; }
+ChatBridge::~ChatBridge() {
+    g_registry = nullptr;
+    g_gate = nullptr;
+}
 
 bool ChatBridge::start() {
     if (m_started) {
@@ -103,7 +136,7 @@ ai::CommandResult ChatBridge::ask(std::string_view what, const ai::Json& args) {
     if (!m_started && what != "send") {
         if (what == "read") {
             return ai::CommandResult::success({{"entries", ai::Json::array()}, {"after", 0}, {"latest", 0}, {"oldest", 1},
-                                               {"busy", false},                {"started", false}});
+                                               {"busy", false},                {"started", false}, {"asking", nullptr}});
         }
         return ai::CommandResult::success(what == "stop" ? ai::Json{{"stopped", false}} : ai::Json::object());
     }
@@ -118,12 +151,19 @@ ai::CommandResult ChatBridge::ask(std::string_view what, const ai::Json& args) {
     if (status != 0) {
         return ai::CommandResult::failure(text);
     }
+    // (Before anything else can go wrong: what the person allowed for the last message is not
+    // allowed for this one, and stopped or cleared work takes its question from the window at
+    // once, not when the C# side next has its turn.)
+    m_gate.chat_asked(what);
     auto value = ai::parse_json(text);
     if (!value || !value->is_object()) {
         return ai::CommandResult::failure("the chat's answer could not be read");
     }
     if (what == "read" || what == "send") {
         (*value)["started"] = true;
+    }
+    if (what == "read") {
+        (*value)["asking"] = m_gate.asking();
     }
     if (what == "send") {
         m_busy = true; // (until the next update says otherwise)
@@ -136,6 +176,7 @@ void ChatBridge::update() {
         const int now = m_update();
         m_busy = (now & 1) != 0;
         m_stamp.updated(now);
+        m_gate.chat_updated(m_busy);
     }
 }
 

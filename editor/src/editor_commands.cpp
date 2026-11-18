@@ -1,7 +1,5 @@
 #include "editor_commands.h"
 
-#include "world_streaming.h"
-
 #include "giant/core/assert.h"
 #include "giant/core/image.h"
 #include "giant/core/log.h"
@@ -93,6 +91,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     register_game_ui_commands(registry, state);
     register_chat_commands(registry, state);
     register_mod_commands(registry, state);
+    register_script_commands(registry, state);
     add(registry,
         {"get_engine_info",
          "Describes the running editor: version, graphics backend and adapter, whether the GPU "
@@ -281,58 +280,6 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
              CommandResult result = CommandResult::success(std::move(value));
              result.images.push_back({"image/png", std::move(png)});
              return result;
-         }});
-
-    add(registry,
-        {"load_scripts",
-         "Loads a compiled C# script assembly (.dll built against Giant.Scripting) and starts its "
-         "scripts; replaces the assembly loaded before (its scripts get OnStop first; the open world's mods' scripts run on). Rebuild the .dll and call "
-         "this again to reload. Scripts change the scene through commands, but as game logic: "
-         "their changes are not added to the undo history. Check get_log afterwards for script "
-         "errors.",
-         Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["path"],
-             "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 1024,
-                                     "description": "Path to the script .dll."}}})"),
-         false,
-         [&state](const Json& args, CommandContext&) {
-             if (!state.dotnet_available) {
-                 return CommandResult::failure(".NET could not be started; see get_log");
-             }
-             const std::string path = args["path"].get<std::string>();
-             std::error_code error;
-             const std::filesystem::path file(std::u8string(path.begin(), path.end()));
-             if (!std::filesystem::is_regular_file(file, error)) {
-                 return CommandResult::failure("no such file: " + path);
-             }
-             if (state.world != nullptr && state.world->is_open() && in_mods_folder(state.world->folder(), file)) {
-                 return CommandResult::failure("that file is in the open world's mods folder: a mod's scripts run once the person has allowed "
-                                               "the mod's scripts (enable_mod with scripts: true asks them), not by loading the file");
-             }
-             state.scripts_to_load = path;
-             state.scripts_unload_requested = false; // the latest request wins
-             return CommandResult::success({{"loading", path}, {"note", "starts after this frame"}});
-         }});
-
-    add(registry,
-        {"unload_scripts", "Stops (OnStop) and unloads the loaded C# scripts (not those of the open world's mods: they go when the world is closed, or the mod's scripts are no longer allowed and the world is opened again).",
-         Json{{"type", "object"}, {"additionalProperties", false}}, false,
-         [&state](const Json&, CommandContext&) {
-             state.scripts_unload_requested = true;
-             state.scripts_to_load.clear(); // the latest request wins
-             return CommandResult::success({{"unloading", !state.scripts_loaded.empty()}});
-         }});
-
-    add(registry,
-        {"get_scripts",
-         "Reports the loaded C# script assembly, the open world's mods whose scripts are loaded beside it (`mods`: "
-         "ids, in the order loaded; list_mods `world.scripts` tells which were to run and which not, with why) and how many "
-         "scripts are running in all (a script that throws is stopped and logged).",
-         Json{{"type", "object"}, {"additionalProperties", false}}, true,
-         [&state](const Json&, CommandContext&) {
-             return CommandResult::success({{"loaded", state.scripts_loaded},
-                                            {"mods", state.mods_scripts_loaded},
-                                            {"running", state.scripts_running},
-                                            {"dotnet_available", state.dotnet_available}});
          }});
 
     add(registry,

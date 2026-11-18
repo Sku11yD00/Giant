@@ -14,7 +14,14 @@ internal unsafe struct NativeChatApi
     // Runs one of the chat's tools (name, arguments as JSON). Writes a
     // malloc'd UTF-8 string (the result or the error) to *reply; returns 0
     // on success, 1 on failure.
+    // 2: not run, and no reply: the editor holds it until the person has
+    // answered whether it may run (HeldTool then).
     public delegate* unmanaged<byte*, byte*, byte**, int> RunTool;
+
+    // The tool held. what 0: has the person answered? (0 yes, 2 not yet.)
+    // 1: its reply as RunTool's (run if they allowed it). 2: it is
+    // withdrawn (the work was stopped).
+    public delegate* unmanaged<int, byte**, int> HeldTool;
 
     // Writes a log line: level 0 trace, 1 info, 2 warning, 3 error.
     public delegate* unmanaged<int, byte*, void> Log;
@@ -113,7 +120,7 @@ public static unsafe class Native
             {
                 return 0;
             }
-            s_conversation.RunPending(RunTool);
+            s_conversation.RunPending(s_editor);
             return s_conversation.Stamp;
         }
         catch (Exception e) when (e is not OutOfMemoryException)
@@ -187,24 +194,61 @@ public static unsafe class Native
         return s_client != null;
     }
 
-    private static ToolReply RunTool(string name, string input)
+    private const int Held = 2;
+
+    private sealed class Editor : IToolRunner
     {
-        byte[] nameUtf8 = Encoding.UTF8.GetBytes(name + '\0');
-        byte[] inputUtf8 = Encoding.UTF8.GetBytes(input + '\0');
-        byte* reply = null;
-        int status;
-        fixed (byte* n = nameUtf8)
-        fixed (byte* i = inputUtf8)
+        public ToolReply? Run(string name, string input)
         {
-            status = s_api.RunTool(n, i, &reply);
+            byte[] nameUtf8 = Encoding.UTF8.GetBytes(name + '\0');
+            byte[] inputUtf8 = Encoding.UTF8.GetBytes(input + '\0');
+            byte* reply = null;
+            int status;
+            fixed (byte* n = nameUtf8)
+            fixed (byte* i = inputUtf8)
+            {
+                status = s_api.RunTool(n, i, &reply);
+            }
+            string text = Taken(reply);
+            return status == Held ? null : new ToolReply(status == 0, text);
         }
-        string text = reply != null ? Marshal.PtrToStringUTF8((IntPtr)reply) ?? "" : "";
-        if (reply != null)
+
+        public bool HeldAnswered()
         {
+            byte* reply = null;
+            int status = s_api.HeldTool(0, &reply);
+            Taken(reply);
+            return status != Held;
+        }
+
+        public ToolReply FinishHeld()
+        {
+            byte* reply = null;
+            int status = s_api.HeldTool(1, &reply);
+            return new ToolReply(status == 0, Taken(reply));
+        }
+
+        public void DropHeld()
+        {
+            byte* reply = null;
+            s_api.HeldTool(2, &reply);
+            Taken(reply);
+        }
+
+        // The editor's string as ours, and freed.
+        private static string Taken(byte* reply)
+        {
+            if (reply == null)
+            {
+                return "";
+            }
+            string text = Marshal.PtrToStringUTF8((IntPtr)reply) ?? "";
             s_api.FreeString(reply);
+            return text;
         }
-        return new ToolReply(status == 0, text);
     }
+
+    private static readonly Editor s_editor = new();
 
     private static void Log(int level, string message)
     {

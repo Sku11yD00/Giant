@@ -66,15 +66,32 @@ std::vector<std::string> words_of(std::string_view text, bool searched) {
     return words;
 }
 
+// The first `most` bytes of a text at most, not through the middle of a UTF-8 character.
+std::string utf8_start(const std::string& text, usize most) {
+    usize length = std::min(text.size(), most);
+    while (length > 0 && length < text.size() && (static_cast<unsigned char>(text[length]) & 0xC0) == 0x80) {
+        --length;
+    }
+    return text.substr(0, length);
+}
+
 // A description's start, for a list: its first sentence, or 160 bytes.
 std::string start_of(const std::string& description) {
     const usize stop = description.find(". ");
-    usize length = std::min<usize>(stop == std::string::npos ? description.size() : stop + 1, 160);
-    // (Not through the middle of a UTF-8 character.)
-    while (length > 0 && length < description.size() && (static_cast<unsigned char>(description[length]) & 0xC0) == 0x80) {
-        --length;
+    return utf8_start(description, std::min<usize>(stop == std::string::npos ? description.size() : stop + 1, 160));
+}
+
+// Runs a command for Claude as the person would run it: checked against its schema, and on the undo history.
+ChatToolReply execute_for_claude(ai::CommandRegistry& registry, const std::string& name, const Json& args) {
+    const CommandResult result = registry.execute(name, args);
+    if (!result.ok) {
+        return {false, result.error};
     }
-    return description.substr(0, length);
+    Json value = result.value;
+    if (!result.images.empty() && value.is_object()) {
+        value["note_to_assistant"] = "The command returned a picture, which the chat cannot pass on yet.";
+    }
+    return {true, ai::to_json_text(value)};
 }
 
 ChatToolReply find_commands(const ai::CommandRegistry& registry, const Json& input) {
@@ -145,7 +162,7 @@ ChatToolReply describe_command(const ai::CommandRegistry& registry, const Json& 
                                         {"arguments", command->input_schema}})};
 }
 
-ChatToolReply run_command(ai::CommandRegistry& registry, const Json& input) {
+ChatToolReply run_command(ai::CommandRegistry& registry, const Json& input, ChatGate* gate) {
     if (!input.contains("name") || !input["name"].is_string()) {
         return {false, "run_command needs `name`"};
     }
@@ -153,7 +170,8 @@ ChatToolReply run_command(ai::CommandRegistry& registry, const Json& input) {
     if (name == "quit_editor") {
         return {false, "closing the editor is the person's to do"};
     }
-    if (not_for_claude(name) || registry.find(name) == nullptr) {
+    const ai::CommandDesc* command = not_for_claude(name) ? nullptr : registry.find(name);
+    if (command == nullptr) {
         return {false, "there is no command named \"" + name + "\" (find_commands searches them)"};
     }
     Json args = Json::object();
@@ -163,19 +181,102 @@ ChatToolReply run_command(ai::CommandRegistry& registry, const Json& input) {
         }
         args = input["args"];
     }
-    // As the person would run it: checked against its schema, and on the undo history.
-    const CommandResult result = registry.execute(name, args);
-    if (!result.ok) {
-        return {false, result.error};
+    if (gate != nullptr && gate->holds(*command, args)) {
+        // (The person is not asked about what could not run: the arguments are checked first, as execute will again.)
+        if (const std::string wrong = ai::validate_args(command->input_schema, args); !wrong.empty()) {
+            return {false, "invalid arguments: " + wrong};
+        }
+        gate->hold(*command, std::move(args));
+        ChatToolReply reply;
+        reply.held = true;
+        return reply;
     }
-    Json value = result.value;
-    if (!result.images.empty() && value.is_object()) {
-        value["note_to_assistant"] = "The command returned a picture, which the chat cannot pass on yet.";
-    }
-    return {true, ai::to_json_text(value)};
+    return execute_for_claude(registry, name, args);
 }
 
 } // namespace
+
+void ChatGate::answer(bool allow, bool rest) {
+    if (!m_held || m_answered) {
+        return;
+    }
+    m_answered = true;
+    m_allowed = allow;
+    m_rest = m_rest || (allow && rest);
+}
+
+bool ChatGate::holds(const ai::CommandDesc& command, const Json& args) const {
+    return asks && !m_rest && !command.read_only && !(asks_itself && asks_itself(command.name, args));
+}
+
+void ChatGate::chat_asked(std::string_view what) {
+    if (what == "stop" || what == "clear") {
+        drop();
+    }
+    if (what == "send" || what == "stop" || what == "clear") {
+        message_over();
+    }
+}
+
+void ChatGate::chat_updated(bool busy) {
+    if (!busy) {
+        message_over();
+    }
+}
+
+Json ChatGate::asking() const {
+    if (!m_held || m_answered) {
+        return nullptr;
+    }
+    return {{"command", m_request.command}, {"args", m_request.args}, {"args_hidden", m_request.args_hidden}};
+}
+
+int held_chat_tool(ai::CommandRegistry& registry, ChatGate& gate, int what, std::string& reply) {
+    reply.clear();
+    switch (what) {
+    case static_cast<int>(HeldAsk::answered):
+        return gate.answered() ? k_chat_tool_done : k_chat_tool_held;
+    case static_cast<int>(HeldAsk::finish): {
+        ChatToolReply result = finish_held_chat_tool(registry, gate);
+        reply = std::move(result.text);
+        return result.ok ? k_chat_tool_done : k_chat_tool_failed;
+    }
+    default:
+        gate.drop();
+        return k_chat_tool_done;
+    }
+}
+
+void ChatGate::hold(const ai::CommandDesc& command, Json args) {
+    GIANT_ASSERT(!m_held, "the chat's gate holds one command at a time");
+    const std::string text = ai::to_json_text(args, 2);
+    m_request.serial = ++m_serial;
+    m_request.command = command.name;
+    m_request.about = start_of(command.description);
+    m_request.args = utf8_start(text, k_most_shown);
+    m_request.args_hidden = text.size() - m_request.args.size();
+    m_args = std::move(args);
+    m_held = true;
+    m_answered = false;
+    m_allowed = false;
+}
+
+ChatToolReply finish_held_chat_tool(ai::CommandRegistry& registry, ChatGate& gate) {
+    if (!gate.m_held) {
+        return {false, "not run: the editor no longer holds this command"};
+    }
+    if (!gate.m_answered) {
+        return {false, "not run: the person has not answered yet"};
+    }
+    gate.m_held = false;
+    const Json args = std::move(gate.m_args);
+    gate.m_args = Json();
+    if (!gate.m_allowed) {
+        return {false, "not run: the person was asked and did not allow this. Do not try to get the same done another way: "
+                       "tell them what you wanted to do and why, and ask what they would like instead."};
+    }
+    return execute_for_claude(registry, gate.m_request.command, args);
+}
 
 Json chat_tools() {
     return Json::array(
@@ -211,7 +312,7 @@ Json chat_tools() {
             {"required", Json::array({"name"})}}}}});
 }
 
-ChatToolReply run_chat_tool(ai::CommandRegistry& registry, std::string_view name, const Json& input) {
+ChatToolReply run_chat_tool(ai::CommandRegistry& registry, std::string_view name, const Json& input, ChatGate* gate) {
     if (!input.is_object()) {
         return {false, "the tool's input must be an object"};
     }
@@ -222,7 +323,7 @@ ChatToolReply run_chat_tool(ai::CommandRegistry& registry, std::string_view name
         return describe_command(registry, input);
     }
     if (name == "run_command") {
-        return run_command(registry, input);
+        return run_command(registry, input, gate);
     }
     return {false, "there is no tool named \"" + std::string(name) + "\""};
 }
@@ -336,7 +437,9 @@ void register_chat_commands(ai::CommandRegistry& registry, EditorState& state) {
          "\"result\" (what came back; `ok`), \"note\" or \"error\". Pass the reply's `after` as the next call's to "
          "read on. Also: `busy` (Claude is working), `latest` and `oldest` (the newest line's serial and the oldest "
          "kept; 2,000 are), `started` (false until the first message is sent), and once started `key_found`, "
-         "`model` and the tokens of the requests answered so far.",
+         "`model` and the tokens of the requests answered so far. `asking`: the command of Claude's the person is being "
+         "asked about in the editor's window before it may run ({command, args: its arguments as text, args_hidden: bytes "
+         "of them too long to show}), or null; only the person answers, there (no command does), and Claude waits (`busy`) until then.",
          Json::parse(R"({"type": "object", "additionalProperties": false,
              "properties": {"after": {"type": "integer", "minimum": 0, "maximum": 9007199254740991,
                                       "description": "Read the lines after this serial (default 0: from the oldest kept)."},
@@ -347,7 +450,8 @@ void register_chat_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
         {"stop_chat",
          "Stops Claude's work on the last chat message: no further commands are run (one running now finishes). "
-         "What it already did stays (undo takes it back). The work ends a moment later: `busy` in get_chat says when.",
+         "What it already did stays (undo takes it back). A command the person is being asked about is not run, and the "
+         "question is withdrawn. The work ends a moment later: `busy` in get_chat says when.",
          Json{{"type", "object"}, {"additionalProperties", false}}, false,
          [ask](const Json& args, CommandContext&) { return ask("stop", args); }});
 

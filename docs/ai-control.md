@@ -65,12 +65,29 @@ its work, **Clear** starts a new conversation, and **Details** shows what
 each command was given and gave back. If a message cannot be sent (no key
 yet, say), the reason is shown above the box.
 
+**Ask me before changes** (ticked when the editor starts) makes Claude
+wait for your yes before each command that changes something. A small
+window in the middle of the editor shows the command, what it is for and
+what it was given (the first 16,000 bytes when it is longer, with how much
+is left out: do not allow what you cannot read), with three buttons: **Don't allow** (the
+command is not run, and Claude is told it was your decision), **Allow**,
+and **Allow everything for this message** (no more questions until Claude
+has finished with what you last wrote; your next message asks again).
+Commands that only look at the scene never ask (taking a screenshot counts
+as looking, though it writes a picture into the `screenshots` folder).
+Loading a script file by command asks you in a window of its own
+(`docs/scripting.md`). Untick the box to let
+Claude work without asking; it is ticked again the next time the editor
+starts. The answer is yours alone: only the window's buttons give it, and
+no command does, so neither Claude nor a tool nor a script can answer for
+you or untick the box. Stop and Clear withdraw a question that is open.
+
 The panel is these commands, which the AI over MCP can use too:
 
 | Command | What it does |
 | --- | --- |
 | `chat_send` | Sends `text` to Claude. Returns at once; the answer and what Claude does arrive over the next seconds |
-| `get_chat` | The conversation's lines after serial `after` (at most `limit`, 1 to 256, default 64), oldest first: `kind` is `you`, `claude`, `tool` (a tool Claude called: `tool` names it, `text` is its arguments), `result` (what came back, with `ok`), `note` or `error`. Also `busy` (Claude is working), `after` (pass it to the next call), `latest` and `oldest` (2,000 lines are kept), `started` (false until the first message is sent) and, once started, `key_found`, `model`, `input_tokens` and `output_tokens` so far |
+| `get_chat` | The conversation's lines after serial `after` (at most `limit`, 1 to 256, default 64), oldest first: `kind` is `you`, `claude`, `tool` (a tool Claude called: `tool` names it, `text` is its arguments), `result` (what came back, with `ok`), `note` or `error`. Also `busy` (Claude is working), `after` (pass it to the next call), `latest` and `oldest` (2,000 lines are kept), `started` (false until the first message is sent) and, once started, `key_found`, `model`, `input_tokens` and `output_tokens` so far. `asking` is the command of Claude's the person is being asked about in the editor's window (`command`, `args` as text, `args_hidden`: bytes of it too long to show), or null |
 | `stop_chat` | Stops Claude's work on the last message: no further commands run (one running now finishes). What it already did stays (undo takes it back). The work ends a moment later: `busy` says when |
 | `clear_chat` | Forgets the conversation; the next message starts a new one |
 
@@ -79,7 +96,10 @@ tools: `find_commands` (search them by words), `describe_command` (one
 command's description and arguments) and `run_command`. It cannot close the
 editor or talk to itself through the chat's own commands, and it is told to
 ask before anything that cannot be undone (writing or deleting files,
-loading another scene). One message may take up to 40 steps, then it stops
+loading another scene). With "Ask me before changes" on, the editor itself
+holds each changing command until the person has answered; Claude is told
+to take a no as their decision and not to try another way. One message
+may take up to 40 steps, then it stops
 and says so. The model is Claude Opus 5.5; if its safety checks decline a
 request, Claude's service retries it on the model it recommends instead
 (server-side fallback) before giving up.
@@ -238,8 +258,8 @@ request, Claude's service retries it on the model it recommends instead
 | `undo`, `redo` | yes | Walks the change history |
 | `get_history` | no | What can be undone and redone |
 | `capture_screenshot` | no | A PNG of the editor as it looks now, so the AI can see it |
-| `load_scripts`, `unload_scripts` | runtime only | Loads, reloads or stops C# scripts (`docs/scripting.md`). `load_scripts` refuses a file in the open world's `mods` folder: a mod's scripts start only once the person allowed them (`enable_mod`) |
-| `get_scripts` | no | The loaded script assembly, the mods whose scripts are loaded beside it (`mods`), and how many scripts run in all |
+| `load_scripts`, `unload_scripts` | runtime only | Loads, reloads or stops C# scripts (`docs/scripting.md`). A file is loaded only once the person allowed it: the first time a file is named they are asked in the editor's window (the reply says `asked`: true and nothing is loaded yet); a file they allowed loads again without asking until the editor closes (64 files at most, then the one allowed longest ago is asked about again; with "Ask me before changes" on, Claude's reloading of an allowed file is asked about like any change). A command cannot answer for them (unless the editor was started with `--allow-scripts-by-command`, for automated runs; an editor with no window refuses). `load_scripts` refuses a file in the open world's `mods` folder: a mod's scripts start only once the person allowed them (`enable_mod`). `unload_scripts` also withdraws a question still open |
+| `get_scripts` | no | The loaded script assembly, the file the person is being asked about (`asked`, or null), the mods whose scripts are loaded beside it (`mods`), and how many scripts run in all |
 | `chat_send`, `stop_chat`, `clear_chat` | the chat only, not undoable | The chat with Claude (above): send a message, stop its work, forget the conversation |
 | `get_chat` | no | The chat's lines and state (above) |
 | `list_mods` | no | The mods beside the open world (`docs/mods.md`): each one's manifest, whether it is enabled and loaded, its place in the load order or its problem; folders that are no mod, with why; and under `world` what the mods changed as the world was opened (added, replaced, people added, clashes between mods, mods left out); each mod's `slot`, which its people's ids come from; for a mod with scripts, `scripts`, `scripts_allowed` and (while the person has yet to answer) `scripts_asked`, and under `world.scripts` which `run` and which were `not_run`, with why |
