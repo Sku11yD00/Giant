@@ -986,16 +986,18 @@ void normalize_meshes(world::Scene& scene) {
 }
 
 // The mesh files the scene's entities, kits, scatter and people draw (normalized, once each).
-// `looks` false: without its person looks' and its kits' (a world's save adds its own looks' and kits': a mod's are not its to list).
+// `looks_and_kits` false: without its person looks' and its kits' (a world's save adds its own looks' and kits': a mod's are not its to list).
 // A person's entity is not asked: it draws its look's mesh, and whether it is in the scene is only where the camera is.
-std::vector<std::string> meshes_used(const world::Scene& scene, bool looks = true) {
+std::vector<std::string> meshes_used(const world::Scene& scene, bool looks_and_kits = true) {
     std::vector<std::string> out;
     for (const Entity& e : scene.entities()) {
         if (e.shape == world::Shape::mesh && e.person == 0) out.push_back(MeshLibrary::normalize(e.mesh));
     }
-    for (const world::Kit& kit : scene.kits) {
-        for (const world::KitPiece& p : kit.pieces) {
-            if (looks && p.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(p.mesh));
+    if (looks_and_kits) {
+        for (const world::Kit& kit : scene.kits) {
+            for (const world::KitPiece& p : kit.pieces) {
+                if (p.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(p.mesh));
+            }
         }
     }
     for (const world::ScatterLayer& layer : scene.scatter) {
@@ -1004,7 +1006,7 @@ std::vector<std::string> meshes_used(const world::Scene& scene, bool looks = tru
         }
     }
     for (const world::PersonLook& look : scene.person_looks) {
-        if (looks) out.push_back(MeshLibrary::normalize(look.mesh));
+        if (looks_and_kits) out.push_back(MeshLibrary::normalize(look.mesh));
     }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());

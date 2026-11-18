@@ -167,11 +167,18 @@ Kits go by name like the rest:
 A piece's `mesh` and its material's maps may be the mod's own files
 (`mod:...`).
 
-Saving the world with the mod on keeps the world's own kits as its file
-had them, and never writes the mod's. Because the world must still open
-without the mod, the save is refused while one of the world's own
-entities or scatter layers places a kit that only a mod brings; the
+Saving the world with the mod on never writes the mod's kits. A kit of
+the world's that the mod replaced is kept as the world's file had it;
+the world's other kits are saved as they are now. Because the world must
+still work without the mod, the save is refused while one of the world's
+own entities or scatter layers places a kit that only a mod brings; the
 error names the first one.
+
+Damage is not kept on a mod's kit: `keep_damage` leaves its broken
+placements as they were and counts them in `mods_kits_not_kept`, so the
+world's files never hold a record of a mod's pieces. A game saved while
+a mod's kit was on is told as another world's when the mod is off (or
+its kits have changed), and loading it then needs `force`.
 
 ### People
 

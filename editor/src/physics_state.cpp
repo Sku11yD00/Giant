@@ -427,7 +427,7 @@ world::Damage PhysicsState::game_damage_now(world::Scene& scene) {
     return next;
 }
 
-PhysicsState::KeptDamage PhysicsState::keep_damage(world::Scene& scene) {
+PhysicsState::KeptDamage PhysicsState::keep_damage(world::Scene& scene, std::span<const world::Kit> not_kept) {
     notice_scene(scene);
     restore_ground(scene); // (stopped since: that ground is not this simulation's)
     follow_kept(scene, nullptr); // the forest holds the scene's kept trees as they are
@@ -453,6 +453,10 @@ PhysicsState::KeptDamage PhysicsState::keep_damage(world::Scene& scene) {
         const world::Entity* e = scene.find(k.entity);
         if (e == nullptr || e->shape != world::Shape::kit || e->kit != k.kit || !(e->transform.position == k.position) ||
             !(e->transform.rotation == k.rotation) || !(e->transform.scale == k.scale)) {
+            continue;
+        }
+        if (std::any_of(not_kept.begin(), not_kept.end(), [&](const world::Kit& kit) { return kit.name == k.kit; })) {
+            ++out.kits_not_kept; // (a mod's pieces: a record of them is not the world's to hold)
             continue;
         }
         const world::CellCoord c = world::cell_of(k.position);

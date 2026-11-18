@@ -82,8 +82,9 @@ public:
 
     // Where the open world's slots are (empty: no world open, or the scene is not its).
     static std::filesystem::path root(const EditorState& state);
-    // Which world a save is of: a hash of what its records depend on (kits, scatter, ground samples).
-    static u64 world_identity(const world::WorldIndex& index);
+    // Which world a save is of: a hash of what its records depend on (its kits and those its mods
+    // laid over it, scatter, ground samples).
+    static u64 world_identity(const WorldStreaming& world);
 
     // Starts saving to `slot` (made if missing, replaced if not). Empty: started; else why not.
     std::string begin_save(EditorState& state, const std::string& slot);

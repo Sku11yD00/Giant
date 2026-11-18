@@ -160,7 +160,7 @@ void register_save_commands(ai::CommandRegistry& registry, EditorState& state) {
              if (state.saves == nullptr) return no_saves();
              const std::filesystem::path root = GameSaves::root(state);
              if (root.empty()) return CommandResult::failure("no world open");
-             const u64 hash = GameSaves::world_identity(state.world->index());
+             const u64 hash = GameSaves::world_identity(*state.world);
              Json slots = Json::array();
              for (const save::Listed& l : save::list_slots(root)) {
                  Json s = {{"name", l.name}};

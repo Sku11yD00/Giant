@@ -15,6 +15,7 @@
 #include <limits>
 #include <cmath>
 #include <cstdint>
+#include <string_view>
 
 namespace giant::editor {
 
@@ -721,21 +722,27 @@ WorldStreaming::Saved WorldStreaming::save(const world::Scene& scene, std::vecto
 
 namespace {
 
-// What of the world's own (an entity of a loaded cell, a scatter layer) places a kit that is not
-// among `kits`, or nothing. (Cells not loaded are as their files have them: saved when this held.)
-std::optional<std::string> places_mods_kit(const world::Scene& scene, const std::vector<world::Kit>& kits) {
+// What of the world's own (an entity of a loaded cell, a scatter layer) places a kit of `mods`
+// that is not among `kits` (the world's own), or nothing. (Cells not loaded are as their files
+// have them: saved when this held. A kit in neither is as it is without mods: not there.)
+std::optional<std::string> places_mods_kit(const world::Scene& scene, const std::vector<world::Kit>& kits,
+                                           const std::vector<world::Kit>& mods) {
     std::unordered_set<std::string_view> names;
-    for (const world::Kit& kit : kits) {
+    for (const world::Kit& kit : mods) {
         names.insert(kit.name);
     }
+    for (const world::Kit& kit : kits) {
+        names.erase(kit.name);
+    }
+    if (names.empty()) return std::nullopt;
     for (const Entity& e : scene.entities()) {
-        if (e.person == 0 && e.shape == world::Shape::kit && !names.contains(e.kit)) {
+        if (e.person == 0 && e.shape == world::Shape::kit && names.contains(e.kit)) {
             return "entity " + std::to_string(e.id) + " places the kit \"" + e.kit + "\"";
         }
     }
     for (const world::ScatterLayer& layer : scene.scatter) {
         for (const world::ScatterItem& item : layer.items) {
-            if (item.shape == world::Shape::kit && !names.contains(item.kit)) {
+            if (item.shape == world::Shape::kit && names.contains(item.kit)) {
                 return "the scatter layer \"" + layer.name + "\" places the kit \"" + item.kit + "\"";
             }
         }
@@ -754,7 +761,8 @@ WorldStreaming::Own WorldStreaming::own(const world::Scene& scene, std::vector<s
             world::world_own<world::Routine>(m_index.routines, m_mods.routines, scene.routines, not_kept),
             world::world_own<world::Behaviour>(m_index.behaviours, m_mods.behaviours, scene.behaviours, not_kept),
             world::world_own_people(m_mods.people, scene.people, not_kept),
-            world::world_own<world::Kit>(m_index.kits, m_mods.kits, scene.kits, not_kept)};
+            // (No mod brought a kit: the scene's are the world's, as they are.)
+            m_mods.kits.empty() ? scene.kits : world::world_own<world::Kit>(m_index.kits, m_mods.kits, scene.kits, not_kept)};
 }
 
 WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vector<std::string> meshes) {
@@ -772,9 +780,10 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
         }
     }
     if (m_mods.any && !m_mods.kits.empty()) {
-        if (const auto placed = places_mods_kit(scene, owned.kits)) {
-            return {"the world cannot be saved: without its mods it would not load (" + *placed +
-                    " that only a mod brings). Remove those, or make a kit for the world under another name"};
+        if (const auto placed = places_mods_kit(scene, owned.kits, m_mods.kits)) {
+            return {"the world cannot be saved: " + *placed +
+                    " that only a mod brings, and without the mod it is not there (a scatter layer placing it "
+                    "would stop the world loading). Remove those, or make a kit for the world under another name"};
         }
     }
     for (const world::PersonLook& look : owned.person_looks) {
