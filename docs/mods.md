@@ -347,11 +347,10 @@ could not be looked through (a mod with scripts must be all real files
 and folders). `scripts_asked` marks a mod you have been asked about and
 not answered yet.
 
-What this does not cover yet: `load_scripts` loads a script file a
-command names from anywhere outside the open world's `mods` folder
-without asking you. That is how your own project's scripts are loaded,
-and Claude in the Chat panel can call it too, so read what it proposes to
-load. Asking before such changes is still to come.
+A script file outside the `mods` folder (your own project's scripts,
+loaded with `load_scripts`) is under your say in the same way: the first
+time a command names a file the editor asks you in its window, and
+nothing loads until you allow it (`docs/scripting.md`).
 
 Allowing is by folder and id, not by what the `.dll` holds: a mod you
 allowed stays allowed when its files change, so update a mod only from

@@ -1,7 +1,8 @@
 // The chat's way to its C# side (scripts/Giant.Chat, which holds the
 // conversation and talks to Claude's service): started with .NET when the
 // first message is sent, and given a turn each frame to run the commands
-// Claude asks for, on the main thread.
+// Claude asks for, on the main thread. A command the person is asked about
+// first (ChatGate) is held here until they have answered.
 #pragma once
 
 #include "chat.h"
@@ -18,7 +19,8 @@ class ChatBridge final : public ChatLink {
 public:
     // `host` gives .NET, starting it when first needed (null when it cannot
     // be). `managed_dir` holds chat/Giant.Chat.dll. One per process.
-    ChatBridge(ai::CommandRegistry& registry, std::function<script::ScriptHost*()> host,
+    // `gate`: the person's say over what Claude changes (EditorState::chat_gate).
+    ChatBridge(ai::CommandRegistry& registry, ChatGate& gate, std::function<script::ScriptHost*()> host,
                std::filesystem::path managed_dir);
     ~ChatBridge() override;
 
@@ -38,6 +40,7 @@ public:
 private:
     bool start();
 
+    ChatGate& m_gate;
     std::function<script::ScriptHost*()> m_host;
     std::filesystem::path m_managed_dir;
     int (*m_ask)(const char* what, const char* args, const char** reply) = nullptr;

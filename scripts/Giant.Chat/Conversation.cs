@@ -14,6 +14,22 @@ namespace Giant.Chat;
 /// <summary>What a tool answered: the result, or why it failed.</summary>
 internal readonly record struct ToolReply(bool Ok, string Text);
 
+/// <summary>
+/// The editor's side of Claude's tools, on its main thread. The editor may hold a tool until the
+/// person has answered whether it may run (the editor's "ask before changes"): one at a time.
+/// </summary>
+internal interface IToolRunner
+{
+    /// <summary>Runs a tool. Null when the editor holds it instead, until the person has answered.</summary>
+    ToolReply? Run(string name, string input);
+    /// <summary>Whether the person has answered about the tool held.</summary>
+    bool HeldAnswered();
+    /// <summary>The held tool's reply, once answered: run if the person allowed it, else that they did not.</summary>
+    ToolReply FinishHeld();
+    /// <summary>The held tool is withdrawn (the work was stopped): the person is no longer asked.</summary>
+    void DropHeld();
+}
+
 /// <summary>A tool Claude may call: its name, what it is for, and its arguments' JSON Schema.</summary>
 internal sealed record ToolSpec(string Name, string Description, JsonElement Schema);
 
@@ -42,10 +58,11 @@ internal sealed class Conversation
     /// <summary>A line of the conversation as the person reads it.</summary>
     private sealed record Entry(long Serial, string Kind, string Text, string? Tool, bool Ok);
 
-    private sealed class Waiting(string name, string input)
+    private sealed class Waiting(string name, string input, CancellationToken stop)
     {
         public readonly string Name = name;
         public readonly string Input = input;
+        public readonly CancellationToken Stop = stop; // the stop of the work it is part of
         public bool Taken; // the main thread is running it (or has): it is no longer stopped
         public readonly TaskCompletionSource<ToolReply> Done = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
@@ -66,6 +83,7 @@ internal sealed class Conversation
     private readonly string _system;
     private readonly List<Entry> _entries = [];
     private Talk _talk = new();
+    private Waiting? _held; // the tool the editor holds until the person has answered (of this talk, or one cleared since)
     private long _serial;
     private long _inputTokens;
     private long _outputTokens;
@@ -221,12 +239,72 @@ internal sealed class Conversation
         }
     }
 
-    /// <summary>
-    /// Runs one tool Claude is waiting for, on the calling (main) thread.
-    /// True when one was run.
-    /// </summary>
-    public bool RunPending(Func<string, string, ToolReply> run)
+    // An editor that holds nothing (tests).
+    private sealed class Runs(Func<string, string, ToolReply> run) : IToolRunner
     {
+        public ToolReply? Run(string name, string input) => run(name, input);
+        public bool HeldAnswered() => true;
+        public ToolReply FinishHeld() => new(false, "nothing is held");
+        public void DropHeld()
+        {
+        }
+    }
+
+    /// <summary>The same, for an editor that holds nothing.</summary>
+    public bool RunPending(Func<string, string, ToolReply> run) => RunPending(new Runs(run));
+
+    /// <summary>
+    /// Gives Claude's tools a turn on the calling (main) thread: runs the next one waiting, or, while
+    /// the editor holds one for the person's answer, looks whether they have answered (nothing else
+    /// runs until then). True when a tool was run or held.
+    /// </summary>
+    public bool RunPending(IToolRunner editor)
+    {
+        Waiting? held;
+        bool withdrawn = false;
+        lock (_lock)
+        {
+            held = _held;
+            if (held != null && held.Done.Task.IsCompleted)
+            {
+                // Stopped or cleared while the person was asked: not run.
+                _held = null;
+                held = null;
+                withdrawn = true;
+            }
+        }
+        if (withdrawn)
+        {
+            editor.DropHeld();
+        }
+        if (held != null)
+        {
+            if (!editor.HeldAnswered())
+            {
+                return false;
+            }
+            lock (_lock)
+            {
+                _held = null;
+                if (held.Done.Task.IsCompleted || held.Stop.IsCancellationRequested)
+                {
+                    // Stopped just now (or before its wait was set up to hear of it): not run all the same.
+                    held.Done.TrySetCanceled(held.Stop);
+                    withdrawn = true;
+                }
+                else
+                {
+                    held.Taken = true; // from here it runs to its end, as any tool the main thread took
+                }
+            }
+            if (withdrawn)
+            {
+                editor.DropHeld();
+                return false;
+            }
+            held.Done.TrySetResult(Guarded(() => editor.FinishHeld()) ?? new ToolReply(false, "the editor gave no answer"));
+            return true;
+        }
         Waiting? next = null;
         lock (_lock)
         {
@@ -250,17 +328,45 @@ internal sealed class Conversation
         {
             return false;
         }
-        ToolReply reply;
+        ToolReply? reply = Guarded(() => editor.Run(next.Name, next.Input));
+        if (reply is { } done)
+        {
+            next.Done.TrySetResult(done);
+            return true;
+        }
+        // The editor holds it: the person is asked first. Until they answer it can be stopped
+        // again, as while it waited (and it is, if a stop came while the editor looked at it).
+        lock (_lock)
+        {
+            next.Taken = false;
+            if (next.Stop.IsCancellationRequested)
+            {
+                next.Done.TrySetCanceled(next.Stop);
+                withdrawn = true;
+            }
+            else
+            {
+                _held = next;
+            }
+        }
+        if (withdrawn)
+        {
+            editor.DropHeld();
+        }
+        return true;
+    }
+
+    // What the editor answered, or that it could not: nothing it throws leaves the turn.
+    private static ToolReply? Guarded(Func<ToolReply?> ask)
+    {
         try
         {
-            reply = run(next.Name, next.Input);
+            return ask();
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
-            reply = new ToolReply(false, "the editor could not run it: " + e.Message);
+            return new ToolReply(false, "the editor could not run it: " + e.Message);
         }
-        next.Done.TrySetResult(reply);
-        return true;
     }
 
     /// <summary>
@@ -558,7 +664,7 @@ internal sealed class Conversation
 
     private Task<ToolReply> OnMainThread(Talk talk, string name, string input, CancellationToken stop)
     {
-        Waiting waiting = new(name, input);
+        Waiting waiting = new(name, input, stop);
         lock (_lock)
         {
             talk.Tools.Enqueue(waiting);

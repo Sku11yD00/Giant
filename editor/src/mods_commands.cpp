@@ -306,12 +306,12 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
                      return refused(*cannot);
                  }
                  switch (state.mods_scripts_consent) {
-                 case ModsScriptsConsent::by_command:
+                 case ScriptsConsent::by_command:
                      if (const auto error = allow_mod_scripts(list_file, *world, id, true)) {
                          return refused(*error);
                      }
                      break;
-                 case ModsScriptsConsent::ask: {
+                 case ScriptsConsent::ask: {
                      // (The person's to say, in the editor's window: not this command's. One question at a
                      // time: what they are reading is never changed under them.)
                      const ModsScriptsRequest request{path_to_utf8(*world), id};
@@ -323,9 +323,8 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
                      asked = true;
                      break;
                  }
-                 case ModsScriptsConsent::none:
-                     return refused("this editor has no window to ask the person in. A script is a program with their rights, so it is theirs "
-                                    "to allow: they must run the editor with its window and allow it there");
+                 case ScriptsConsent::none:
+                     return refused(k_no_window_to_ask);
                  }
              } else if (forbid || (set_on && !on)) {
                  // (Turned off, or told so: no longer allowed, and stopped now if the open world runs them.)

@@ -1139,7 +1139,7 @@ def main() -> int:
         print(__doc__)
         return 2
     # (A run with no person at the window: enable_mod may allow a mod's scripts itself.)
-    command = [sys.argv[1], "--mcp", "--allow-mods-scripts-by-command", *sys.argv[2:]]
+    command = [sys.argv[1], "--mcp", "--allow-mods-scripts-by-command", "--allow-scripts-by-command", *sys.argv[2:]]
     # The editor's settings folder for this run (which mods' scripts are allowed is kept there).
     settings_folder = tempfile.mkdtemp(prefix="giant_smoke_settings_")
     editor = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

@@ -27,6 +27,11 @@ internal static class Prompt
           work step by step (and so can you, with the undo command). Commands that write or delete files, save
           over a scene or a game save, or load another scene cannot be undone: say what you are about to do and
           ask before running one of those, unless the person already asked for exactly that.
+        - The person may have the editor ask them before a command of yours changes anything. The command then
+          waits for their answer, and comes back as not run if they say no. Take that as their decision: do not
+          try to get the same thing done another way. Tell them what you meant to do and ask what they want.
+          A script file (load_scripts) is loaded only once they allowed that file in the editor's window: a
+          script is a program that runs with their rights.
         - If a command fails, read the error, fix the arguments and try again; if it keeps failing, say what
           went wrong in plain words.
         - Positions are in metres, y is up. Do not guess entity ids, file paths or names: read them from a

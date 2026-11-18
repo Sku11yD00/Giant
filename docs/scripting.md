@@ -86,7 +86,23 @@ The full sample is `scripts/samples/HelloGiant`. The build puts it in
 
 - At start-up: `giant_editor --scripts path/to/MyScripts.dll`
 - From the AI or a tool: the `load_scripts` command with `{"path": ...}`;
-  `unload_scripts` stops them; `get_scripts` reports what runs.
+  `unload_scripts` stops them; `get_scripts` reports what runs. The first
+  time a command names a file, the editor asks you in its window whether
+  that file's scripts may run (a script is a program with your own rights
+  on your machine: it can read and change your files and use the network).
+  Nothing is loaded until you press "Load these scripts"; after that the
+  same file loads again without asking, however often you rebuild it,
+  until you close the editor (64 files at most; then the one allowed
+  longest ago is asked about again). Only the window's buttons answer: no
+  command can, so neither Claude in the Chat panel nor an MCP client nor a
+  script can load a file at a place you did not allow. What you allow is
+  the file at that place, not what it holds: whoever can write that file
+  can change what runs the next time it is loaded, so allow files in
+  folders that are yours. A file you gave with `--scripts` is yours
+  already and is not asked about.
+- Automated runs (tests, CI) start the editor with
+  `--allow-scripts-by-command`: `load_scripts` then loads at once. An
+  editor with no window (`--hidden`) and without that option refuses.
 - In the editor: the Engine panel shows the loaded scripts with Reload and
   Unload buttons.
 

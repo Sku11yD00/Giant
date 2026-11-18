@@ -385,6 +385,178 @@ internal static class Program
         Check(after.GetArrayLength() == 2 && after[1].GetProperty("role").GetString() == "user", "with nothing of the stopped request's answer");
     }
 
+    // An editor that holds the tools it is told to until the person answers (the editor's "ask before changes").
+    private sealed class HoldingEditor : IToolRunner
+    {
+        public Func<string, bool> Holds = _ => true;
+        public bool Answered;
+        public bool Allowed;
+        public string? Held;
+        public readonly List<string> Ran = [];
+        public int Dropped;
+        public int Asked; // how often it was asked whether the person answered
+
+        public ToolReply? Run(string name, string input)
+        {
+            if (Holds(input))
+            {
+                Held = input;
+                Answered = false;
+                return null;
+            }
+            Ran.Add(input);
+            return new ToolReply(true, "{\"ran\":true}");
+        }
+
+        public bool HeldAnswered()
+        {
+            ++Asked;
+            return Held == null || Answered;
+        }
+
+        public ToolReply FinishHeld()
+        {
+            string? input = Held;
+            Held = null;
+            if (input == null)
+            {
+                return new ToolReply(false, "nothing is held");
+            }
+            if (!Allowed)
+            {
+                return new ToolReply(false, "not run: the person did not allow this");
+            }
+            Ran.Add(input);
+            return new ToolReply(true, "{\"ran\":true}");
+        }
+
+        public void DropHeld()
+        {
+            ++Dropped;
+            Held = null;
+        }
+    }
+
+    // Gives the conversation turns until `done`, as the editor's frames would.
+    private static bool Frames(Conversation conversation, IToolRunner editor, Func<bool> done)
+    {
+        DateTime until = DateTime.UtcNow.AddSeconds(30);
+        while (!done())
+        {
+            if (DateTime.UtcNow > until)
+            {
+                return false;
+            }
+            if (!conversation.RunPending(editor))
+            {
+                Thread.Sleep(1);
+            }
+        }
+        return true;
+    }
+
+    private static void AHeldToolWaitsForThePerson()
+    {
+        (Conversation c, FakeService service) = Make();
+        HoldingEditor editor = new() { Holds = input => !input.Contains("\"look\"", StringComparison.Ordinal) };
+        service.Reply(Message("tool_use", Use("toolu_1", "run_command", "{\"name\":\"look\"}"), Use("toolu_2", "run_command", "{\"name\":\"a\"}"),
+                              Use("toolu_3", "run_command", "{\"name\":\"b\"}")));
+        service.Reply(Message("end_turn", Text("Done.")));
+        c.Send("do things");
+        // What the editor does not hold runs at once; the first it holds waits, and nothing after it runs.
+        Check(Frames(c, editor, () => editor.Held != null), "the editor holds the first change");
+        Check(editor.Ran.Count == 1 && editor.Held == "{\"name\":\"a\"}", "what only looks ran: " + string.Join(" | ", editor.Ran));
+        int asked = editor.Asked;
+        for (int i = 0; i < 50; ++i)
+        {
+            Check(!c.RunPending(editor), "nothing runs while the person has not answered");
+        }
+        Check(editor.Asked == asked + 50 && editor.Ran.Count == 1 && c.Busy && service.Requests == 1, "the editor is asked each turn, and Claude waits");
+        Check(Kinds(c) == "you tool result tool", "the held tool is shown, with no result yet: " + Kinds(c));
+        // Allowed: it runs, and its result goes back as any other's.
+        editor.Allowed = true;
+        editor.Answered = true;
+        Check(c.RunPending(editor) && editor.Ran.Count == 2 && editor.Held == null, "allowed, it runs on the next turn");
+        // The next change is asked about on its own; not allowed, it is not run and Claude is told.
+        Check(Frames(c, editor, () => editor.Held != null) && editor.Held == "{\"name\":\"b\"}", "the next change waits too");
+        editor.Allowed = false;
+        editor.Answered = true;
+        Check(Frames(c, editor, () => !c.Busy), "the work ends");
+        Check(editor.Ran.Count == 2 && editor.Dropped == 0, "what was not allowed did not run");
+        Check(Kinds(c) == "you tool result tool result tool result claude", "the lines: " + Kinds(c));
+        Check(Lines(c)[6].Ok == false && Lines(c)[6].Text.Contains("did not allow", StringComparison.Ordinal), "the refusal is shown as one");
+        JsonElement results = service.Request(1).GetProperty("messages")[2].GetProperty("content");
+        Check(results.GetArrayLength() == 3 && !(results[1].TryGetProperty("is_error", out JsonElement e) && e.GetBoolean()) &&
+              results[2].GetProperty("is_error").GetBoolean() && results[2].GetProperty("content").ToString().Contains("did not allow", StringComparison.Ordinal),
+              "Claude is told which ran and which the person did not allow");
+    }
+
+    private static void AHeldToolIsWithdrawn()
+    {
+        // Stopped while the person is asked: not run, the question withdrawn, the conversation whole.
+        (Conversation c, FakeService service) = Make();
+        HoldingEditor editor = new();
+        service.Reply(Message("tool_use", Use("toolu_1", "run_command", "{\"name\":\"a\"}"), Use("toolu_2", "run_command", "{\"name\":\"b\"}")));
+        c.Send("do two things");
+        Check(Frames(c, editor, () => editor.Held != null), "the editor holds the first");
+        Check(c.Stop(), "there was work to stop");
+        Check(Until(() => !c.Busy), "it stops while the person had not answered");
+        Check(editor.Dropped == 0 && editor.Held != null, "the editor is told on its next turn");
+        // (Answered at that very moment: stopped all the same.)
+        editor.Allowed = true;
+        editor.Answered = true;
+        c.RunPending(editor);
+        Check(editor.Dropped == 1 && editor.Held == null && editor.Ran.Count == 0, "the question is withdrawn and nothing ran");
+        Check(!c.RunPending(editor) && editor.Dropped == 1, "once");
+        Check(Kinds(c) == "you tool note" && Lines(c)[2].Text == "Stopped.", "the person is told: " + Kinds(c));
+        service.Reply(Message("end_turn", Text("Ok.")));
+        c.Send("carry on");
+        Check(Frames(c, editor, () => !c.Busy), "the next message works");
+        JsonElement results = service.Request(1).GetProperty("messages")[2].GetProperty("content");
+        Check(results.GetArrayLength() == 2 && results[0].GetProperty("is_error").GetBoolean() && results[1].GetProperty("is_error").GetBoolean() &&
+              results[0].GetProperty("content").ToString().Contains("stopped", StringComparison.Ordinal), "both calls answered as not run");
+
+        // Cleared while the person is asked: the same, and the new conversation's tools run.
+        (c, service) = Make();
+        editor = new HoldingEditor();
+        service.Reply(Message("tool_use", Use("toolu_1", "run_command", "{\"name\":\"a\"}")));
+        c.Send("do a thing");
+        Check(Frames(c, editor, () => editor.Held != null), "the editor holds it");
+        c.Clear();
+        service.Reply(Message("tool_use", Use("toolu_2", "run_command", "{\"name\":\"fresh\"}")));
+        service.Reply(Message("end_turn", Text("Fresh.")));
+        editor.Holds = _ => false;
+        Check(Until(() => !c.Working), "the cleared work ends");
+        c.Send("start again");
+        Check(Frames(c, editor, () => !c.Busy), "the new conversation works");
+        Check(editor.Dropped == 1 && editor.Ran.Count == 1 && editor.Ran[0] == "{\"name\":\"fresh\"}", "the old question was withdrawn, never run: " + string.Join(" | ", editor.Ran));
+        Check(Kinds(c) == "note you tool result claude", "the new conversation's lines: " + Kinds(c));
+
+        // Stopped while the editor is looking at the tool (before it says it holds it): withdrawn at once.
+        (c, service) = Make();
+        StoppingEditor stopping = new(c);
+        service.Reply(Message("tool_use", Use("toolu_1", "run_command", "{\"name\":\"a\"}")));
+        c.Send("do a thing");
+        Check(Frames(c, stopping, () => !c.Busy), "the work ends");
+        Check(stopping.Dropped == 1 && Kinds(c) == "you tool note", "the question is withdrawn as it is put: " + Kinds(c));
+    }
+
+    // An editor whose person stops the work while it decides to hold a tool.
+    private sealed class StoppingEditor(Conversation conversation) : IToolRunner
+    {
+        public int Dropped;
+
+        public ToolReply? Run(string name, string input)
+        {
+            conversation.Stop();
+            return null;
+        }
+
+        public bool HeldAnswered() => false;
+        public ToolReply FinishHeld() => new(false, "not run");
+        public void DropHeld() => ++Dropped;
+    }
+
     private static void AToolBeingRunIsNotStopped()
     {
         (Conversation c, FakeService service) = Make();
@@ -587,6 +759,8 @@ internal static class Program
             ("another model taking over", AnotherModelTakingOver),
             ("the steps of a message are bounded", TheStepsOfAMessageAreBounded),
             ("clearing starts afresh", ClearingStartsAfresh),
+            ("a tool the editor holds waits for the person", AHeldToolWaitsForThePerson),
+            ("a held tool can be stopped or cleared away", AHeldToolIsWithdrawn),
             ("the service's errors are said", TheServicesErrorsAreSaid),
             ("long results are cut", LongResultsAreCut),
             ("reading by cursor", ReadingByCursor),

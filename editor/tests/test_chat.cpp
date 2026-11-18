@@ -409,3 +409,211 @@ GIANT_TEST("chat stamp: moves when the conversation may have changed, never for 
     stamp.asked("clear");
     GIANT_CHECK(stamp.value() == 5);
 }
+
+GIANT_TEST("chat gate: a command that changes something waits for the person; looking never does") {
+    Fixture f;
+    ChatGate gate;
+    gate.asks = true;
+    const auto tool = [&](const Json& input) { return run_chat_tool(f.commands, "run_command", input, &gate); };
+    // Looking at the scene, searching and describing run at once.
+    GIANT_CHECK(tool({{"name", "get_time"}}).ok && gate.request() == nullptr && gate.answered());
+    GIANT_CHECK(run_chat_tool(f.commands, "find_commands", {{"words", "time"}}, &gate).ok);
+    GIANT_CHECK(run_chat_tool(f.commands, "describe_command", {{"name", "set_time"}}, &gate).ok && gate.request() == nullptr);
+    // A change is held: nothing is run, and the person is shown what it is.
+    ChatToolReply reply = tool({{"name", "set_time"}, {"args", {{"on", true}, {"hours", 6.5}}}});
+    GIANT_CHECK(reply.held && !reply.ok && reply.text.empty());
+    GIANT_CHECK(!f.state.scene.clock.on && !f.commands.can_undo());
+    const ChatGate::Request* asked = gate.request();
+    GIANT_CHECK(asked != nullptr && !gate.answered());
+    GIANT_CHECK(asked->command == "set_time" && asked->serial == 1 && !asked->about.empty() && asked->args_hidden == 0);
+    GIANT_CHECK(ai::parse_json(asked->args).value_or(Json()) == Json({{"on", true}, {"hours", 6.5}}));
+    // Until they answer there is no reply, and still nothing is run.
+    reply = finish_held_chat_tool(f.commands, gate);
+    GIANT_CHECK(!reply.ok && !reply.held && reply.text.find("not answered") != std::string::npos && gate.request() != nullptr);
+    GIANT_CHECK(!f.state.scene.clock.on);
+    // Allowed: it runs as it would have, once, on the undo history.
+    gate.answer(true);
+    GIANT_CHECK(gate.answered() && !f.state.scene.clock.on); // (the answer runs nothing itself)
+    gate.answer(false); // (a second answer is none: the first stands)
+    reply = finish_held_chat_tool(f.commands, gate);
+    GIANT_CHECK(reply.ok && f.state.scene.clock.on && f.state.scene.clock.hours == 6.5 && gate.request() == nullptr);
+    GIANT_CHECK(f.commands.undo_names().size() == 1);
+    GIANT_CHECK(!finish_held_chat_tool(f.commands, gate).ok && f.commands.undo_names().size() == 1);
+    // The next change asks again; not allowed, it is not run and Claude is told whose decision it was.
+    reply = tool({{"name", "set_time"}, {"args", {{"hours", 9.0}}}});
+    GIANT_CHECK(reply.held && gate.request()->serial == 2);
+    gate.answer(false, true); // ("the rest" goes with a yes only)
+    reply = finish_held_chat_tool(f.commands, gate);
+    GIANT_CHECK(!reply.ok && reply.text.find("did not allow") != std::string::npos && f.state.scene.clock.hours == 6.5);
+    GIANT_CHECK(tool({{"name", "undo"}}).held); // (undoing changes things too, and a no allowed nothing further)
+    gate.drop();
+    GIANT_CHECK(gate.request() == nullptr && gate.answered() && f.state.scene.clock.on);
+    GIANT_CHECK(!finish_held_chat_tool(f.commands, gate).ok && f.state.scene.clock.on); // (withdrawn: never run)
+}
+
+GIANT_TEST("chat gate: \"everything for this message\" lasts for that message, and the person can switch asking off") {
+    Fixture f;
+    ChatGate gate;
+    gate.asks = true;
+    const auto set_hours = [&](double hours) {
+        return run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", hours}}}}, &gate);
+    };
+    GIANT_CHECK(set_hours(7.0).held);
+    gate.answer(true, true);
+    GIANT_CHECK(finish_held_chat_tool(f.commands, gate).ok && f.state.scene.clock.hours == 7.0);
+    // The rest of the message runs without asking.
+    GIANT_CHECK(set_hours(8.0).ok && f.state.scene.clock.hours == 8.0 && gate.request() == nullptr);
+    // The next message asks again.
+    gate.message_over();
+    GIANT_CHECK(set_hours(9.0).held && f.state.scene.clock.hours == 8.0);
+    // A question withdrawn (the work stopped) allowed nothing.
+    gate.drop();
+    gate.message_over();
+    GIANT_CHECK(set_hours(9.0).held);
+    gate.drop();
+    // Asking switched off (the Chat panel's box): changes run at once. Without a gate too (tools, tests).
+    gate.asks = false;
+    GIANT_CHECK(set_hours(10.0).ok && f.state.scene.clock.hours == 10.0);
+    GIANT_CHECK(ChatGate().asks == false);
+}
+
+GIANT_TEST("chat gate: the person is not asked about what cannot run, nor twice about what asks them itself") {
+    Fixture f;
+    ChatGate gate;
+    gate.asks = true;
+    const auto tool = [&](const Json& input) { return run_chat_tool(f.commands, "run_command", input, &gate); };
+    // Arguments the command would refuse, a command there is none of, the chat itself, closing the editor.
+    ChatToolReply reply = tool({{"name", "set_time"}, {"args", {{"hours", 25}}}});
+    GIANT_CHECK(!reply.ok && !reply.held && reply.text.find("invalid arguments") != std::string::npos &&
+                reply.text.find("hours") != std::string::npos);
+    // (The same words as when it is run and refused.)
+    GIANT_CHECK(reply.text == run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", 25}}}}).text);
+    GIANT_CHECK(!tool({{"name", "no_such_command"}}).held && !tool({{"name", "chat_send"}, {"args", {{"text", "hi"}}}}).held &&
+                !tool({{"name", "set_time"}, {"args", "on"}}).held && gate.request() == nullptr);
+    // A command that would only ask the person in a window of its own (load_scripts, for a file not yet
+    // allowed) is let through to do so; when it would do more, it is asked about like any change.
+    ai::CommandRegistry commands;
+    bool only_asks = true;
+    gate.asks_itself = [&only_asks](std::string_view command, const Json& args) {
+        return command == "load_scripts" && args.is_object() && only_asks;
+    };
+    int loads = 0, quits = 0;
+    GIANT_CHECK(commands.add({"load_scripts", "Loads scripts.", Json{{"type", "object"}}, false, [&loads](const Json&, ai::CommandContext&) {
+                                  ++loads;
+                                  return ai::CommandResult::success({{"asked", true}});
+                              }}));
+    GIANT_CHECK(commands.add({"quit_editor", "Closes the editor.", Json{{"type", "object"}}, false, [&quits](const Json&, ai::CommandContext&) {
+                                  ++quits;
+                                  return ai::CommandResult::success();
+                              }}));
+    reply = run_chat_tool(commands, "run_command", {{"name", "load_scripts"}}, &gate);
+    GIANT_CHECK(reply.ok && !reply.held && loads == 1);
+    only_asks = false;
+    reply = run_chat_tool(commands, "run_command", {{"name", "load_scripts"}}, &gate);
+    GIANT_CHECK(reply.held && loads == 1 && gate.request()->command == "load_scripts");
+    gate.drop();
+    only_asks = true;
+    reply = run_chat_tool(commands, "run_command", {{"name", "quit_editor"}}, &gate);
+    GIANT_CHECK(!reply.ok && !reply.held && quits == 0 && gate.request() == nullptr);
+}
+
+GIANT_TEST("chat gate: long arguments are shown from their start, whole characters, with how much is left out") {
+    ai::CommandRegistry commands;
+    std::string given;
+    GIANT_CHECK(commands.add({"write_note", "Writes a note. More about it.", Json{{"type", "object"}}, false,
+                              [&given](const Json& args, ai::CommandContext&) {
+                                  given = args["text"].get<std::string>();
+                                  return ai::CommandResult::success();
+                              }}));
+    ChatGate gate;
+    gate.asks = true;
+    std::string text;
+    while (text.size() < 2 * ChatGate::k_most_shown) {
+        text += "\xC3\xA9"; // é: two bytes
+    }
+    GIANT_CHECK(run_chat_tool(commands, "run_command", {{"name", "write_note"}, {"args", {{"text", text}}}}, &gate).held);
+    const ChatGate::Request* asked = gate.request();
+    GIANT_CHECK(asked != nullptr && asked->about == "Writes a note.");
+    const usize whole = ai::to_json_text(Json{{"text", text}}, 2).size();
+    GIANT_CHECK(asked->args.size() <= ChatGate::k_most_shown && asked->args.size() + 1 >= ChatGate::k_most_shown &&
+                asked->args.size() + asked->args_hidden == whole);
+    // (Cut between characters: the shown part ends with a whole é.)
+    GIANT_CHECK(asked->args.ends_with("\xC3\xA9"));
+    // What runs is what was asked for, all of it.
+    gate.answer(true);
+    GIANT_CHECK(finish_held_chat_tool(commands, gate).ok && given == text);
+}
+
+GIANT_TEST("chat gate: what the bridge tells it ends a message's allowance and withdraws a stopped question") {
+    Fixture f;
+    ChatGate gate;
+    gate.asks = true;
+    const auto set_hours = [&](double hours) {
+        return run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", hours}}}}, &gate);
+    };
+    const auto allow_the_rest = [&](double hours) {
+        GIANT_CHECK(set_hours(hours).held);
+        gate.answer(true, true);
+        GIANT_CHECK(finish_held_chat_tool(f.commands, gate).ok && !set_hours(hours).held); // (the rest runs unasked)
+    };
+    // While Claude works on the message the allowance holds; reading the chat changes nothing.
+    allow_the_rest(1.0);
+    gate.chat_updated(true);
+    gate.chat_asked("read");
+    GIANT_CHECK(!set_hours(1.5).held);
+    // The work ended: the next change asks.
+    gate.chat_updated(false);
+    GIANT_CHECK(set_hours(2.0).held && f.state.scene.clock.hours == 1.5);
+    gate.drop();
+    // Another message sent (in the frame the last ended, before any update): asks again.
+    allow_the_rest(3.0);
+    gate.chat_asked("send");
+    GIANT_CHECK(set_hours(4.0).held);
+    // Stopped or cleared: the question is withdrawn at once, with the allowance.
+    for (const char* what : {"stop", "clear"}) {
+        gate.drop();
+        allow_the_rest(5.0);
+        gate.chat_asked(what);
+        GIANT_CHECK(set_hours(6.0).held && gate.request() != nullptr && !gate.asking().is_null());
+        gate.answer(true); // (answered at that very moment: withdrawn all the same)
+        gate.chat_asked(what);
+        GIANT_CHECK(gate.request() == nullptr && gate.asking().is_null() && f.state.scene.clock.hours == 5.0);
+        GIANT_CHECK(!finish_held_chat_tool(f.commands, gate).ok && f.state.scene.clock.hours == 5.0);
+    }
+}
+
+GIANT_TEST("chat gate: the held tool as the chat's other side asks for it, and get_chat's asking") {
+    Fixture f;
+    ChatGate gate;
+    gate.asks = true;
+    std::string reply = "old";
+    const int answered = static_cast<int>(HeldAsk::answered), finish = static_cast<int>(HeldAsk::finish), drop = static_cast<int>(HeldAsk::drop);
+    // None held: answered (there is nothing to wait for), and finishing fails without running anything.
+    GIANT_CHECK(gate.asking().is_null());
+    GIANT_CHECK(held_chat_tool(f.commands, gate, answered, reply) == k_chat_tool_done && reply.empty());
+    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply) == k_chat_tool_failed && !reply.empty() && !f.commands.can_undo());
+    // Held: not answered until the person does; asking tells what.
+    GIANT_CHECK(run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", 7.0}}}}, &gate).held);
+    GIANT_CHECK(held_chat_tool(f.commands, gate, answered, reply) == k_chat_tool_held && reply.empty());
+    const Json asking = gate.asking();
+    GIANT_CHECK(asking["command"] == "set_time" && asking["args_hidden"] == 0 &&
+                ai::parse_json(asking["args"].get<std::string>()).value_or(Json()) == Json({{"hours", 7.0}}));
+    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply) == k_chat_tool_failed && f.state.scene.clock.hours != 7.0 &&
+                gate.request() != nullptr); // (asked for too early: still held, not run)
+    gate.answer(true);
+    GIANT_CHECK(gate.asking().is_null()); // (answered: no longer asked, though not yet run)
+    GIANT_CHECK(held_chat_tool(f.commands, gate, answered, reply) == k_chat_tool_done);
+    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply) == k_chat_tool_done && f.state.scene.clock.hours == 7.0 &&
+                ai::parse_json(reply).has_value());
+    // Not allowed: a failure that says whose decision it was.
+    GIANT_CHECK(run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", 8.0}}}}, &gate).held);
+    gate.answer(false);
+    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply) == k_chat_tool_failed && reply.find("did not allow") != std::string::npos &&
+                f.state.scene.clock.hours == 7.0);
+    // Withdrawn: gone, and a later one is not touched by it.
+    GIANT_CHECK(run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", 9.0}}}}, &gate).held);
+    GIANT_CHECK(held_chat_tool(f.commands, gate, drop, reply) == k_chat_tool_done && gate.request() == nullptr && reply.empty());
+    GIANT_CHECK(held_chat_tool(f.commands, gate, drop, reply) == k_chat_tool_done); // (twice is nothing)
+    GIANT_CHECK(run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", 10.0}}}}, &gate).held &&
+                gate.asking()["command"] == "set_time" && f.state.scene.clock.hours == 7.0);
+}

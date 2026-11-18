@@ -4089,6 +4089,76 @@ Stopped work answers the calls not yet run as "not run". A cleared
 conversation is a new object: the old one's late lines and tools go
 nowhere.
 
+#### The person's say over Claude's changes (LW6b: ask before changes)
+
+A command may come from Claude in the chat, from an MCP client or from a
+script, and a person who is not a programmer cannot judge a command by its
+name. So two things are theirs to allow, in the editor's window and by no
+command (the same rule as a mod's scripts, LW7 part 3d):
+
+- **Claude's changes.** `ChatGate` (`chat.h`; `EditorState::chat_gate`)
+  holds the person's setting `asks` (the Chat panel's box; on with a
+  window, off with `--hidden`, where no one could answer and whoever drives
+  the editor has every command anyway; `--chat-asks` forces it on for the
+  tests of the waiting). While it asks, `run_command` for a command that is
+  not read-only checks the arguments against the schema (the person is not
+  asked about what could not run), then holds the command instead of
+  running it: `run_chat_tool` answers `held`. The panels show the question
+  (`draw_questions`: the command, its description's start, the arguments up
+  to 16,000 bytes with the count of what is left out). The buttons call
+  `ChatGate::answer`; nothing runs there. `finish_held_chat_tool` then runs
+  the command if it was allowed, exactly as it would have run, or gives
+  Claude "the person did not allow this". "Allow everything for this
+  message" lasts until the message's work ends, is stopped or cleared, or
+  another is sent (`ChatGate::chat_asked` and `chat_updated`, which the
+  bridge calls). Read-only commands, searching and describing never ask.
+  `load_scripts` is let through only when it would do nothing but ask in
+  its own window (`ChatGate::asks_itself`: a file not yet allowed, in an
+  editor that asks); where it would load at once (a file allowed before,
+  `--allow-scripts-by-command`) the gate asks as for any change.
+- **Between the two sides.** The C# conversation still never calls the
+  editor: `RunTool` returns 2 for "held", the conversation keeps that one
+  call (`_held`) and each frame asks `HeldTool(0)` whether the person has
+  answered (an integer compared: no strings cross while it waits), then
+  `HeldTool(1)` for the reply (`held_chat_tool`). Nothing else of that message runs
+  meanwhile. A held call can be stopped like one still waiting: Stop and
+  Clear cancel it, the editor drops the question at once (`ChatBridge::ask`)
+  and the conversation confirms on its next turn (`HeldTool(2)`); a stop
+  that arrives while the editor is deciding to hold is caught when the
+  hold is recorded. Once the person has answered and the main thread has
+  taken the call, it runs to its end as any taken call does. `get_chat`'s
+  `asking` tells an MCP client what is being asked.
+- **Script files.** `load_scripts` (`script_commands.cpp`) loads a file
+  only when `EditorState::scripts_consent` is `by_command`
+  (`--allow-scripts-by-command`, automated runs), or the file, by where it
+  really is on the disk (`script_file_key`: links resolved, so a link
+  pointed elsewhere is another file), is in `scripts_allowed`: the files
+  the person allowed in this run of the editor (64 at most, the oldest
+  asked about again) and the one given with `--scripts`. Otherwise it sets
+  `scripts_request` and answers `asked`; `answer_scripts_request`, the
+  window's button, loads it. With no window (`none`) it refuses. The list
+  is not kept between runs: a build's output is a file that changes, and
+  one question per file per session is the price.
+
+One question is shown at a time (a mod's scripts, then a script file,
+then Claude's change), in one window helper (`question_window`): it does
+not take the keyboard or a click as it appears, and its yes can be pressed
+only a moment after it appeared (1.5 s for scripts, 0.5 s for a change),
+so a click already on its way is not an answer; a question asked again
+after it was answered waits anew.
+
+Known limits: the setting is not kept between runs (it is on at every
+start); `capture_screenshot` is read-only, so it is never asked about,
+yet writes a picture into the `screenshots` folder; arguments longer than
+16,000 bytes are shown from their start only (JSON keys are in alphabetical
+order, so a long early field can push later ones out of view: the window
+says how much is left out); a script file is allowed by where it is, not
+by what it holds; "Allow everything for this message" covers file-writing commands
+too; the question shows the arguments Claude gave, not what the command
+will do with them (a path is shown as written); what the person allowed
+runs against the scene as it is when they answer, not as it was when they
+were asked.
+
 The key (`Keys`) is read from `ANTHROPIC_API_KEY`, else the first line of
 `claude_key.txt` in the person's own settings folder, with every message
 sent (so a corrected key is used at once). It is handed to the client
@@ -4269,7 +4339,7 @@ scene replaced), from a copy of the list, since a script may run
 `open_world` as it starts (a load broken off that way is done again the
 next frame). `load_scripts` refuses a file in the open world's mods
 folder (`in_mods_folder`), so the allowance cannot be walked around
-that way. Who may allow is `ModsScriptsConsent`: in the
+that way. Who may allow is `ScriptsConsent`: in the
 editor with its window, `enable_mod` with `scripts: true` only leaves a
 request (`EditorState::mods_scripts_request`) and the panels ask the
 person, whose button writes the list (`answer_mods_scripts_request`).
@@ -4290,8 +4360,9 @@ world with a mod of that id is put in the same folder); one assembly per
 mod; the scripts are loaded on the frame after the world is opened, on
 the main thread; mods' scripts added beside the world's own hear the
 people's events those have yet to be told, a little from before they
-started; `load_scripts`, as before, loads any assembly a command names
-outside the mods folder without asking the person (to come under ask-before-change, LW6b).
+started. `load_scripts` is under the person's say too (LW6b, "The
+person's say over Claude's changes" above): a file a command names is
+loaded once they allowed it in the window.
 
 Whole text files are read and written by `giant/core/text_files.h`
 (written beside and renamed over); game saves keep their own writer, which
