@@ -743,6 +743,43 @@ GIANT_TEST("scatter commands: add, change, list and remove layers, all undoable"
     GIANT_CHECK(f.run("undo").ok && f.state.scene.scatter.size() == 2 && f.state.scene.scatter[0].name == "stones");
 }
 
+GIANT_TEST("keep_damage: the damage of a kit a mod brought is not kept") {
+    PhysicsState physics;
+    EditorState state;
+    state.physics = &physics;
+    ai::CommandRegistry commands;
+    register_scene_commands(commands, state);
+    register_physics_commands(commands, state);
+    const auto run = [&](const char* name, const Json& args = Json::object()) { return commands.execute(name, args, {}); };
+    world::Scene& scene = state.scene;
+    flat(scene.terrain, 0, 0, 1, 0, 0.0f);
+    world::Kit tower;
+    tower.name = "tower";
+    tower.breakable = true;
+    for (int i = 0; i < 3; ++i) {
+        world::KitPiece p;
+        p.transform.position = {0.0, 0.5 + i, 0.0};
+        tower.pieces.push_back(p);
+    }
+    scene.kits.push_back(tower);
+    world::Entity e;
+    e.shape = world::Shape::kit;
+    e.kit = "tower";
+    e.transform.position = {32.0, 0.0, 32.0};
+    const world::EntityId t = scene.add(e);
+    physics.update(scene, scene.take_changes(), 1.0 / 60.0);
+    GIANT_CHECK(run("simulate", {{"on", true}}).ok);
+    const ai::CommandResult r = run("impact", {{"point", {32.6, 1.5, 32.0}}, {"radius", 0.3}, {"impulse", 6000.0}});
+    GIANT_CHECK(r.ok && r.value["loosened"] == 2);
+    // The tower is a mod's: a record of its pieces is not the world's to hold.
+    const std::vector<world::Kit> mods = {tower};
+    PhysicsState::KeptDamage kept = physics.keep_damage(scene, mods);
+    GIANT_CHECK(kept.kits_not_kept == 1 && kept.kits == 0 && kept.after.empty() && scene.kept_kit(t) == nullptr);
+    // The world's own: kept, as ever (the command says how many were not).
+    const ai::CommandResult own = run("keep_damage");
+    GIANT_CHECK(own.ok && own.value["kits"] == 1 && own.value["mods_kits_not_kept"] == 0 && scene.kept_kit(t) != nullptr);
+}
+
 GIANT_TEST("keep_damage: what simulating broke stays through stopping, undo takes it back, clear_damage stands it up") {
     PhysicsState physics;
     EditorState state;

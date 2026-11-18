@@ -565,6 +565,7 @@ std::string_view mod_thing_name(ModThing thing) {
     case ModThing::person_look: return "person_look";
     case ModThing::routine: return "routine";
     case ModThing::behaviour: return "behaviour";
+    case ModThing::kit: return "kit";
     }
     return "place";
 }
@@ -719,6 +720,15 @@ bool each_mod_file(World& world, const Each& each) {
             }
         }
     }
+    for (usize i = 0; i < world.kits.size(); ++i) {
+        for (usize p = 0; p < world.kits[i].pieces.size(); ++p) {
+            auto& piece = world.kits[i].pieces[p];
+            const std::string at = "kits[" + std::to_string(i) + "].pieces[" + std::to_string(p) + "].";
+            if (!each(piece.mesh, at + "mesh") || !material(piece.material, at + "material.")) {
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -846,8 +856,9 @@ bool world_own_people_are(std::span<const Person> own, std::span<const Person> b
 
 ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::span<const u32> slots, std::vector<Place>& places,
                              std::vector<PersonLook>& person_looks, std::vector<Routine>& routines, std::vector<Behaviour>& behaviours,
-                             std::vector<Person>& people, PersonId next_person_id) {
+                             std::vector<Kit>& kits, std::vector<Person>& people, PersonId next_person_id) {
     ModsApplied applied;
+    Laying<Kit> lay_kits{kits, ModThing::kit, {}, {}, false, {}};
     Laying<Place> lay_places{places, ModThing::place, {}, {}, false, {}};
     Laying<PersonLook> lay_looks{person_looks, ModThing::person_look, {}, {}, false, {}};
     Laying<Routine> lay_routines{routines, ModThing::routine, {}, {}, false, {}};
@@ -862,6 +873,7 @@ ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::span<co
         if (!wrong) wrong = lay_looks.lay(mod.person_looks, m, applied.changes);
         if (!wrong) wrong = lay_routines.lay(mod.routines, m, applied.changes);
         if (!wrong) wrong = lay_behaviours.lay(mod.behaviours, m, applied.changes);
+        if (!wrong) wrong = lay_kits.lay(mod.kits, m, applied.changes);
         usize people_at = 0;
         bool people_laid = false;
         if (!wrong && !mod.people.empty()) {
@@ -881,6 +893,7 @@ ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::span<co
                 people.erase(people.begin() + static_cast<std::ptrdiff_t>(people_at),
                              people.begin() + static_cast<std::ptrdiff_t>(people_at + mod.people.size()));
             }
+            lay_kits.undo();
             lay_behaviours.undo();
             lay_routines.undo();
             lay_looks.undo();
@@ -895,6 +908,7 @@ ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::span<co
             lay_looks.done.clear();
             lay_routines.done.clear();
             lay_behaviours.done.clear();
+            lay_kits.done.clear();
         }
     }
     return applied;

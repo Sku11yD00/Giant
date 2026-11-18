@@ -4178,9 +4178,28 @@ leaves out the people mods brought (by id) and names those changed;
 `world_own_people_are` answers "anything unsaved?" without copying
 65,536 people.
 
+A mod's kits (part 3c) are laid by name like the other things
+(`ModThing::kit`): one the world has is replaced whole, so its
+placements build the mod's pieces; any other is added. `world_own` tells
+the world's own kits at save, the save lists only their meshes
+(`open_world` imports the mods' kits' meshes itself), and it is refused
+while a world's own entity (of a loaded cell; the others are as their
+files have them, saved when this held) or scatter layer places a kit
+only a mod brings (a scatter layer placing it would stop the world
+loading; an entity would place nothing). When no mod brought a kit, the
+scene's kits are the world's as they are, in the scene's order. A
+placement's damage is recorded by piece number, so a mod's pieces are
+kept out of the world's records: `keep_damage` leaves the broken
+placements of a mod's kit as they were (`mods_kits_not_kept` counts
+them), and `GameSaves::world_identity` hashes the mods' kits after the
+world's own, so a game saved with a mod's kit is told as another world's
+without it (and the other way round). Known limit: damage the world kept
+on its own kit is shown on the pieces of a mod's kit that replaces it,
+by number.
+
 A mod's own files (part 3b) are named `mod:<path in its folder>` in its
-`world.json` (a look's mesh, its hair's file, its materials' maps and
-skin detail). A mod may be anyone's, so it is not trusted with the rest
+`world.json` (a look's or a kit piece's mesh, a look's hair's file, their
+materials' maps and skin detail). A mod may be anyone's, so it is not trusted with the rest
 of the machine: `check_mod_file_path` holds every path a mod names, its
 own or not, inside its folder (no `..`, `.`, empty part, backslash or
 colon, so no root, drive or server whose opening alone would tell it of
@@ -4198,7 +4217,7 @@ buffers and images were already held to its folder; `gltf_buffer_files`
 now leaves out any outside it too, so none is even looked at.) Known
 limits: on Linux a world folder with a backslash in its name has its
 mods' own files looked for under another spelling and not found (the
-editor writes every path with forward slashes); a look a mod brought, kept by `close_world` and saved as a new
+editor writes every path with forward slashes); a look or kit a mod brought, kept by `close_world` and saved as a new
 world's own, has the resolved path, which breaks if that folder moves.
 
 The editor lays the mods when a world is opened (`lay_mods`, from
@@ -4215,17 +4234,18 @@ thing can never become the world's by accident. `save_world` writes
 those, lists the world's own looks' meshes and not the mods' (`open_world`
 imports the mods' looks' meshes itself), refuses when the world's people
 would need what only a mod brings (the world must load without its mods),
-and `unsaved_settings` compares the world's own so found with the file's.
+and `unsaved_settings` compares the world's own so found with the file's
+(for kits, the scene's own when no mod brought one, as the save writes).
 Laying keeps an undo list per mod instead of copies, and the mods are
 laid before the old world is closed. Turning a mod on or
 off changes only the list: the scene changes when the world is next
 opened (`list_mods` reports `reopen`, also when a mod's `world.json` was
 written since), which keeps the undo history honest. Known limits: game
-saves do not record which mods were on; a world closed with `close_world`
+saves do not record which mods were on (only the mods' kits are part of
+what tells a save's world); a world closed with `close_world`
 keeps the mods' things as plain ones (people among them, under their
 mod ids: saved as a new world's own, the same mod then finds its ids
-taken and is left out with that reason). Kits and scripts are the
-parts to come.
+taken and is left out with that reason). Scripts are the part to come.
 
 Whole text files are read and written by `giant/core/text_files.h`
 (written beside and renamed over); game saves keep their own writer, which

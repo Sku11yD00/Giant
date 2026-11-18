@@ -436,6 +436,8 @@ Open-world systems:
   same whatever other mods are on, so saved games find them again.
 - LW7 part 3b: a mod keeps its own art in its folder (`mod:art/guard.glb`),
   so a mod is one folder that can be copied whole.
+- LW7 part 3c: a mod brings kits: one of a name the world has gives every
+  placement of it the mod's pieces, any other is added.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

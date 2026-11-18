@@ -9,6 +9,7 @@
 #include "mesh_library.h"
 #include "people_senses.h"
 #include "play_state.h"
+#include "world_streaming.h"
 
 #include "giant/core/assert.h"
 
@@ -17,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <unordered_set>
 #include <vector>
 
@@ -663,13 +665,15 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "simulation leaves it. A building moved, resized or given another kit afterwards stands whole "
          "again, and a tree placed anew (another model, size or place) stands. clear_damage takes it "
          "away. Returns `cells` (changed), `tiles` (dents kept), the totals kept (`kits`, `pieces`, "
-         "`trees`) and get_physics.",
+         "`trees`), `mods_kits_not_kept` (broken placements of a kit a mod brought: their damage is not "
+         "kept, the world's files hold nothing of a mod's pieces) and get_physics.",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          false,
          [&state](const Json&, CommandContext& context) {
              if (state.physics == nullptr) return no_physics();
              if (game_shown(state)) return CommandResult::failure(k_game_shown);
-             auto kept = std::make_shared<PhysicsState::KeptDamage>(state.physics->keep_damage(state.scene));
+             auto kept = std::make_shared<PhysicsState::KeptDamage>(state.physics->keep_damage(
+                 state.scene, state.world != nullptr ? std::span<const world::Kit>(state.world->mods_laid().kits) : std::span<const world::Kit>()));
              if (!kept->before.empty() || !kept->after.empty() || !kept->ground.empty()) {
                  const auto put = [&state, kept](bool after) {
                      std::unordered_set<world::CellCoord, world::CellCoordHash> cells;
@@ -697,6 +701,7 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              out["kits"] = kept->kits;
              out["pieces"] = kept->pieces;
              out["trees"] = kept->trees;
+             out["mods_kits_not_kept"] = kept->kits_not_kept;
              return CommandResult::success(out);
          }});
 

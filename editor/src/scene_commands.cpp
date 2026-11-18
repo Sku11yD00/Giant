@@ -986,16 +986,18 @@ void normalize_meshes(world::Scene& scene) {
 }
 
 // The mesh files the scene's entities, kits, scatter and people draw (normalized, once each).
-// `looks` false: without its person looks' (a world's save adds its own looks': a mod's are not its to list).
+// `looks_and_kits` false: without its person looks' and its kits' (a world's save adds its own looks' and kits': a mod's are not its to list).
 // A person's entity is not asked: it draws its look's mesh, and whether it is in the scene is only where the camera is.
-std::vector<std::string> meshes_used(const world::Scene& scene, bool looks = true) {
+std::vector<std::string> meshes_used(const world::Scene& scene, bool looks_and_kits = true) {
     std::vector<std::string> out;
     for (const Entity& e : scene.entities()) {
         if (e.shape == world::Shape::mesh && e.person == 0) out.push_back(MeshLibrary::normalize(e.mesh));
     }
-    for (const world::Kit& kit : scene.kits) {
-        for (const world::KitPiece& p : kit.pieces) {
-            if (p.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(p.mesh));
+    if (looks_and_kits) {
+        for (const world::Kit& kit : scene.kits) {
+            for (const world::KitPiece& p : kit.pieces) {
+                if (p.shape == world::Shape::mesh) out.push_back(MeshLibrary::normalize(p.mesh));
+            }
         }
     }
     for (const world::ScatterLayer& layer : scene.scatter) {
@@ -1004,7 +1006,7 @@ std::vector<std::string> meshes_used(const world::Scene& scene, bool looks = tru
         }
     }
     for (const world::PersonLook& look : scene.person_looks) {
-        if (looks) out.push_back(MeshLibrary::normalize(look.mesh));
+        if (looks_and_kits) out.push_back(MeshLibrary::normalize(look.mesh));
     }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
@@ -1777,7 +1779,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "The scene becomes the world: cells near the camera load in the background and far "
          "ones unload (get_world shows progress; set_world_streaming sets the radius). Undoable "
          "(undo brings the old scene back, unstreamed). Refused while the open world has unsaved "
-         "edits, unless discard_unsaved is true. Imports the meshes the world lists, and those of the person looks its mods bring.",
+         "edits, unless discard_unsaved is true. Imports the meshes the world lists, and those of the person looks and kits its mods bring.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["folder"],
              "properties": {"folder": {"type": "string", "minLength": 1, "maxLength": 1024},
                             "discard_unsaved": {"type": "boolean"}}})"),
@@ -1817,10 +1819,15 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              // swap_scene takes the next generation: the one open() was given.
              auto memo = w.memo(next);
              swap_scene(state, std::move(next), context, std::move(memo));
-             // The world's meshes, and those of the looks its mods brought (not in its list: they are not its own).
+             // The world's meshes, and those of the looks and kits its mods brought (not in its list: they are not its own).
              std::vector<std::string> meshes = state.world->index().meshes;
              for (const world::PersonLook& look : state.world->mods_laid().person_looks) {
                  meshes.push_back(look.mesh);
+             }
+             for (const world::Kit& kit : state.world->mods_laid().kits) {
+                 for (const world::KitPiece& piece : kit.pieces) {
+                     if (piece.shape == world::Shape::mesh) meshes.push_back(piece.mesh);
+                 }
              }
              Json mesh_errors = import_meshes(state, meshes);
              std::error_code error;
@@ -1837,11 +1844,11 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
          "world open, makes a new world there from the scene and opens it (the folder must "
          "not hold one). Cells with unsaved edits never unload, so nothing is lost by "
          "flying away; saving lets them go. Making a new world is refused while one is open "
-         "(close_world first). With mods on (list_mods), the places, person looks, routines and behaviours mods "
+         "(close_world first). With mods on (list_mods), the places, person looks, routines, behaviours, kits and people mods "
          "brought are not written (the world's files stay its own, and its own thing of a name a mod replaced is kept "
          "as it was); a change made to one of those is not saved (nor one made anew under such a name), and they are named in "
          "`mods_things_not_saved` (names only, at most 32; `mods_things_not_saved_count` is how many there are). "
-         "Refused when the world's people would need what only a mod brings.",
+         "Refused when the world's people would need what only a mod brings, or its entities or scatter place a kit only a mod brings.",
          Json::parse(R"({"type": "object", "additionalProperties": false,
              "properties": {"folder": {"type": "string", "minLength": 1, "maxLength": 1024}}})"),
          false,

@@ -157,8 +157,11 @@ public:
         usize kits = 0;   // kit placements with pieces down, kept now in all
         usize pieces = 0;
         usize trees = 0;
+        usize kits_not_kept = 0; // broken placements of a kit among `not_kept`: left as they were
     };
-    KeptDamage keep_damage(world::Scene& scene);
+    // `not_kept`: the kits mods brought. Their placements' damage is not kept (the record would
+    // be of the mod's pieces, in the world's own files); a record the world holds stays as it is.
+    KeptDamage keep_damage(world::Scene& scene, std::span<const world::Kit> not_kept = {});
     // What a game save keeps of the damage shown now, by cell, touching
     // nothing: the game's damage (world::Scene::game_damage), with what the
     // bodies have broken and the forest has felled now (as keep_damage

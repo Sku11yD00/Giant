@@ -209,9 +209,13 @@ struct GameSaves::Pending {
 
 // What a save's records depend on of the world: its kits (pieces) and scatter (tree points) and
 // its ground's samples; not its lighting, weather, cells or next id, which every edit moves.
-u64 GameSaves::world_identity(const world::WorldIndex& index) {
+// The kits its mods laid over it are of it too (after its own: a placement builds a mod's pieces,
+// so a save made with a mod's kit is not one of the world without it).
+u64 GameSaves::world_identity(const WorldStreaming& world) {
+    const world::WorldIndex& index = world.index();
     world::WorldIndex kept;
     kept.kits = index.kits;
+    kept.kits.insert(kept.kits.end(), world.mods_laid().kits.begin(), world.mods_laid().kits.end());
     kept.scatter = index.scatter;
     kept.terrain_samples = index.terrain_samples;
     return save::hash_text(world::save_world_index(kept));
@@ -540,7 +544,7 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
     const usize peopled = people.size();
     save::Meta meta;
     meta.world_name = state.world->folder().filename().string();
-    meta.world_hash = world_identity(state.world->index());
+    meta.world_hash = world_identity(*state.world);
     meta.saved_unix = static_cast<i64>(std::time(nullptr));
     meta.play_seconds = m_play_seconds;
     // Against the base when saving to the slot it is of (only what changed), else whole.
@@ -604,7 +608,7 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
     if (root_path.empty()) return "no world open (game saves are kept beside a world: open_world)";
     const fs::path path = root_path / slot;
     const std::string world_name = state.world->folder().filename().string();
-    const u64 world_hash = world_identity(state.world->index());
+    const u64 world_hash = world_identity(*state.world);
     const u64 generation = state.scene_generation, session = state.world->session();
     m_in_flight = true;
     m_status.doing = "loading";

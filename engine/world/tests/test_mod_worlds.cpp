@@ -1,5 +1,5 @@
 // What mods change of a world (world/mods.h): the mod's world file, and
-// laying mods over a world's places, looks, routines and behaviours.
+// laying mods over a world's places, looks, routines, behaviours, kits and people.
 #include "giant/world/mods.h"
 #include "giant/world/people.h"
 
@@ -63,6 +63,18 @@ Person person(PersonId id, const char* look_name, const char* home, const char* 
     return p;
 }
 
+Kit kit(const char* name, usize pieces, float strength = 0.0f) {
+    Kit k;
+    k.name = name;
+    k.strength = strength;
+    k.pieces.resize(pieces);
+    for (usize i = 0; i < pieces; ++i) {
+        k.pieces[i].name = "piece " + std::to_string(i);
+        k.pieces[i].transform.position = {static_cast<double>(i), 0.0, 0.0};
+    }
+    return k;
+}
+
 // A small world: two places, a look, a routine, a behaviour, two people using them all.
 struct World {
     std::vector<Place> places = {place("cottage", 10), place("smithy", 50, "work")};
@@ -72,8 +84,9 @@ struct World {
     std::vector<Person> people = {person(1, "villager", "cottage", "smith's day", "wary"), person(2, "villager", "", "", "")};
     PersonId next_person_id = 3;
     std::vector<u32> slots = {0, 1, 2, 3}; // (each mod's, by its place in the list)
+    std::vector<Kit> kits = {kit("house", 2), kit("shed", 1)};
     ModsApplied apply(const std::vector<const ModWorld*>& mods) {
-        return apply_mod_worlds(mods, slots, places, looks, routines, behaviours, people, next_person_id);
+        return apply_mod_worlds(mods, slots, places, looks, routines, behaviours, kits, people, next_person_id);
     }
     bool sound() const { return !check_people(places, looks, routines, people, next_person_id) && !check_behaviours(behaviours, people); }
 };
@@ -114,7 +127,7 @@ GIANT_TEST("mod worlds: a mod's world file is saved and loaded as it was, and ch
     GIANT_CHECK(load_mod_world(R"({"format":"giant-world","version":1})", kept) && load_mod_world("{", kept) && kept == w);
     GIANT_CHECK(load_error(R"(,"plcaes":[])").find("plcaes") != std::string::npos);
     GIANT_CHECK(load_error(R"(,"people":{"next_id":1,"list":[]})").find("next_id") != std::string::npos);
-    GIANT_CHECK(load_error(R"(,"kits":[])").find("kits") != std::string::npos);
+    GIANT_CHECK(load_error(R"(,"scatter":[])").find("scatter") != std::string::npos);
     GIANT_CHECK(load_error(R"(,"places":[{"name":"a","position":[0,0,0],"radius":5000}])").find("places[0]") != std::string::npos);
     GIANT_CHECK(load_error(R"(,"places":[{"name":"a","position":[0,0,0]},{"name":"a","position":[1,0,1]}])").find("two places are named \"a\"") !=
                 std::string::npos);
@@ -331,7 +344,7 @@ GIANT_TEST("mod worlds: a mod whose people cannot be added is left out whole, wi
     const World before = w;
     const auto same = [&] {
         return w.places == before.places && w.looks == before.looks && w.routines == before.routines && w.behaviours == before.behaviours &&
-               w.people == before.people;
+               w.people == before.people && w.kits == before.kits;
     };
     const auto refused = [&](const ModWorld& mod, const char* why) {
         const ModsApplied applied = w.apply({&mod});
@@ -523,4 +536,84 @@ GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never f
     GIANT_CHECK(!resolve_mod_files(edge, std::string(k_max_mesh_path_bytes - 6, 'w')) && edge.person_looks[0].mesh.size() == k_max_mesh_path_bytes);
     edge.person_looks[0].mesh = "mod:g.glb";
     GIANT_CHECK(resolve_mod_files(edge, std::string(k_max_mesh_path_bytes - 5, 'w')).has_value());
+}
+
+GIANT_TEST("mod worlds: a mod's kits are added or take the place of the world's, by name") {
+    // In its file as a world's are, its own files named from its folder.
+    ModWorld mod;
+    mod.kits = {kit("house", 3, 900.0f), kit("watchtower", 2)};
+    mod.kits[0].breakable = true;
+    mod.kits[1].pieces[0].shape = Shape::mesh;
+    mod.kits[1].pieces[0].mesh = "mod:art/tower.glb";
+    mod.kits[1].pieces[0].material.maps.base_color = "mod:art/tower.png";
+    // (A piece that is not a mesh may keep a mesh path: checked and found like any other.)
+    mod.kits[1].pieces[1].mesh = "mod:art/spare.glb";
+    mod.kits[1].pieces[1].material.skin = SkinLook{};
+    mod.kits[1].pieces[1].material.skin->detail_normal = "mod:art/grain.png";
+    ModWorld back;
+    GIANT_CHECK(!mod.empty() && !load_mod_world(save_mod_world(mod), back) && back == mod && has_mod_own_files(mod));
+    GIANT_CHECK(load_error(R"(,"kits":[{"name":"a","pieces":[]}])").find("kits[0].pieces") != std::string::npos);
+    GIANT_CHECK(load_error(R"(,"kits":[{"name":"a","pieces":[{}]},{"name":"a","pieces":[{}]}])").find("used twice") != std::string::npos);
+    ModWorld wrong = mod;
+    wrong.kits[1].pieces[0].mesh = "mod:../tower.glb";
+    GIANT_CHECK(check_mod_files(wrong).value_or("").find("kits[1].pieces[0].mesh") == 0 && load_mod_world(save_mod_world(wrong), back));
+    wrong = mod;
+    wrong.kits[1].pieces[0].material.maps.base_color = "//server/share/t.png";
+    GIANT_CHECK(check_mod_files(wrong).value_or("").find("kits[1].pieces[0].material.maps.base_color") == 0);
+    wrong = mod;
+    wrong.kits[1].pieces[1].material.skin->detail_normal = "mod:../grain.png";
+    GIANT_CHECK(check_mod_files(wrong).value_or("").find("kits[1].pieces[1].material.skin.detail_normal") == 0);
+    wrong = mod;
+    wrong.kits[1].pieces[1].mesh = "c:/spare.glb";
+    GIANT_CHECK(check_mod_files(wrong).value_or("").find("kits[1].pieces[1].mesh") == 0);
+    ModWorld resolved = mod;
+    GIANT_CHECK(!resolve_mod_files(resolved, "w/mods/forts") && resolved.kits[1].pieces[0].mesh == "w/mods/forts/art/tower.glb" &&
+                resolved.kits[1].pieces[0].material.maps.base_color == "w/mods/forts/art/tower.png" && resolved.kits[0] == mod.kits[0] &&
+                resolved.kits[1].pieces[1].mesh == "w/mods/forts/art/spare.glb" &&
+                resolved.kits[1].pieces[1].material.skin->detail_normal == "w/mods/forts/art/grain.png");
+    // Laid over the world: the house replaced whole, the watchtower added, the shed as it was.
+    World w;
+    const World before = w;
+    ModWorld first, later;
+    first.kits = {kit("gate", 1)};
+    later.kits = {kit("watchtower", 5), kit("well", 1)};
+    const ModsApplied applied = w.apply({&first, &resolved, &later});
+    GIANT_CHECK(applied.problems.empty() && applied.changes.size() == 5 && w.kits.size() == 5 && w.kits[0] == resolved.kits[0] &&
+                w.kits[1] == before.kits[1] && w.kits[2] == first.kits[0] && w.kits[3] == later.kits[0] && w.kits[4] == later.kits[1]);
+    GIANT_CHECK(applied.changes[0] == (ModChange{0, ModThing::kit, "gate", ModChange::Did::added, 0}) &&
+                applied.changes[1] == (ModChange{1, ModThing::kit, "house", ModChange::Did::replaced_world, 0}) &&
+                applied.changes[2] == (ModChange{1, ModThing::kit, "watchtower", ModChange::Did::added, 0}) &&
+                applied.changes[3] == (ModChange{2, ModThing::kit, "watchtower", ModChange::Did::replaced_mod, 1}) &&
+                applied.changes[4] == (ModChange{2, ModThing::kit, "well", ModChange::Did::added, 0}) &&
+                mod_thing_name(ModThing::kit) == "kit");
+    // A mod left out for another reason leaves the kits as they were.
+    w = before;
+    ModWorld broken = mod;
+    broken.people = {person(1, "nobody's look", "", "", "")};
+    const ModsApplied left_out = w.apply({&broken});
+    GIANT_CHECK(left_out.problems.size() == 1 && left_out.changes.empty() && w.kits == before.kits);
+    // So does one that sets a kit twice.
+    ModWorld twice;
+    twice.kits = {kit("well", 1), kit("well", 2)};
+    GIANT_CHECK(w.apply({&twice}).problems.size() == 1 && w.kits == before.kits);
+    // Told from the world's own when it is saved, as the other things are.
+    std::vector<std::string> not_kept;
+    w.apply({&mod});
+    const std::vector<Kit> brought = {w.kits[0], w.kits[2]};
+    w.kits[2].pieces.pop_back();
+    w.kits.push_back(kit("barn", 2));
+    const std::vector<Kit> own = world_own<Kit>(before.kits, brought, w.kits, &not_kept);
+    GIANT_CHECK(own == std::vector<Kit>({before.kits[0], before.kits[1], kit("barn", 2)}) && not_kept == std::vector<std::string>{"watchtower"});
+}
+
+GIANT_TEST("mod worlds: the kit written out in docs/mods.md loads") {
+    ModWorld mod;
+    const auto error = load_mod_world(R"({"format":"giant-mod-world","version":1,"kits":[
+      {"name": "watchtower", "breakable": true, "pieces": [
+        {"name": "base", "shape": "mesh", "mesh": "mod:art/tower_base.glb"},
+        {"name": "top", "shape": "mesh", "mesh": "mod:art/tower_top.glb",
+         "position": [0, 6, 0]}
+      ]}
+    ]})", mod);
+    GIANT_CHECK(!error && mod.kits.size() == 1 && mod.kits[0].pieces.size() == 2 && mod.kits[0].pieces[1].transform.position.y == 6.0);
 }

@@ -15,6 +15,7 @@
 #include <limits>
 #include <cmath>
 #include <cstdint>
+#include <string_view>
 
 namespace giant::editor {
 
@@ -719,15 +720,49 @@ WorldStreaming::Saved WorldStreaming::save(const world::Scene& scene, std::vecto
     return write(scene, std::move(meshes));
 }
 
+namespace {
+
+// What of the world's own (an entity of a loaded cell, a scatter layer) places a kit of `mods`
+// that is not among `kits` (the world's own), or nothing. (Cells not loaded are as their files
+// have them: saved when this held. A kit in neither is as it is without mods: not there.)
+std::optional<std::string> places_mods_kit(const world::Scene& scene, const std::vector<world::Kit>& kits,
+                                           const std::vector<world::Kit>& mods) {
+    std::unordered_set<std::string_view> names;
+    for (const world::Kit& kit : mods) {
+        names.insert(kit.name);
+    }
+    for (const world::Kit& kit : kits) {
+        names.erase(kit.name);
+    }
+    if (names.empty()) return std::nullopt;
+    for (const Entity& e : scene.entities()) {
+        if (e.person == 0 && e.shape == world::Shape::kit && names.contains(e.kit)) {
+            return "entity " + std::to_string(e.id) + " places the kit \"" + e.kit + "\"";
+        }
+    }
+    for (const world::ScatterLayer& layer : scene.scatter) {
+        for (const world::ScatterItem& item : layer.items) {
+            if (item.shape == world::Shape::kit && names.contains(item.kit)) {
+                return "the scatter layer \"" + layer.name + "\" places the kit \"" + item.kit + "\"";
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
 WorldStreaming::Own WorldStreaming::own(const world::Scene& scene, std::vector<std::string>* not_kept) const {
     if (!m_mods.any) {
-        return {scene.places, scene.person_looks, scene.routines, scene.behaviours, scene.people};
+        return {scene.places, scene.person_looks, scene.routines, scene.behaviours, scene.people, scene.kits};
     }
     return {world::world_own<world::Place>(m_index.places, m_mods.places, scene.places, not_kept),
             world::world_own<world::PersonLook>(m_index.person_looks, m_mods.person_looks, scene.person_looks, not_kept),
             world::world_own<world::Routine>(m_index.routines, m_mods.routines, scene.routines, not_kept),
             world::world_own<world::Behaviour>(m_index.behaviours, m_mods.behaviours, scene.behaviours, not_kept),
-            world::world_own_people(m_mods.people, scene.people, not_kept)};
+            world::world_own_people(m_mods.people, scene.people, not_kept),
+            // (No mod brought a kit: the scene's are the world's, as they are.)
+            m_mods.kits.empty() ? scene.kits : world::world_own<world::Kit>(m_index.kits, m_mods.kits, scene.kits, not_kept)};
 }
 
 WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vector<std::string> meshes) {
@@ -744,8 +779,20 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
                     "). Where its people use what only a mod brings, give them the world's own, or make one for the world under another name"};
         }
     }
+    if (m_mods.any && !m_mods.kits.empty()) {
+        if (const auto placed = places_mods_kit(scene, owned.kits, m_mods.kits)) {
+            return {"the world cannot be saved: " + *placed +
+                    " that only a mod brings, and without the mod it is not there (a scatter layer placing it "
+                    "would stop the world loading). Remove those, or make a kit for the world under another name"};
+        }
+    }
     for (const world::PersonLook& look : owned.person_looks) {
         meshes.push_back(MeshLibrary::normalize(look.mesh));
+    }
+    for (const world::Kit& kit : owned.kits) {
+        for (const world::KitPiece& piece : kit.pieces) {
+            if (piece.shape == world::Shape::mesh) meshes.push_back(MeshLibrary::normalize(piece.mesh));
+        }
     }
     // What the scene holds, by cell.
     std::unordered_map<CellCoord, std::vector<Entity>, world::CellCoordHash> members;
@@ -981,7 +1028,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     }
     if (!write_far(scene, kept_heights, saved)) return saved;
     m_index.lighting = scene.lighting;
-    m_index.kits = scene.kits;
+    m_index.kits = std::move(owned.kits);
     m_index.scatter = scene.scatter;
     m_index.weather = scene.weather;
     m_index.clock = scene.clock;
@@ -1179,19 +1226,22 @@ u32 WorldStreaming::unsaved_cells(const world::Scene& scene) const {
 bool WorldStreaming::unsaved_settings(const world::Scene& scene) const {
     // (With mods on, the scene's are not the file's: the world's own among them are what is compared.
     // A mods' thing changed in the scene is not unsaved: it is not the world's to save.)
-    bool same_people_things = false;
+    bool same_people_things = false; // (and kits)
     if (m_mods.any) {
         same_people_things =
             world::world_own<world::Place>(m_index.places, m_mods.places, scene.places) == m_index.places &&
             world::world_own<world::PersonLook>(m_index.person_looks, m_mods.person_looks, scene.person_looks) == m_index.person_looks &&
             world::world_own<world::Routine>(m_index.routines, m_mods.routines, scene.routines) == m_index.routines &&
             world::world_own<world::Behaviour>(m_index.behaviours, m_mods.behaviours, scene.behaviours) == m_index.behaviours &&
-            world::world_own_people_are(m_index.people, m_mods.people, scene.people);
+            world::world_own_people_are(m_index.people, m_mods.people, scene.people) &&
+            (m_mods.kits.empty() ? scene.kits == m_index.kits
+                                 : world::world_own<world::Kit>(m_index.kits, m_mods.kits, scene.kits) == m_index.kits);
     } else {
         same_people_things = scene.places == m_index.places && scene.person_looks == m_index.person_looks &&
-                             scene.routines == m_index.routines && scene.behaviours == m_index.behaviours && scene.people == m_index.people;
+                             scene.routines == m_index.routines && scene.behaviours == m_index.behaviours &&
+                             scene.people == m_index.people && scene.kits == m_index.kits;
     }
-    return !(scene.lighting == m_index.lighting) || !(scene.kits == m_index.kits) ||
+    return !(scene.lighting == m_index.lighting) ||
            !(scene.scatter == m_index.scatter) || !(scene.weather == m_index.weather) ||
            !(scene.clock == m_index.clock) || !(scene.water == m_index.water) || !same_people_things ||
            scene.next_person_id != m_index.next_person_id ||

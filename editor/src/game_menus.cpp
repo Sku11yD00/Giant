@@ -227,7 +227,7 @@ void GameMenus::read_slots() {
         m_message = "No world open: games are saved beside an open world.";
         return;
     }
-    const u64 hash = GameSaves::world_identity(m_state.world->index());
+    const u64 hash = GameSaves::world_identity(*m_state.world);
     m_reading = true;
     m_message = "Reading saves...";
     // On a job: every slot's manifest opened (no wait on the disk on the frame).
