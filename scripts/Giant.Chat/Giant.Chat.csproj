@@ -1,0 +1,17 @@
+<!-- The editor's chat with Claude. Editor only: it is never part of a game
+     (a game holds no key and talks to no one). -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Giant.Chat</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Listed in third_party/README.md, with what it brings along. -->
+    <PackageReference Include="Anthropic" Version="[13.10.0]" />
+    <InternalsVisibleTo Include="ChatTests" />
+  </ItemGroup>
+</Project>

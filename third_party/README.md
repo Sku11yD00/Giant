@@ -17,6 +17,15 @@ pinned to an exact version and listed here before it is used.
 | [stb_image](https://github.com/nothings/stb) | 2.30 (`f58f558`, SHA-256 pinned) | public domain or MIT | texture (decodes PNG, JPEG, TGA, BMP for the cooker) | photoreal part 3a-3 |
 | [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo) (rgbcx, bc7enc, bc7decomp only) | `b943862` (SHA-256 pinned) | MIT or public domain | texture (BC1, BC4, BC5, BC7 block encoding; decoding in tests) | photoreal part 3a-3 |
 
+The editor's chat with Claude (`scripts/Giant.Chat`, C#; the editor only,
+never part of a game) takes these from NuGet, pinned by exact version and
+by the content hashes in `packages.lock.json`:
+
+| Library | Version | Licence | Used by | Added in |
+| --- | --- | --- | --- | --- |
+| [Anthropic](https://github.com/anthropics/anthropic-sdk-csharp) (the official C# SDK for the Claude API) | 13.10.0 (NuGet) | Apache 2.0 | the editor's chat (requests to Claude's service) | LW6b part 1 |
+| [Microsoft.Extensions.AI.Abstractions](https://github.com/dotnet/extensions) | 10.5.1 (NuGet; the Anthropic SDK depends on it) | MIT | loaded with the SDK, not used directly | LW6b part 1 |
+
 Platform runtimes (Microsoft redistributables, not open source; shipped next
 to the executables like a system component, never compiled into engine code):
 

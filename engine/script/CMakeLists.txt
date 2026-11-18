@@ -7,8 +7,10 @@ if(NOT WIN32)
   target_link_libraries(giant_script PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
-# The C# side: the engine's API (Giant.Scripting), the sample scripts and the
-# scripts these tests load, built with the .NET SDK into build/managed.
+# The C# side: the engine's API (Giant.Scripting), the sample scripts, the
+# scripts these tests load, and the editor's chat (Giant.Chat, in its own
+# folder with the libraries it brings: no part of a game) with its tests,
+# built with the .NET SDK into build/managed.
 if(GIANT_DOTNET)
   set(managed ${CMAKE_BINARY_DIR}/managed)
   set(dotnet_build ${GIANT_DOTNET} build --nologo -v quiet -c Release
@@ -20,6 +22,10 @@ if(GIANT_DOTNET)
             ${PROJECT_SOURCE_DIR}/scripts/samples/HelloGiant/HelloGiant.csproj
     COMMAND ${dotnet_build} -o ${managed}/tests/ScriptTests
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/managed/ScriptTests/ScriptTests.csproj
+    COMMAND ${dotnet_build} -o ${managed}/chat
+            ${PROJECT_SOURCE_DIR}/scripts/Giant.Chat/Giant.Chat.csproj
+    COMMAND ${dotnet_build} -o ${managed}/tests/ChatTests
+            ${PROJECT_SOURCE_DIR}/editor/tests/managed/ChatTests/ChatTests.csproj
     COMMENT "Building the C# API and scripts"
     VERBATIM
   )

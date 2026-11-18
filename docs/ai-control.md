@@ -2,7 +2,8 @@
 
 Everything the editor can do is a command (AGENTS.md rule 7). The same
 commands are available to people (menus and panels), to C# scripts, to the
-built-in assistant (later), and to outside AI tools through MCP.
+built-in assistant (the chat with Claude, below), and to outside AI tools
+through MCP.
 
 ## Connect Claude Code
 
@@ -30,6 +31,46 @@ disconnects. Ask things like "make the background a sunset orange" or "what
 GPU is the editor using?" or "build a small village with a church and light it
 like late afternoon"; Claude calls the tools, looks at the result with
 `capture_screenshot`, and can undo what it did.
+
+## The chat with Claude, inside the editor
+
+The editor has its own assistant: you write what you want in plain words
+("plant a row of trees along the road", "why is this person standing
+still?") and Claude does it, with the same commands your buttons run. What
+it changes in the scene is on the undo history like your own work.
+
+It needs two things:
+
+- **Your Claude key.** Make one in the Claude Console
+  (platform.claude.com), then either set the `ANTHROPIC_API_KEY`
+  environment variable before starting the editor, or put the key alone on
+  the first line of a text file: `%APPDATA%\Giant\claude_key.txt` on
+  Windows (`~/.config/Giant/claude_key.txt` on Linux). The file is read
+  when you send a message, so the editor need not be restarted. The key is
+  only ever read from those two places: it is not in the project, not in
+  saved scenes, not in the log, and no game made with the engine contains
+  the chat at all. Using the chat is paid for by that key, by the amount
+  of text sent and received (`get_chat` counts the tokens).
+- **The .NET 10 runtime**, as C# scripts do.
+
+For now the chat is its commands (the panel is the next part):
+
+| Command | What it does |
+| --- | --- |
+| `chat_send` | Sends `text` to Claude. Returns at once; the answer and what Claude does arrive over the next seconds |
+| `get_chat` | The conversation's lines after serial `after` (at most `limit`, 1 to 256, default 64), oldest first: `kind` is `you`, `claude`, `tool` (a tool Claude called: `tool` names it, `text` is its arguments), `result` (what came back, with `ok`), `note` or `error`. Also `busy` (Claude is working), `started`, `key_found`, `model`, `input_tokens` and `output_tokens` so far, and `after` (pass it to the next call), `latest` and `oldest` (2,000 lines are kept) |
+| `stop_chat` | Stops Claude's work on the last message: no further commands run. What it already did stays (undo takes it back) |
+| `clear_chat` | Forgets the conversation; the next message starts a new one |
+
+Claude does not get the several hundred commands as a list. It has three
+tools: `find_commands` (search them by words), `describe_command` (one
+command's description and arguments) and `run_command`. It cannot close the
+editor or talk to itself through the chat's own commands, and it is told to
+ask before anything that cannot be undone (writing or deleting files,
+loading another scene). One message may take up to 40 steps, then it stops
+and says so. The model is Claude Opus 5.5; if its safety checks decline a
+request, Claude's service retries it on the model it recommends instead
+(server-side fallback) before giving up.
 
 ## Commands so far
 
@@ -187,6 +228,8 @@ like late afternoon"; Claude calls the tools, looks at the result with
 | `capture_screenshot` | no | A PNG of the editor as it looks now, so the AI can see it |
 | `load_scripts`, `unload_scripts` | runtime only | Loads, reloads or stops C# scripts (`docs/scripting.md`) |
 | `get_scripts` | no | The loaded script assembly and how many scripts run |
+| `chat_send`, `stop_chat`, `clear_chat` | the chat only, not undoable | The chat with Claude (above): send a message, stop its work, forget the conversation |
+| `get_chat` | no | The chat's lines and state (above) |
 | `quit_editor` | closes | Closes the editor |
 
 ## Adding a command

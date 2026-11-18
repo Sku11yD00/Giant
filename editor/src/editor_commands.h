@@ -72,6 +72,7 @@ class AudioState;
 class GameSaves;
 class HitTargets;
 class WorldStreaming;
+class ChatLink;
 
 // Where the main thread's time went in a frame, for finding what makes a
 // slow one (get_engine_info's `phases_since`).
@@ -315,6 +316,9 @@ struct EditorState {
     bool scripts_unload_requested = false;
     u32 scripts_running = 0;         // updated by the main loop
     bool dotnet_available = true;    // false once starting .NET failed
+
+    // The chat with Claude (chat.h). Null where there is none (tests).
+    ChatLink* chat = nullptr;
 };
 
 // A change to the current scene: its undo and redo only run while the scene
@@ -366,6 +370,8 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
 void connect_walkers(EditorState& state);
 // ragdoll_entity, stop_ragdoll, get_ragdoll: characters gone limp (ragdoll_state.h).
 void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state);
+// chat_send, get_chat, stop_chat, clear_chat: the chat with Claude (chat.h).
+void register_chat_commands(ai::CommandRegistry& registry, EditorState& state);
 // Lets the ragdolls follow the fixed steps run by hand too (state.physics,
 // state.ragdolls and state.meshes set; after connect_walkers).
 void connect_ragdolls(EditorState& state);

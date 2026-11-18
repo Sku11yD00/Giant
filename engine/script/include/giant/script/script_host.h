@@ -74,6 +74,13 @@ public:
     // Scripts running now (a script that threw is stopped and not counted).
     u32 running_scripts() const;
 
+    // A function of another C# assembly, for parts of the editor written in
+    // C# (its chat): a static method marked [UnmanagedCallersOnly] of
+    // `type` ("Namespace.Type, Assembly"; plain ASCII, as is `method`).
+    // The assembly is loaded on first use, apart from the scripts and with
+    // the libraries next to it. Null (logged) when it cannot be found.
+    void* function(const std::filesystem::path& assembly, std::string_view type, std::string_view method);
+
     struct Api;
     struct ConstructKey {
     private:
