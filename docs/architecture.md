@@ -4033,6 +4033,91 @@ A script answers by commands, as ever: `send_person`, `set_person`,
 not told of (there is no state it went to). A game save does not keep
 the events.
 
+### The chat with Claude (LW6b part 1)
+
+The editor's own assistant: the person writes what they want, Claude does
+it with the editor's commands. Three pieces, each knowing as little as it
+can of the others:
+
+- **The conversation** is C# (`scripts/Giant.Chat`, built to
+  `managed/chat` with the libraries it brings), because the official
+  client for Claude's service is a C# library and the engine has no HTTP
+  of its own. `Conversation` keeps what is sent to Claude (the person's
+  messages, Claude's replies handed back whole, thinking included, and the
+  tools' results) and the lines the person reads, and works one message at
+  a time on pool threads: a request, then the tools the reply asks for,
+  then the next request, until Claude has no more to do, the person stops
+  it, or 40 requests have gone (`MostSteps`). It asks for Claude Opus 5.5
+  at medium effort, 16,000 tokens a reply, with the request's unchanging
+  start cached and the service's own fallback for declined requests.
+- **The tools** are C++ (`editor/src/chat_commands.cpp`): `find_commands`
+  scores every command by the words asked for (found where a word of the
+  command starts with one: "rain" in "rainfall", not in "terrain"; one in
+  the name counts four times one in the description; words under three
+  letters and "the", "and" and the like find nothing), `describe_command` gives one
+  command's description and schema, `run_command` runs one through
+  `CommandRegistry::execute` as a button would, so it is checked against
+  its schema and lands on the undo history. Three tools instead of several
+  hundred: the commands' descriptions alone would be most of every request.
+  The chat's own commands and `quit_editor` are neither found nor run.
+- **The bridge** (`editor/src/chat_bridge.cpp`) joins them through the
+  script host's .NET (`ScriptHost::function` finds a static method of
+  another assembly, which loads apart from the scripts with its own
+  libraries). .NET and the chat start with the first message; reading,
+  stopping or clearing a chat that never started answers without them.
+
+Threads: commands may only run on the main thread, and a request to
+Claude takes seconds. So the conversation never calls the editor: a tool
+call waits in a queue, and `ChatBridge::update`, once a frame after the
+scripts (and while the window is minimised), runs one (one a frame: a
+command may take a while) and hands the result back to the waiting task.
+Everything the editor calls returns at once. A stop reaches a waiting call
+before it is taken; one the main thread has taken runs to its end and its
+true result goes back.
+
+What keeps a conversation whole whatever happens: Claude's reply and the
+results of every tool it asked for are added to it together, after the
+last tool, or not at all. Tools run only for a reply that ended by asking
+for them: one cut off (at the length limit, or any other way) may have a
+tool's arguments cut short, so none of its tools run and it is not kept;
+words alone that were cut are kept, so "go on" works. A reply with nothing
+to hand back (thoughts alone, empty text) is not kept. A reply the service
+declined is not used at all: the person is told, and when it was the
+message itself that was declined (no tool had run yet) the message is taken
+back too, or it would be sent, and declined, again with every later one.
+Stopped work answers the calls not yet run as "not run". A cleared
+conversation is a new object: the old one's late lines and tools go
+nowhere.
+
+The key (`Keys`) is read from `ANTHROPIC_API_KEY`, else the first line of
+`claude_key.txt` in the person's own settings folder, with every message
+sent (so a corrected key is used at once). It is handed to the client
+library and nowhere else: not logged, not in `get_chat`, never in the
+project. The library sends it to Claude's service, or to the address in
+`ANTHROPIC_BASE_URL` when that variable is set (the tests set it, to
+their stand-in). The chat is no part of a game: it lives in `managed/chat`
+apart from the scripts' API, for game packaging to leave out when there
+is such a thing.
+
+Tests: the conversation against a stand-in for the service inside the
+process (`editor/tests/managed/ChatTests`: what is sent, tools on the
+calling thread, results together, declined and cut replies, stopping,
+clearing, the step limit, errors, another model taking over), the tools
+and commands without .NET
+(`editor/tests/test_chat.cpp`), and the editor end to end against a local
+stand-in server (`tools/chat_smoke.py`: no key, the key file, a corrected
+key, a command found, described, run and undone, what the service was
+sent). None of
+them reaches Claude's real service.
+
+Not yet: the Chat panel, Claude's words arriving as they are written
+(replies come whole), pictures (a screenshot's result says there was one),
+asking before each change, shortening a long conversation (clear it when
+Claude's service says it is too long), and counting the tokens of requests
+another model took over (`get_chat` counts the answering model's). A C#
+script can still run the commands Claude may not (scripts are the
+person's own code).
+
 ### Nobody appears close by in view (LW4 part 2)
 
 `PeopleState` is told what the camera sees (`PeopleState::view`, set by

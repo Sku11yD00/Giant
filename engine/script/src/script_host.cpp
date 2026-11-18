@@ -267,6 +267,7 @@ struct ScriptHost::Api {
     bool events_failed = false;
     CommandHandler commands;
     NativeApi native{};
+    LoadAssemblyAndGetFunctionPointer load = nullptr;
 };
 
 ScriptHost::ScriptHost(ConstructKey, std::unique_ptr<Api> api) : m_api(std::move(api)) {}
@@ -343,6 +344,7 @@ std::unique_ptr<ScriptHost> ScriptHost::create(const ScriptHostDesc& desc) {
 #define GIANT_NAME(x) x
 #endif
     auto api = std::make_unique<Api>();
+    api->load = load;
     bool ok = true;
     const auto get = [&](const char_t* method, auto& out) {
         void* fn = nullptr;
@@ -426,6 +428,21 @@ void ScriptHost::person_events(std::span<const PersonEvent> events) {
 }
 
 void ScriptHost::unload_scripts() { m_api->unload_scripts(); }
+
+void* ScriptHost::function(const std::filesystem::path& assembly, std::string_view type, std::string_view method) {
+    // (ASCII names: each character is itself in the host's character type.)
+    const std::basic_string<char_t> type_name(type.begin(), type.end());
+    const std::basic_string<char_t> method_name(method.begin(), method.end());
+    void* fn = nullptr;
+    const int status = m_api->load(assembly.c_str(), type_name.c_str(), method_name.c_str(), k_unmanaged_callers_only,
+                                   nullptr, &fn);
+    if (status < 0 || fn == nullptr) {
+        log_error("script", "could not find " + std::string(method) + " of " + std::string(type) + " in " +
+                                path_to_utf8(assembly));
+        return nullptr;
+    }
+    return fn;
+}
 
 u32 ScriptHost::running_scripts() const {
     return static_cast<u32>(std::max(m_api->running_script_count(), 0));

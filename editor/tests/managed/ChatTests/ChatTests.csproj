@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The chat's conversation, tested against a stand-in for Claude's
+       service (no key, no network): `dotnet ChatTests.dll`, 0 when all pass. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../../scripts/Giant.Chat/Giant.Chat.csproj" />
+  </ItemGroup>
+</Project>

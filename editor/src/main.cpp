@@ -10,6 +10,7 @@
 // actually running (CI uses it so "no validation errors" means something).
 // --mcp speaks MCP over stdin/stdout (logs go to stderr); the editor closes
 // when the client disconnects. --scripts loads C# scripts at start-up.
+#include "chat_bridge.h"
 #include "editor_commands.h"
 #include "mesh_library.h"
 #include "texture_library.h"
@@ -242,6 +243,9 @@ public:
         m_state.scripts_running = m_host != nullptr ? m_host->running_scripts() : 0;
     }
 
+    // .NET, started when first needed (by scripts, or the chat). Null when it cannot be.
+    script::ScriptHost* host() { return start() ? m_host.get() : nullptr; }
+
 private:
     // What happened to people's behaviours since the scripts were last told, a share a frame
     // (many at once are told over the frames after: never more script time in one).
@@ -452,6 +456,14 @@ int run(const Options& options) {
     editor::EditorPanels panels(commands, state, log_history);
     // After the registry, so scripts' OnStop can still run commands.
     ScriptRunner scripts(commands, state);
+    // The chat with Claude: its C# side starts with the first message.
+    editor::ChatBridge chat(commands, [&scripts] { return scripts.host(); }, find_managed_dir());
+    state.chat = &chat;
+    // (Gone from the state before it is destroyed: scripts' OnStop, which runs after, may ask for it.)
+    struct ChatGone {
+        editor::EditorState& state;
+        ~ChatGone() { state.chat = nullptr; }
+    } chat_gone{state};
     state.scripts_to_load = options.scripts;
     editor::TerrainBrushTool terrain_brush;
     // Records the scene and the panels into `target` (an sRGB image).
@@ -709,6 +721,7 @@ int run(const Options& options) {
         if (window->minimized()) {
             // Nothing to show: idle instead of spinning a CPU core.
             window->wait_events(100);
+            chat.update(); // (Claude's work goes on behind a minimised window)
             last_frame = std::chrono::steady_clock::now();
             phase_ms = {}; // minimised time is no frame's
             device_mark = device->counts();
@@ -743,6 +756,7 @@ int run(const Options& options) {
         phase_ms = {};
 
         scripts.update(menus.paused() ? 0.0f : delta); // (a menu over play: scripts stand still too)
+        chat.update(); // (a command Claude asked for, if one waits)
         mark(editor::FramePhase::scripts);
 
         // Playing: the mouse and keys are the player's (the panels get
