@@ -121,8 +121,8 @@ internal static class Program
     private static string Use(string id, string name, string inputJson) =>
         "{\"type\":\"tool_use\",\"id\":\"" + id + "\",\"name\":\"" + name + "\",\"input\":" + inputJson + ",\"caller\":{\"type\":\"direct\"}}";
 
-    private static readonly JsonElement s_schema = JsonDocument.Parse(
-        "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"args\":{\"type\":\"object\"}},\"required\":[\"name\"]}").RootElement;
+    private static readonly JsonElement s_schema = JsonSerializer.Deserialize<JsonElement>(
+        "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"args\":{\"type\":\"object\"}},\"required\":[\"name\"]}");
 
     private static (Conversation, FakeService) Make(bool key = true)
     {
