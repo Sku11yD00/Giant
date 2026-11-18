@@ -59,9 +59,10 @@ GIANT_TEST("mods: versions are three numbers with dots, and compare as numbers")
     GIANT_CHECK(mod_version_from_text("1.4.2") == v(1, 4, 2) && mod_version_from_text("0.0.0") == v(0, 0, 0));
     GIANT_CHECK(mod_version_from_text("999999.0.10") == v(999999, 0, 10));
     for (const char* bad : {"", "1", "1.2", "1.2.3.4", "1.2.", ".1.2", "1..2", "a.b.c", "1.2.x", "-1.0.0", "+1.0.0", " 1.0.0", "1.0.0 ",
-                            "1000000.0.0", "1.0.99999999999999999999", "1,0,0"}) {
+                            "1000000.0.0", "1.0.99999999999999999999", "1,0,0", "01.2.3", "1.02.3", "1.2.00", "1.2.3\n"}) {
         GIANT_CHECK(!mod_version_from_text(bad));
     }
+    GIANT_CHECK(mod_version_from_text("10.0.100") == v(10, 0, 100) && !mod_version_from_text(std::string_view()));
     GIANT_CHECK(to_string(v(1, 20, 3)) == "1.20.3");
     GIANT_CHECK(v(1, 10, 0) > v(1, 9, 9) && v(2, 0, 0) > v(1, 99, 99) &&
                 v(1, 0, 1) > v(1, 0, 0));
@@ -70,6 +71,11 @@ GIANT_TEST("mods: versions are three numbers with dots, and compare as numbers")
 GIANT_TEST("mods: a manifest is checked, and saved and loaded as it was") {
     GIANT_CHECK(mod_id_ok("winter_2") && !mod_id_ok("") && !mod_id_ok("2winter") && !mod_id_ok("Winter") && !mod_id_ok("a-b") &&
                 !mod_id_ok("a b") && !mod_id_ok("../x") && !mod_id_ok(std::string(65, 'a')) && mod_id_ok(std::string(64, 'a')));
+    // Not a name a folder cannot have on Windows.
+    for (const char* device : {"con", "prn", "aux", "nul", "com1", "com0", "lpt9"}) {
+        GIANT_CHECK(!mod_id_ok(device));
+    }
+    GIANT_CHECK(mod_id_ok("console") && mod_id_ok("com") && mod_id_ok("com10") && mod_id_ok("coma") && mod_id_ok("lpt"));
     Mod m = mod("winter", {1, 2, 3}, {{"base", {2, 0, 0}}, {"snow", {}}}, {"roads"});
     m.author = "Someone";
     m.description = "Snow on \"everything\".\nAnd ice.";
@@ -106,6 +112,31 @@ GIANT_TEST("mods: a manifest is checked, and saved and loaded as it was") {
     wrong.needs.assign(k_max_mod_needs + 1, ModNeed{"x", {}});
     GIANT_CHECK(check_mod(wrong).value_or("").starts_with("needs:"));
     wrong = m;
+    wrong.name.assign(k_max_name_bytes + 1, 'x');
+    GIANT_CHECK(check_mod(wrong).value_or("").starts_with("name:"));
+    wrong = m;
+    wrong.author.assign(k_max_name_bytes + 1, 'x');
+    GIANT_CHECK(check_mod(wrong).value_or("").starts_with("author:"));
+    // Text shown to people and the AI is plain: no control characters (a description may have lines and tabs).
+    wrong = m;
+    wrong.name = "Two\nlines";
+    GIANT_CHECK(check_mod(wrong).value_or("").starts_with("name:"));
+    wrong = m;
+    wrong.author = std::string("a\0b", 3);
+    GIANT_CHECK(check_mod(wrong).value_or("").starts_with("author:"));
+    wrong = m;
+    wrong.description = "bell\a";
+    GIANT_CHECK(check_mod(wrong).value_or("").starts_with("description:"));
+    wrong = m;
+    wrong.description = "tab\tand\nline, and caf\xc3\xa9";
+    GIANT_CHECK(!check_mod(wrong));
+    wrong = m;
+    wrong.needs[0].id = "Base";
+    GIANT_CHECK(check_mod(wrong).value_or("").starts_with("needs[0].id:"));
+    wrong = m;
+    wrong.after[0] = "nul";
+    GIANT_CHECK(check_mod(wrong).value_or("").starts_with("after[0]:"));
+    wrong = m;
     wrong.version.minor = 1000000;
     GIANT_CHECK(check_mod(wrong).value_or("").starts_with("version:"));
 }
@@ -134,6 +165,14 @@ GIANT_TEST("mods: a manifest that is wrong is refused, and nothing of it kept") 
     GIANT_CHECK(load_error(head + R"("id":"a","name":"A","version":"1.0.0","after":"b"})").starts_with("after:"));
     GIANT_CHECK(load_error(head + R"("id":"a","name":"A","version":"1.0.0","after":[1]})").starts_with("after[0]:"));
     GIANT_CHECK(load_error(std::string(k_max_mod_file_bytes + 1, ' ')).find("bytes") != std::string::npos);
+    // Only a newer format is called newer; a long key is shown by its start.
+    GIANT_CHECK(load_error(R"({"format":"giant-mod","format_version":2,"id":"a","name":"A","version":"1.0.0"})").find("newer editor") != std::string::npos);
+    GIANT_CHECK(load_error(R"({"format":"giant-mod","format_version":"1","id":"a","name":"A","version":"1.0.0"})") == "format_version: must be 1");
+    GIANT_CHECK(load_error(R"({"format":"giant-mod","id":"a","name":"A","version":"1.0.0"})") == "format_version: must be 1");
+    const std::string long_key = load_error(head + "\"" + std::string(5000, 'k') + R"(":1,"id":"a","name":"A","version":"1.0.0"})");
+    GIANT_CHECK(long_key.size() < 100 && long_key.ends_with("...: unknown key"));
+    GIANT_CHECK(load_error(head + R"("id":"a","name":"A","version":"01.0.0"})").starts_with("version:"));
+    GIANT_CHECK(load_error(head + R"("id":"a","name":"A\u0007","version":"1.0.0"})").starts_with("name:"));
     // A need without at_least is any version.
     Mod kept = mod("kept");
     GIANT_CHECK(!load_mod(head + R"("id":"a","name":"A","version":"1.0.0","needs":[{"id":"b"}]})", kept) && kept.needs[0] == (ModNeed{"b", {}}));
@@ -153,6 +192,11 @@ GIANT_TEST("mods: the list of those on is saved sorted and loaded strictly") {
     GIANT_CHECK(load_enabled_mods(R"({"format":"giant-mods","format_version":1,"enabled":[],"more":1})", back));
     GIANT_CHECK(load_enabled_mods(R"({"format":"giant-mod","format_version":1,"enabled":[]})", back));
     GIANT_CHECK(back == std::vector<std::string>{"kept"});
+    std::string many = R"({"format":"giant-mods","format_version":1,"enabled":[)";
+    for (usize i = 0; i <= k_max_mods; ++i) {
+        many += (i == 0 ? "\"m" : ",\"m") + std::to_string(i) + "\"";
+    }
+    GIANT_CHECK(load_enabled_mods(many + "]}", back) && back == std::vector<std::string>{"kept"}); // one too many
     // Unsorted on disk (written by hand): loaded sorted.
     GIANT_CHECK(!load_enabled_mods(R"({"format":"giant-mods","format_version":1,"enabled":["b","a"]})", back) &&
                 back == std::vector<std::string>({"a", "b"}));
@@ -201,28 +245,63 @@ GIANT_TEST("mods: a mod that cannot load is left out with the reason, and so are
             mod("x", {1, 0, 0}, {}, {"y"}), mod("y", {1, 0, 0}, {}, {"x"})};
     const ModOrder circles = all_on(mods);
     GIANT_CHECK(loaded(mods, circles) == "fine" && circles.problems.size() == 5);
-    GIANT_CHECK(problem_of(mods, circles, "a").find("a, b, c, x, y") != std::string::npos);
+    // Each circle is named by its own mods; one that needed a mod in one is told that.
+    GIANT_CHECK(problem_of(mods, circles, "a").ends_with(": a, b") && problem_of(mods, circles, "b").ends_with(": a, b"));
+    GIANT_CHECK(problem_of(mods, circles, "x").ends_with(": x, y") && problem_of(mods, circles, "y").ends_with(": x, y"));
+    GIANT_CHECK(problem_of(mods, circles, "c").find("\"a\", which is not loaded") != std::string::npos);
+    // One that only asked to come after a mod in a circle, or after one left out for its need, loads without it;
+    // and so does one after that.
+    mods = {mod("a", {1, 0, 0}, {{"b", {}}}), mod("b", {1, 0, 0}, {{"a", {}}}), mod("c", {1, 0, 0}, {}, {"a"}),
+            mod("d", {1, 0, 0}, {}, {"c", "e"}), mod("e", {1, 0, 0}, {{"gone", {}}})};
+    const ModOrder soft = all_on(mods);
+    GIANT_CHECK(loaded(mods, soft) == "c d" && soft.problems.size() == 3 && problem_of(mods, soft, "c").empty());
+    // A mod needing itself (unchecked) is a circle of one; a circle within a circle's reach is told apart.
+    mods = {mod("self"), mod("p", {1, 0, 0}, {{"q", {}}}), mod("q", {1, 0, 0}, {{"p", {}}, {"r", {}}}), mod("r", {1, 0, 0}, {{"s", {}}}),
+            mod("s", {1, 0, 0}, {{"r", {}}})};
+    mods[0].needs = {{"self", {}}};
+    const ModOrder nested = all_on(mods);
+    GIANT_CHECK(nested.order.empty() && nested.problems.size() == 5 && problem_of(mods, nested, "self").ends_with(": self"));
+    GIANT_CHECK(problem_of(mods, nested, "r").ends_with(": r, s") && problem_of(mods, nested, "p").ends_with(": p, q") &&
+                problem_of(mods, nested, "q").ends_with(": p, q"));
+    // What a mod is told does not depend on the list's order.
+    mods = {mod("i", {1, 0, 0}, {{"x", {}}, {"gone", {}}}), mod("x", {1, 0, 0}, {{"gone2", {}}})};
+    const std::string told = problem_of(mods, all_on(mods), "i");
+    std::swap(mods[0], mods[1]);
+    GIANT_CHECK(told.find("\"gone\", which is not there") != std::string::npos && problem_of(mods, all_on(mods), "i") == told);
+    // A circle of every mod there may be: each problem names a few and counts the rest.
+    std::vector<Mod> ring;
+    for (usize i = 0; i < k_max_mods; ++i) {
+        ring.push_back(mod("r" + std::to_string(1000 + i), {1, 0, 0}, {{"r" + std::to_string(1000 + (i + 1) % k_max_mods), {}}}));
+    }
+    const ModOrder round = all_on(ring);
+    GIANT_CHECK(round.order.empty() && round.problems.size() == k_max_mods && round.problems[0].message.size() < 200 &&
+                round.problems[0].message.ends_with("and 248 more"));
+    // An `on` longer than the list: the rest of it is not looked at. Two of an id, the first off: neither loads.
+    mods = {mod("a"), mod("a", {2, 0, 0})};
+    GIANT_CHECK(loaded(mods, order_mods(mods, std::vector<u8>{1, 0, 1, 1})) == "a");
+    const ModOrder second = order_mods(mods, std::vector<u8>{0, 1});
+    GIANT_CHECK(second.order.empty() && second.problems.size() == 1 && second.problems[0].mod == 1);
     // The same id twice: the first stands, the second is left out.
     mods = {mod("a"), mod("a", {2, 0, 0}), mod("b", {1, 0, 0}, {{"a", {2, 0, 0}}})};
     const ModOrder twice = all_on(mods);
     GIANT_CHECK(loaded(mods, twice) == "a" && twice.problems.size() == 2 && twice.problems[0].mod == 1 &&
                 twice.problems[0].message.find("comes before it") != std::string::npos);
     // Every mod that is on is either loaded or has a problem, never both.
-    for (const ModOrder& o : {order, circles, twice}) {
+    // (`order` had 6 of its 7 on; the others all.)
+    for (const auto& [o, on_count] : {std::pair<const ModOrder&, usize>{order, 6}, {circles, 6}, {twice, 3}, {soft, 5}, {nested, 5}}) {
         std::vector<usize> seen = o.order;
         for (const ModProblem& p : o.problems) {
             seen.push_back(p.mod);
         }
         std::sort(seen.begin(), seen.end());
-        GIANT_CHECK(std::adjacent_find(seen.begin(), seen.end()) == seen.end());
+        GIANT_CHECK(std::adjacent_find(seen.begin(), seen.end()) == seen.end() && seen.size() == on_count);
     }
-    // As many as there may be, each needing the one before: in order, quickly.
+    // As many as there may be, each needing the one after it by id: loaded against the order of the ids.
     std::vector<Mod> many;
     for (usize i = 0; i < k_max_mods; ++i) {
-        std::string id = "m" + std::string(i < 10 ? "00" : i < 100 ? "0" : "") + std::to_string(i);
-        many.push_back(i == 0 ? mod(id) : mod(id, {1, 0, 0}, {{many.back().id, {}}}));
+        many.push_back(i + 1 == k_max_mods ? mod("m" + std::to_string(1000 + i))
+                                           : mod("m" + std::to_string(1000 + i), {1, 0, 0}, {{"m" + std::to_string(1001 + i), {}}}));
     }
-    std::reverse(many.begin(), many.end());
     const ModOrder chain = all_on(many);
     GIANT_CHECK(chain.order.size() == k_max_mods && chain.problems.empty() && chain.order.front() == k_max_mods - 1 && chain.order.back() == 0);
 }

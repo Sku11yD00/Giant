@@ -4,6 +4,7 @@
 #include "giant/core/text_files.h"
 
 #include <algorithm>
+#include <exception>
 #include <system_error>
 #include <utility>
 
@@ -14,12 +15,26 @@ namespace {
 constexpr const char* k_manifest = "mod.json";
 constexpr const char* k_enabled = "enabled.json";
 
+// Nothing is there under the name (not: something is, and it cannot be looked at).
+bool is_absent(const std::filesystem::path& path) {
+    std::error_code error;
+    return std::filesystem::symlink_status(path, error).type() == std::filesystem::file_type::not_found;
+}
+
+// The folder's name as text, or nothing when it is not text (Windows: a name that is not Unicode).
+std::optional<std::string> name_of(const std::filesystem::path& folder) {
+    try {
+        return path_to_utf8(folder.filename());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 // The ids on, or why the list cannot be used (no file: none on).
 std::optional<std::string> read_enabled(const std::filesystem::path& mods, std::vector<std::string>& ids) {
     ids.clear();
-    std::error_code error;
     const std::filesystem::path file = mods / k_enabled;
-    if (!std::filesystem::exists(file, error)) {
+    if (is_absent(file)) {
         return std::nullopt;
     }
     const std::optional<std::string> text = read_text_file(file, world::k_max_mod_file_bytes);
@@ -43,9 +58,18 @@ ModList read_mods(const std::filesystem::path& world_folder) {
     std::error_code error;
     // The folders, by name (the disk's own order is not one to show).
     std::vector<std::filesystem::path> folders;
-    for (std::filesystem::directory_iterator at(mods, error), end; !error && at != end; at.increment(error)) {
-        if (at->is_directory(error)) {
-            folders.push_back(at->path());
+    if (!is_absent(mods)) {
+        for (std::filesystem::directory_iterator at(mods, error), end; !error && at != end; at.increment(error)) {
+            std::error_code ignored; // (what cannot be looked at is no folder)
+            // (Names beginning with . or _ are not mods' and not listed: .git, __MACOSX, a mod set aside.)
+            const std::filesystem::path file_name = at->path().filename();
+            const std::filesystem::path::string_type& name = file_name.native();
+            if (!name.empty() && name[0] != '.' && name[0] != '_' && (at->is_directory(ignored) || at->is_symlink(ignored))) {
+                folders.push_back(at->path());
+            }
+        }
+        if (error) {
+            list.folder_error = path_to_utf8(mods) + " could not be read through: " + error.message();
         }
     }
     std::sort(folders.begin(), folders.end());
@@ -54,14 +78,20 @@ ModList read_mods(const std::filesystem::path& world_folder) {
         list.too_many = true;
     }
     for (const std::filesystem::path& folder : folders) {
-        const std::string name = path_to_utf8(folder.filename());
+        const std::string name = name_of(folder).value_or("(a name that is not text)");
         const auto broken = [&](std::string why) { list.broken.push_back({name, std::move(why)}); };
+        if (std::filesystem::is_symlink(folder, error)) {
+            if (std::filesystem::is_directory(folder, error)) {
+                broken("it is a link to a folder: a mod is a folder of its own");
+            }
+            continue; // (a link to a file is a file: no mod, and no trouble)
+        }
         if (!world::mod_id_ok(name)) {
             broken("a mod's folder is named by its id: 1 to " + std::to_string(world::k_max_mod_id_bytes) +
                    " of a-z, 0-9 and _, beginning with a letter");
             continue;
         }
-        if (!std::filesystem::exists(folder / k_manifest, error)) {
+        if (is_absent(folder / k_manifest)) {
             broken(std::string("it has no ") + k_manifest);
             continue;
         }
@@ -127,11 +157,18 @@ std::optional<std::string> set_mod_on(const std::filesystem::path& world_folder,
         const ModList list = read_mods(world_folder);
         if (std::none_of(list.mods.begin(), list.mods.end(), [&](const ModList::Found& f) { return f.mod.id == id; })) {
             for (const ModList::Broken& broken : list.broken) {
-                if (broken.folder == id) {
-                    return "the mod \"" + id + "\" cannot be used: " + broken.error;
+                // (In any case of letters: "Winter" is what was meant by winter.)
+                std::string lower = broken.folder;
+                std::transform(lower.begin(), lower.end(), lower.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; });
+                if (lower == id) {
+                    return "the mod in the folder \"" + broken.folder + "\" cannot be used: " + broken.error;
                 }
             }
-            return "there is no mod \"" + id + "\" in " + path_to_utf8(mods) + " (list_mods shows those there)";
+            return "there is no mod \"" + id + "\" in " + path_to_utf8(mods) + " (list_mods shows those there)" +
+                   (list.too_many ? "; there are more folders there than the " + std::to_string(world::k_max_mods) +
+                                        " looked at: it may be one of the rest"
+                                  : std::string()) +
+                   (list.folder_error.empty() ? std::string() : "; " + list.folder_error);
         }
         if (enabled.size() >= world::k_max_mods) {
             return "at most " + std::to_string(world::k_max_mods) + " mods can be on";

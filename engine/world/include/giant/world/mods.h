@@ -5,7 +5,7 @@
 // newer) and the mods it loads after when they are there. Which mods are
 // on is the world's own list (<world>/mods/enabled.json, format
 // "giant-mods"). Here: the manifest, the list, and the order; reading the
-// folders is the editor's (mods_state.h).
+// folders is the editor's (editor/src/mods.h).
 #pragma once
 
 #include "giant/core/types.h"
@@ -26,7 +26,7 @@ constexpr usize k_max_mod_needs = 32;         // and as many `after`
 constexpr usize k_max_mod_text_bytes = 2048;  // a description
 constexpr usize k_max_mod_file_bytes = 65536; // a manifest, or the list of those on
 
-// A version as people write it: "1.4.2" (each part 0 to 999999).
+// A version as people write it: "1.4.2" (each part 0 to 999999, written without a 0 before it).
 struct ModVersion {
     u32 major = 0, minor = 0, patch = 0;
     auto operator<=>(const ModVersion&) const = default;
@@ -41,16 +41,17 @@ struct ModNeed {
     bool operator==(const ModNeed&) const = default;
 };
 struct Mod {
-    std::string id;          // its own among mods: 1 to k_max_mod_id_bytes of a-z, 0-9 and _, a letter first
-    std::string name;        // for people: 1 to k_max_name_bytes
+    std::string id;          // its own among mods: 1 to k_max_mod_id_bytes of a-z, 0-9 and _, a letter first (mod_id_ok)
+    std::string name;        // for people: 1 to k_max_name_bytes, one line, no control characters (author too)
     ModVersion version;
     std::string author;      // at most k_max_name_bytes
-    std::string description; // at most k_max_mod_text_bytes
+    std::string description; // at most k_max_mod_text_bytes; no control characters but new lines and tabs
     std::vector<ModNeed> needs;     // each id once, never its own; loaded before it
     std::vector<std::string> after; // mods it loads after when they are on (need not be there); each once, none it needs
     bool operator==(const Mod&) const = default;
 };
 
+// (Not a name Windows keeps for a device either: con, prn, aux, nul, com0 to com9, lpt0 to lpt9.)
 bool mod_id_ok(std::string_view id);
 // What is wrong with it, or nothing.
 std::optional<std::string> check_mod(const Mod& mod);
@@ -79,8 +80,10 @@ struct ModOrder {
 // it asks to come after, and otherwise by id, so the same mods always load
 // the same way. A mod is left out, with the reason, when another of its id
 // came before it in the list, when one it needs is not there, not on, too
-// old or itself left out, or when it is in (or needs one in) a circle of
-// mods each waiting for another. Nothing is left out without a problem.
+// old or itself left out, or when it is in a circle of mods each waiting
+// for another (by needs or after; each circle is named by its own mods).
+// One that only asked to come after a mod left out loads without it.
+// Nothing is left out without a problem.
 // `on` says which are on (as long as `mods`).
 ModOrder order_mods(std::span<const Mod> mods, std::span<const u8> on);
 

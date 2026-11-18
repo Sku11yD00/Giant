@@ -2,7 +2,7 @@
 
 #include <fstream>
 #include <ios>
-#include <sstream>
+#include <string>
 #include <system_error>
 
 namespace giant {
@@ -17,28 +17,34 @@ std::optional<std::string> read_text_file(const std::filesystem::path& path, usi
     if (!file) {
         return std::nullopt;
     }
-    std::stringstream text;
-    text << file.rdbuf();
-    if (file.bad()) {
+    // As many bytes as it had when it was asked: all of them, or it is not read.
+    std::string text(static_cast<usize>(size), '\0');
+    file.read(text.data(), static_cast<std::streamsize>(text.size()));
+    if (static_cast<usize>(file.gcount()) != text.size()) {
         return std::nullopt;
     }
-    return text.str();
+    return text;
 }
 
 bool write_text_file(const std::filesystem::path& path, const std::string& text) {
     std::filesystem::path partial = path;
     partial += ".partial";
+    std::error_code error;
+    bool ok = false;
     {
         std::ofstream file(partial, std::ios::binary | std::ios::trunc);
         file.write(text.data(), static_cast<std::streamsize>(text.size()));
         file.close();
-        if (!file) {
-            return false;
-        }
+        ok = static_cast<bool>(file);
     }
-    std::error_code error;
-    std::filesystem::rename(partial, path, error);
-    return !error;
+    if (ok) {
+        std::filesystem::rename(partial, path, error);
+        ok = !error;
+    }
+    if (!ok) {
+        std::filesystem::remove(partial, error); // (nothing half written is left lying)
+    }
+    return ok;
 }
 
 } // namespace giant

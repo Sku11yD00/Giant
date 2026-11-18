@@ -26,10 +26,11 @@ struct ModList {
         std::string error;  // why it is no mod
     };
     std::vector<Found> mods;          // by id
-    std::vector<Broken> broken;       // folders under mods/ that are no mod, by name
+    std::vector<Broken> broken;       // folders under mods/ that are no mod, by name (none whose name begins with . or _)
     std::vector<std::string> missing; // on, and no such mod there (sorted)
     std::vector<std::string> order;   // the ids loaded, first to last
     std::string list_error;           // enabled.json is there and cannot be used: why (then none is on)
+    std::string folder_error;         // mods/ is there and could not be read through: why (the lists may be short)
     bool too_many = false;            // more folders than world::k_max_mods: the rest were not looked at
 };
 
@@ -43,6 +44,7 @@ ModList read_mods(const std::filesystem::path& world_folder);
 // when it is not there). What went wrong, or nothing. Refused when the list
 // there cannot be read (it is never overwritten unread), and when a mod to
 // turn on is not there. One that is not there can be turned off.
+// A folder that is a link is no mod (a mod's files are its own folder's).
 std::optional<std::string> set_mod_on(const std::filesystem::path& world_folder, const std::string& id, bool on);
 
 } // namespace giant::editor

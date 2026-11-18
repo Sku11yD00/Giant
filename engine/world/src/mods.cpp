@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <charconv>
+#include <initializer_list>
+#include <string_view>
 #include <set>
 #include <system_error>
 #include <utility>
@@ -20,6 +22,18 @@ constexpr int k_version = 1;
 constexpr u32 k_max_version_part = 999999;
 
 std::optional<LoadError> bad(std::string message) { return LoadError{std::move(message)}; }
+
+// A key as an error shows it: its start, when it is long (it may be most of the file).
+std::string shown_key(const std::string& key) { return key.size() <= 64 ? key : key.substr(0, 64) + "..."; }
+
+// Text for people, shown in lists and to the AI: no control characters (a
+// description may have new lines and tabs).
+bool plain_text(std::string_view text, bool lines) {
+    return std::all_of(text.begin(), text.end(), [lines](char c) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        return (u >= 0x20 && u != 0x7f) || (lines && (c == '\n' || c == '\t'));
+    });
+}
 
 // The text parsed as an object of `format`, with only the keys named.
 std::optional<LoadError> parse_object(std::string_view text, const char* format, const char* what,
@@ -40,11 +54,12 @@ std::optional<LoadError> parse_object(std::string_view text, const char* format,
     }
     const auto version_at = out.find("format_version");
     if (version_at == out.end() || !version_at->is_number_integer() || version_at->get<i64>() != k_version) {
-        return bad("format_version: must be " + std::to_string(k_version) + " (a newer editor may have written this)");
+        const bool newer = version_at != out.end() && version_at->is_number_integer() && version_at->get<i64>() > k_version;
+        return bad("format_version: must be " + std::to_string(k_version) + (newer ? " (a newer editor wrote this)" : ""));
     }
     for (const auto& [key, value] : out.items()) {
         if (key != "format" && key != "format_version" && std::find(keys.begin(), keys.end(), key) == keys.end()) {
-            return bad(key + ": unknown key");
+            return bad(shown_key(key) + ": unknown key");
         }
     }
     return std::nullopt;
@@ -84,8 +99,8 @@ std::optional<ModVersion> mod_version_from_text(std::string_view text) {
     const char* at = text.data();
     const char* const end = text.data() + text.size();
     for (int i = 0; i < 3; ++i) {
-        if (at == end || *at < '0' || *at > '9') {
-            return std::nullopt; // (no sign, no space)
+        if (at == end || *at < '0' || *at > '9' || (*at == '0' && at + 1 != end && at[1] >= '0' && at[1] <= '9')) {
+            return std::nullopt; // (no sign, no space, no 0 before a number: one way to write each)
         }
         const auto [next, error] = std::from_chars(at, end, *parts[i]);
         if (error != std::errc() || *parts[i] > k_max_version_part) {
@@ -110,17 +125,33 @@ bool mod_id_ok(std::string_view id) {
     if (id.empty() || id.size() > k_max_mod_id_bytes || id[0] < 'a' || id[0] > 'z') {
         return false;
     }
+    // (Names Windows keeps for devices: a folder cannot have them there.)
+    for (const std::string_view device : {"con", "prn", "aux", "nul"}) {
+        if (id == device) {
+            return false;
+        }
+    }
+    if (id.size() == 4 && (id.starts_with("com") || id.starts_with("lpt")) && id[3] >= '0' && id[3] <= '9') {
+        return false;
+    }
     return std::all_of(id.begin(), id.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; });
 }
 
 std::optional<std::string> check_mod(const Mod& mod) {
     const std::string id_rule = "must be 1 to " + std::to_string(k_max_mod_id_bytes) +
-                                " of a-z, 0-9 and _, beginning with a letter";
+                                " of a-z, 0-9 and _, beginning with a letter (and not a device's name on Windows: con, "
+                                "prn, aux, nul, com0 to com9, lpt0 to lpt9)";
     if (!mod_id_ok(mod.id)) {
         return "id: " + id_rule;
     }
     if (mod.name.empty() || mod.name.size() > k_max_name_bytes) {
         return "name: must be 1 to " + std::to_string(k_max_name_bytes) + " bytes";
+    }
+    if (!plain_text(mod.name, false) || !plain_text(mod.author, false)) {
+        return std::string(!plain_text(mod.name, false) ? "name" : "author") + ": must be one line of plain text (no control characters)";
+    }
+    if (!plain_text(mod.description, true)) {
+        return "description: must be plain text (no control characters but new lines and tabs)";
     }
     if (mod.author.size() > k_max_name_bytes) {
         return "author: must be at most " + std::to_string(k_max_name_bytes) + " bytes";
@@ -236,7 +267,7 @@ std::optional<LoadError> load_mod(std::string_view text, Mod& out) {
             }
             for (const auto& [key, value] : n.items()) {
                 if (key != "id" && key != "at_least") {
-                    return bad(where + "." + key + ": unknown key");
+                    return bad(where + "." + shown_key(key) + ": unknown key");
                 }
             }
             ModNeed need;
@@ -297,8 +328,8 @@ std::optional<LoadError> load_enabled_mods(std::string_view text, std::vector<st
         ids.push_back(id.get<std::string>());
     }
     std::sort(ids.begin(), ids.end());
-    if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) {
-        return bad("enabled: \"" + *std::adjacent_find(ids.begin(), ids.end()) + "\" is there twice");
+    if (const auto twice = std::adjacent_find(ids.begin(), ids.end()); twice != ids.end()) {
+        return bad("enabled: \"" + *twice + "\" is there twice");
     }
     out = std::move(ids);
     return std::nullopt;
@@ -341,75 +372,118 @@ ModOrder order_mods(std::span<const Mod> mods, std::span<const u8> on) {
             after_at[i].push_back(find(id));
         }
     }
-    // Those whose needs are not met go, and then those that needed them.
-    for (bool changed = true; changed;) {
-        changed = false;
+    std::vector<u8> loaded(count, 0);
+    // Whether `other` is one to wait for: in, and not loaded yet.
+    const auto waits_for = [&](usize other) { return other != count && in[other] != 0 && loaded[other] == 0; };
+    const auto waits = [&](usize i) {
+        return std::any_of(need_at[i].begin(), need_at[i].end(), [&](usize other) { return waits_for(other); }) ||
+               std::any_of(after_at[i].begin(), after_at[i].end(), [&](usize other) { return waits_for(other); });
+    };
+    std::vector<u8> reached(count * count, 0); // (i, j): j is waited for by i, directly or through others
+    std::vector<usize> stack;
+    std::vector<u8> was_in;
+    for (;;) {
+        // Those whose needs are not met go, and then those that needed them.
+        // (Each pass judges by who was in before it: what a mod is told does not depend on the list's order.)
+        for (bool changed = true; changed;) {
+            changed = false;
+            was_in = in;
+            for (usize i = 0; i < count; ++i) {
+                if (in[i] == 0) {
+                    continue;
+                }
+                for (usize n = 0; n < need_at[i].size(); ++n) {
+                    const ModNeed& need = mods[i].needs[n];
+                    const usize other = need_at[i][n];
+                    std::string problem;
+                    if (other == count) {
+                        problem = "it needs the mod \"" + need.id + "\", which is not there";
+                    } else if (other >= on.size() || on[other] == 0) {
+                        problem = "it needs the mod \"" + need.id + "\", which is not on";
+                    } else if (mods[other].version < need.at_least) {
+                        problem = "it needs the mod \"" + need.id + "\" at " + to_string(need.at_least) + " or newer, and " +
+                                  to_string(mods[other].version) + " is there";
+                    } else if (was_in[other] == 0) {
+                        problem = "it needs the mod \"" + need.id + "\", which is not loaded";
+                    }
+                    if (!problem.empty()) {
+                        in[i] = 0;
+                        why[i] = std::move(problem);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // Each in turn once all it waits for are loaded; the least id first among those ready.
+        for (;;) {
+            usize next = count;
+            for (usize i = 0; i < count; ++i) {
+                if (in[i] != 0 && loaded[i] == 0 && !waits(i) && (next == count || mods[i].id < mods[next].id)) {
+                    next = i;
+                }
+            }
+            if (next == count) {
+                break;
+            }
+            loaded[next] = 1;
+            result.order.push_back(next);
+        }
+        // What is left waits on a circle, or is in one. Those in one go, each
+        // circle named by its own; the rest are looked at again (one that
+        // needed them goes for that, one that only came after them loads).
+        std::fill(reached.begin(), reached.end(), u8{0});
+        bool stalled = false;
         for (usize i = 0; i < count; ++i) {
-            if (in[i] == 0) {
+            if (in[i] == 0 || loaded[i] != 0) {
                 continue;
             }
-            for (usize n = 0; n < mods[i].needs.size(); ++n) {
-                const ModNeed& need = mods[i].needs[n];
-                const usize other = need_at[i][n];
-                std::string problem;
-                if (other == count) {
-                    problem = "it needs the mod \"" + need.id + "\", which is not there";
-                } else if (other >= on.size() || on[other] == 0) {
-                    problem = "it needs the mod \"" + need.id + "\", which is not on";
-                } else if (mods[other].version < need.at_least) {
-                    problem = "it needs the mod \"" + need.id + "\" at " + to_string(need.at_least) + " or newer, and " +
-                              to_string(mods[other].version) + " is there";
-                } else if (in[other] == 0) {
-                    problem = "it needs the mod \"" + need.id + "\", which is not loaded";
-                }
-                if (!problem.empty()) {
-                    in[i] = 0;
-                    why[i] = std::move(problem);
-                    changed = true;
-                    break;
+            stalled = true;
+            stack.assign(1, i);
+            while (!stack.empty()) {
+                const usize at = stack.back();
+                stack.pop_back();
+                for (const std::vector<usize>* list : {&need_at[at], &after_at[at]}) {
+                    for (const usize other : *list) {
+                        if (waits_for(other) && reached[i * count + other] == 0) {
+                            reached[i * count + other] = 1;
+                            stack.push_back(other);
+                        }
+                    }
                 }
             }
         }
-    }
-    // Each in turn once all it waits for are loaded; the least id first among those ready.
-    std::vector<u8> loaded(count, 0);
-    const auto waits = [&](usize i) {
-        for (const usize other : need_at[i]) {
-            if (loaded[other] == 0) { // (there and in: checked above)
-                return true;
-            }
-        }
-        for (const usize other : after_at[i]) {
-            if (other != count && in[other] != 0 && loaded[other] == 0) {
-                return true;
-            }
-        }
-        return false;
-    };
-    for (;;) {
-        usize next = count;
-        for (usize i = 0; i < count; ++i) {
-            if (in[i] != 0 && loaded[i] == 0 && !waits(i) && (next == count || mods[i].id < mods[next].id)) {
-                next = i;
-            }
-        }
-        if (next == count) {
+        if (!stalled) {
             break;
         }
-        loaded[next] = 1;
-        result.order.push_back(next);
-    }
-    // What is left waits on a circle.
-    std::string circle;
-    for (usize i = 0; i < count; ++i) {
-        if (in[i] != 0 && loaded[i] == 0) {
-            circle += (circle.empty() ? "" : ", ") + mods[i].id;
+        for (usize i = 0; i < count; ++i) {
+            if (in[i] == 0 || loaded[i] != 0 || reached[i * count + i] == 0) {
+                continue; // (not in a circle itself)
+            }
+            std::vector<std::string_view> circle; // those it waits for that wait for it, and itself
+            for (usize j = 0; j < count; ++j) {
+                if (j == i || (reached[i * count + j] != 0 && reached[j * count + i] != 0)) {
+                    circle.push_back(mods[j].id);
+                }
+            }
+            std::sort(circle.begin(), circle.end());
+            why[i] = "these mods each wait for another of them to load first (needs or after): ";
+            constexpr usize k_most_named = 8; // (a circle may be every mod there is)
+            for (usize c = 0; c < circle.size() && c < k_most_named; ++c) {
+                why[i] += (c == 0 ? "" : ", ") + std::string(circle[c]);
+            }
+            if (circle.size() > k_most_named) {
+                why[i] += " and " + std::to_string(circle.size() - k_most_named) + " more";
+            }
+        }
+        // (After all are named: taking one out as it is found would hide its circle from the next.)
+        for (usize i = 0; i < count; ++i) {
+            if (in[i] != 0 && loaded[i] == 0 && reached[i * count + i] != 0) {
+                in[i] = 0;
+            }
         }
     }
     for (usize i = 0; i < count; ++i) {
-        if (in[i] != 0 && loaded[i] == 0) {
-            why[i] = "these mods each wait for another of them to load first (needs or after): " + circle;
-        }
         if (!why[i].empty()) {
             result.problems.push_back({i, std::move(why[i])});
         }

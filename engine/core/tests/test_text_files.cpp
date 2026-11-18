@@ -22,5 +22,8 @@ GIANT_TEST("text files: written whole and read back, with a limit on the size re
     GIANT_CHECK(read_text_file(file, text.size()) == text && !read_text_file(file, text.size() - 1));
     GIANT_CHECK(write_text_file(file, "") && read_text_file(file) == std::string()); // over the old one
     GIANT_CHECK(!write_text_file(folder / "none" / "a.txt", "x") && !read_text_file(folder)); // no such folder; a folder
+    // A write that cannot take its name (a folder has it) leaves nothing half written beside it.
+    std::filesystem::create_directories(folder / "taken" / "inside");
+    GIANT_CHECK(!write_text_file(folder / "taken", "x") && !std::filesystem::exists(folder / "taken.partial"));
     std::filesystem::remove_all(folder, error);
 }

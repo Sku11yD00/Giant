@@ -4136,13 +4136,18 @@ scenes), the world's list of the mods that are on (`load_enabled_mods`,
 to come after, and breaks every other tie by id, so the same mods load the
 same way on every machine. A mod that is on and cannot load is left out
 with one reason (a need that is missing, off, too old or itself left out;
-a circle of mods waiting on each other; a second mod of an id): nothing is
-left out silently, and nothing that needs a mod left out is loaded.
+a circle of mods waiting on each other, each circle named by its own mods;
+a second mod of an id): nothing is left out silently, nothing that needs a
+mod left out is loaded, and one that only asked to come after it is. What
+a mod is told does not depend on the order of the list given.
 
 The editor reads the folders only when asked (`editor/src/mods.h`:
 `read_mods`, `set_mod_on`, behind `list_mods` and `enable_mod`), never in a
 frame. A folder's name must be its mod's id; folders that are no mod are
-listed with why. A list of enabled mods that cannot be read turns none on
+listed with why (links to folders among them; names beginning with `.` or
+`_` are passed over), and a mods folder that cannot be read through is
+said, not shown as empty. Names and descriptions hold no control
+characters: they are shown to people and to Claude. A list of enabled mods that cannot be read turns none on
 and is never overwritten. At most 256 mods, manifests of at most 64 KB.
 So far a mod is its manifest and its place in the order: world changes,
 data overrides, assets and scripts are the parts to come, applied in this

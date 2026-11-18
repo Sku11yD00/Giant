@@ -70,13 +70,15 @@ Json mod_json(const ModList::Found& found) {
 void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
         {"list_mods",
-         "Lists the mods beside the open world: each folder <world>/mods/<id>/ with a mod.json (format \"giant-mod\": "
+         "Lists the mods beside the open world (`folder` is where): each folder <world>/mods/<id>/ with a mod.json (format \"giant-mod\": "
          "id, name, version \"1.0.0\", and optionally author, description, needs [{id, at_least}] and after [ids]). "
          "For each: whether it is enabled, whether it is loaded and its place in the load order (a mod loads after "
          "all it needs and all it asks to come after, otherwise by id), and for one that is enabled and not loaded the "
          "problem (a mod it needs is missing, off, too old or not loaded itself, or mods wait on each other in a "
-         "circle). `broken` are folders that are no mod, with why; `missing` are ids enabled with no mod there; "
-         "`load_order` is the ids loaded, first to last. Reads the disk when called. So far a mod is its manifest and "
+         "circle). `broken` are folders that are no mod, with why (folders whose names begin with . or _ are passed over); `missing` are ids enabled with no mod there; "
+         "`load_order` is the ids loaded, first to last; `error` is there when enabled.json cannot be used (then no mod "
+         "is on), `folder_error` when the mods folder could not be read through, `too_many` when it has more than 256 "
+         "folders (the rest are not looked at). Reads the disk when called. So far a mod is its manifest and "
          "its place in the order: what mods hold is not loaded into the world yet.",
          Json::parse(R"({"type": "object", "additionalProperties": false})"),
          true,
@@ -101,6 +103,9 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
                          {"load_order", list.order}};
              if (!list.list_error.empty()) {
                  out["error"] = list.list_error;
+             }
+             if (!list.folder_error.empty()) {
+                 out["folder_error"] = list.folder_error;
              }
              if (list.too_many) {
                  out["too_many"] = true;
@@ -137,6 +142,8 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
                  if (!found->problem.empty()) {
                      out["problem"] = found->problem;
                  }
+             } else if (on) { // (on already, and gone since)
+                 out["problem"] = "there is no such mod there now (list_mods: `missing`)";
              }
              return CommandResult::success(std::move(out));
          }});

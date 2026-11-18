@@ -106,6 +106,8 @@ GIANT_TEST("mods: a world without mods lists none, and its mods are found by fol
     list = read_mods(w.folder);
     GIANT_CHECK(list.missing == std::vector<std::string>{"alone"} && list.order == std::vector<std::string>({"base", "winter"}));
     GIANT_CHECK(!set_mod_on(w.folder, "alone", false) && read_mods(w.folder).missing.empty());
+    // Off, and off already (nothing there by the name at all): nothing to do, and no trouble.
+    GIANT_CHECK(!set_mod_on(w.folder, "never_there", false));
 }
 
 GIANT_TEST("mods: folders that are no mod are listed broken with why, and cannot be turned on") {
@@ -117,6 +119,10 @@ GIANT_TEST("mods: folders that are no mod are listed broken with why, and cannot
     w.put("typo", R"({"format":"giant-mod","format_version":1,"id":"typo","name":"T","version":"1.0.0","neds":[]})");
     w.put("huge", std::string(world::k_max_mod_file_bytes + 1, ' '));
     std::filesystem::create_directories(w.folder / "mods" / "empty");
+    // Folders that are not mods' and not listed: tools' and ones set aside.
+    std::filesystem::create_directories(w.folder / "mods" / ".git");
+    w.put("_off", world::save_mod(mod("x")));
+    w.put("__MACOSX", "junk");
     const ModList list = read_mods(w.folder);
     GIANT_CHECK(list.mods.size() == 1 && list.mods[0].mod.id == "good" && list.broken.size() == 6);
     const auto why = [&](const std::string& folder) {
@@ -137,6 +143,9 @@ GIANT_TEST("mods: folders that are no mod are listed broken with why, and cannot
         GIANT_CHECK(list.broken[i - 1].folder < list.broken[i].folder);
     }
     GIANT_CHECK(set_mod_on(w.folder, "typo", true).value_or("").find("neds: unknown key") != std::string::npos);
+    // Meant in other letters: the folder that is wrongly named is pointed at.
+    w.put("Winter", world::save_mod(mod("winter")));
+    GIANT_CHECK(set_mod_on(w.folder, "winter", true).value_or("").find("the folder \"Winter\" cannot be used") != std::string::npos);
     GIANT_CHECK(set_mod_on(w.folder, "nowhere", true).value_or("").find("there is no mod \"nowhere\"") != std::string::npos);
     GIANT_CHECK(set_mod_on(w.folder, "../good", true).value_or("").find("no mod's id") != std::string::npos);
     GIANT_CHECK(!std::filesystem::exists(w.folder / "mods" / "enabled.json")); // nothing was written
@@ -151,6 +160,15 @@ GIANT_TEST("mods: a list of those on that cannot be read turns none on and is ne
     GIANT_CHECK(set_mod_on(w.folder, "good", true).value_or("").find("mend it") != std::string::npos);
     GIANT_CHECK(set_mod_on(w.folder, "good", false).value_or("").find("mend it") != std::string::npos);
     GIANT_CHECK(read_text_file(w.folder / "mods" / "enabled.json") == std::string("{ broken"));
+    // A folder where the list should be, and a list too long to be one: the same.
+    std::filesystem::remove(w.folder / "mods" / "enabled.json");
+    std::filesystem::create_directories(w.folder / "mods" / "enabled.json" / "inside");
+    GIANT_CHECK(!read_mods(w.folder).list_error.empty() && set_mod_on(w.folder, "good", true) &&
+                std::filesystem::is_directory(w.folder / "mods" / "enabled.json" / "inside"));
+    std::filesystem::remove_all(w.folder / "mods" / "enabled.json");
+    w.enabled(std::string(world::k_max_mod_file_bytes + 1, ' '));
+    GIANT_CHECK(!read_mods(w.folder).list_error.empty() && set_mod_on(w.folder, "good", true) &&
+                std::filesystem::file_size(w.folder / "mods" / "enabled.json") == world::k_max_mod_file_bytes + 1);
     // Written by hand, unsorted: read, and written sorted at the next change.
     w.put(mod("also"));
     w.enabled(R"({"format":"giant-mods","format_version":1,"enabled":["good","also"]})");
@@ -166,6 +184,27 @@ GIANT_TEST("mods: more folders than there may be mods are not all looked at, and
     }
     const ModList list = read_mods(w.folder);
     GIANT_CHECK(list.too_many && list.mods.empty() && list.broken.size() == world::k_max_mods && list.broken.front().folder == "m1000");
+    // One past those looked at cannot be turned on, and why is said.
+    w.put(mod("zz_last"));
+    GIANT_CHECK(set_mod_on(w.folder, "zz_last", true).value_or("").find("more folders there than the 256") != std::string::npos);
+    ai::CommandRegistry commands;
+    EditorState state;
+    register_mod_commands(commands, state);
+    state.mods_world = path_to_utf8(w.folder);
+    GIANT_CHECK(commands.execute("list_mods").value["too_many"] == true);
+}
+
+GIANT_TEST("mods: a mods folder that cannot be read through is said, not shown as empty") {
+    const ModWorld w("giant_mods_test_unread");
+    GIANT_CHECK(write_text_file(w.folder / "mods", "a file where the folder should be"));
+    const ModList list = read_mods(w.folder);
+    GIANT_CHECK(list.mods.empty() && list.folder_error.find("could not be read through") != std::string::npos);
+    GIANT_CHECK(set_mod_on(w.folder, "good", true).value_or("").find("could not be read through") != std::string::npos);
+    ai::CommandRegistry commands;
+    EditorState state;
+    register_mod_commands(commands, state);
+    state.mods_world = path_to_utf8(w.folder);
+    GIANT_CHECK(commands.execute("list_mods").value.contains("folder_error"));
 }
 
 GIANT_TEST("mods: list_mods and enable_mod") {
@@ -212,6 +251,13 @@ GIANT_TEST("mods: list_mods and enable_mod") {
     GIANT_CHECK(commands.execute("enable_mod", {{"id", "garbled"}}).error.find("not JSON") != std::string::npos);
     GIANT_CHECK(!commands.execute("enable_mod", {{"id", ""}}).ok && !commands.execute("enable_mod").ok &&
                 !commands.execute("enable_mod", {{"id", "base"}, {"on", true}}).ok);
+    // On, and its folder gone since: turning it on again says there is none, and list_mods shows it missing.
+    GIANT_CHECK(commands.execute("enable_mod", {{"id", "winter"}}).ok);
+    std::filesystem::remove_all(w.folder / "mods" / "winter");
+    const Json gone = commands.execute("enable_mod", {{"id", "winter"}}).value;
+    GIANT_CHECK(gone["enabled"] == true && gone["loaded"] == false && gone["problem"].get<std::string>().find("no such mod") != std::string::npos);
+    list = commands.execute("list_mods").value;
+    GIANT_CHECK(list["missing"] == Json::array({"winter"}) && !list.contains("too_many") && !list.contains("folder_error"));
     // The list that cannot be read is said by list_mods, and enable_mod leaves it be.
     w.enabled("[]");
     list = commands.execute("list_mods").value;
