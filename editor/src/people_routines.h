@@ -167,7 +167,7 @@ public:
     struct Kept {
         u32 said = 0;          // what it acted on (0: nothing; then only the state is kept)
         u8 entry = 0;          // its routine's entry then (`own`: the state's place among its behaviour's)
-        bool own = false;      // what it acted on was its behaviour's state's own, not its routine's
+        bool own = false;      // what it acted on was its behaviour's state's own, not its routine's (told as own_trip is)
         bool failed = false;
         bool own_trip = false; // the trip it is on is the routine's (or the state's); told even when `kept` gives nothing else
         std::string place;     // where it was sent ("" for nowhere)
@@ -178,7 +178,7 @@ public:
     };
     // The person at `index` is in a state that a save must keep though it stands where the scene has
     // it (a later state than the first, or one it has acted on as the state's own).
-    bool in_later_state(usize index) const;
+    bool in_later_state(const world::Scene& scene, usize index) const;
     // Before `kept` is asked of many (a save's): the slots as the people are now (people made or
     // removed since the last frame: an edit's cost).
     void ready(const world::Scene& scene, const PeopleTravel& travel);

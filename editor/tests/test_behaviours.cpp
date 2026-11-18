@@ -309,7 +309,24 @@ GIANT_TEST("behaviours: a state that cannot be done fails; a behaviour replaced,
     GIANT_CHECK(kept.said != 0 && !kept.own && kept.behaviour.empty()); // (its behaviour was taken away)
     GIANT_CHECK(f.routines.kept(f.state.scene, f.travel, index(id), kept)); // (shrugging: its state's own)
     GIANT_CHECK(kept.said != 0 && kept.own && kept.behaviour == "lost" && kept.state == "give_up" && kept.settled && kept.in_state > 0.0);
-    GIANT_CHECK(f.routines.in_later_state(index(id)) && !f.routines.in_later_state(index(runner)));
+    GIANT_CHECK(f.routines.in_later_state(f.state.scene, index(id)) && !f.routines.in_later_state(f.state.scene, index(runner)));
+    // Its behaviour at another place in the list since it was looked at (one put before it): kept all the same.
+    world::Behaviour first;
+    first.name = "aaa";
+    first.states.resize(3);
+    first.states[0].name = "x";
+    first.states[1].name = "y";
+    first.states[2].name = "z";
+    f.state.scene.behaviours.insert(f.state.scene.behaviours.begin(), first);
+    GIANT_CHECK(f.routines.kept(f.state.scene, f.travel, index(id), kept) && kept.behaviour == "lost" && kept.state == "give_up" && kept.own);
+    GIANT_CHECK(f.routines.in_later_state(f.state.scene, index(id)));
+    // Given the behaviour now where its own was, not looked at since: it is in no state of that one, and what
+    // its old state had it do is not kept.
+    for (world::Person& p : f.state.scene.people) {
+        if (p.id == id) p.behaviour = "aaa";
+    }
+    GIANT_CHECK(!f.routines.kept(f.state.scene, f.travel, index(id), kept) && kept.behaviour.empty() && kept.said == 0);
+    GIANT_CHECK(!f.routines.in_later_state(f.state.scene, index(id)));
 }
 
 GIANT_TEST("behaviours: thousands are followed a share a frame, each in its own state") {

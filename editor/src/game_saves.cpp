@@ -519,7 +519,7 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
             // and finds it where it should be, so a world of thousands at home saves nobody.)
             // (Nor one in the first state of its behaviour: a loaded game begins it there. One in a
             // later state, or doing what a state says, is written wherever it is.)
-            const bool later = state.routines != nullptr && state.routines->in_later_state(i);
+            const bool later = state.routines != nullptr && state.routines->in_later_state(state.scene, i);
             if ((s.moved || s.trip || later) && state.routines != nullptr &&
                 state.routines->kept(state.scene, *state.travel, i, s.kept)) {
                 s.did = true;
@@ -527,9 +527,10 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
                 if (s.kept.own_trip && !s.trip) s.kept.failed = true;
                 if (!s.trip) s.kept.own_trip = false;
             }
-            // (A trip a state or the routine began, with what began it not kept, it left that state
-            // and was not looked at since: not written as one sent by hand, which nothing would stop.)
-            if (s.trip && s.kept.own_trip && s.kept.said == 0) {
+            // (A trip a state began, with what began it not kept, it left that state and was not looked
+            // at since: not written as one sent by hand, which nothing would stop. A routine's is
+            // written as ever.)
+            if (s.trip && s.kept.own_trip && s.kept.said == 0 && s.kept.own) {
                 s.trip = false;
                 s.kept.own_trip = false;
             }

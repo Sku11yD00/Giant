@@ -713,10 +713,13 @@ void PeopleRoutines::ready(const world::Scene& scene, const PeopleTravel& travel
     if (!same) match_slots(scene.people);
 }
 
-bool PeopleRoutines::in_later_state(usize index) const {
-    if (!m_running || index >= m_slots.size()) return false;
+bool PeopleRoutines::in_later_state(const world::Scene& scene, usize index) const {
+    if (!m_running || index >= m_slots.size() || index >= scene.people.size()) return false;
     const Slot& slot = m_slots[index];
-    return slot.behaviour != k_no_behaviour && (slot.state != 0 || (slot.acted != 0 && slot.by_state));
+    if (slot.behaviour == k_no_behaviour || (slot.state == 0 && !(slot.acted != 0 && slot.by_state))) return false;
+    // (Given another behaviour since it was last looked at: it begins that one, in the first.)
+    const world::Person& person = scene.people[index];
+    return slot.id == person.id && !person.behaviour.empty() && static_cast<u32>(hash_of(person.behaviour)) == slot.behaviour_name;
 }
 
 bool PeopleRoutines::kept(const world::Scene& scene, const PeopleTravel& travel, usize index, Kept& out) const {
@@ -726,14 +729,17 @@ bool PeopleRoutines::kept(const world::Scene& scene, const PeopleTravel& travel,
     const world::Person& person = scene.people[index];
     if (slot.id != person.id) return false;
     // The state it is in, if its behaviour is still the one the slot found.
-    const world::Behaviour* behaviour = slot.behaviour < scene.behaviours.size() ? &scene.behaviours[slot.behaviour] : nullptr;
-    if (behaviour != nullptr && behaviour->name != person.behaviour) behaviour = nullptr;
-    // (At another place in the list since it was last looked at, one before it removed: the same one still.)
-    if (behaviour == nullptr && slot.behaviour != k_no_behaviour && !person.behaviour.empty() &&
+    // (As the next look would find it: the one it was in by its name, though at another place in the
+    // list since, one before it removed; given another since, it is in no state of that one yet.)
+    const world::Behaviour* behaviour = nullptr;
+    if (slot.behaviour != k_no_behaviour && !person.behaviour.empty() &&
         static_cast<u32>(hash_of(person.behaviour)) == slot.behaviour_name) {
-        behaviour = world::find_behaviour(scene.behaviours, person.behaviour);
+        behaviour = slot.behaviour < scene.behaviours.size() && scene.behaviours[slot.behaviour].name == person.behaviour
+                        ? &scene.behaviours[slot.behaviour]
+                        : world::find_behaviour(scene.behaviours, person.behaviour);
     }
     if (behaviour != nullptr && slot.state >= behaviour->states.size()) behaviour = nullptr;
+    out.own = slot.by_state;
     // (Told whatever else is: a trip that was the state's or the routine's is not written as one sent by hand.)
     const PeopleTravel::Trip* trip = travel.trip(slot.id);
     out.own_trip = slot.trip != 0 && trip != nullptr && trip->serial == slot.trip;
@@ -794,7 +800,16 @@ bool PeopleRoutines::restore(const world::Scene& scene, const PeopleTravel& trav
         // neither arrived nor failed. One that had done nothing its state did not say is as it was.)
         slot.settled = had.settled && !state_only && (acted || (had.said == 0 && !behaviour->states[*state].own));
     }
-    if (!acted) return had_said == 0;
+    if (!acted) {
+        if (state.has_value()) { // (in its state with nothing done: what the slot had before is not this state's)
+            slot.acted = 0;
+            slot.by_state = false;
+            slot.trip = 0;
+            slot.place = 0;
+            slot.failed = false;
+        }
+        return had_said == 0;
+    }
     slot.acted = had.said;
     slot.entry = had.own ? slot.state : had.entry;
     slot.by_state = had.own;
