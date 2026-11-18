@@ -4342,6 +4342,11 @@ picture's corner). With it:
   camera from being there, and those walked towards have theirs before
   they are near. Those held are looked through once a frame and once
   more after each that gave its up, at most `made_a_frame` a frame.
+- What those rules let through is counted: `appeared_in_view` and
+  `vanished_in_view` are the entities made and taken away close by in
+  the camera's view while the world runs (nearer than 0.85 of
+  `embody_distance`). The living-world gate flies its town and passes
+  only if neither rose.
 
 A person given its entity part way along its trip does not start from
 a standstill: `WalkerState::walk_to` takes how it moves already
@@ -4576,6 +4581,60 @@ kind, 20 m/s at most on foot; `send` compares the scene's routes whole
 with the graph's (about a millisecond with every node and link there can
 be: a counted revision when routines send many a frame); stopping the
 simulation frees every trip in that frame.
+
+## The living-world gate (living-world plan LW8)
+
+`tools/living_gate.py` peoples the N3 gate's valley: the town's and the
+hamlet's houses each a home, 56 villages down both sides of the valley
+(eight houses, a well and a field each), roads joining them all, and
+5,000 people with a home and a routine each (farmers and townsfolk:
+sleep, work, a midday meal, home again; alarmed, they run home). It
+opens that as a world, simulating with the clock running a day in ten
+minutes (`simulate` with `clock`: the scene's clock moves on while
+simulating as it does in play, a view flag in `EditorState` that
+stopping by command forgets and a game save does not keep), and:
+
+- before dawn reads everyone asleep at home;
+- flies the N3 flight as the valley wakes and sets off, firing a shot
+  in the town's street: 60 fps without micro stutter as the other
+  gates; the people's share of the main thread (the frame phases
+  `travel`, `senses`, `routines` and `people`, which main marks after
+  each of the four updates; their medians summed) under 0.5 ms a frame
+  in the flight's worst sample; nobody appearing or going close by in
+  view (`appeared_in_view`, `vanished_in_view`: nearer than 51 m), and
+  nobody far off giving its entity up for want of room (`swapped`,
+  `waiting`);
+- reads who of the townsfolk is out as the shot is fired (on their way
+  or at the market), and that those run home (told to flee, and on
+  their way home or there); calm again they are back at work for the
+  morning's reading;
+- mid morning reads everyone at work, saves the game, lets the day run
+  to the midday meal, loads the save, and reads everyone where they
+  were, doing what they did, at the hour it was.
+
+A flight is so many frames and a day so many seconds, so the gate
+measures the frames' pace before it flies and sets the clock's speed
+for the flight alone so that the flight lasts the hour from 5.8 (at 60
+fps about 120 game seconds a second, the day's own being 144): the
+valley sets off, the townsfolk are out and the shot falls among them
+at any frame rate. Each of the day's readings is taken again until it
+holds or its hour is past (those late on their way arrive), and is
+judged by routine, so the few townsfolk are not lost among the
+farmers. A day in ten minutes is 25 seconds an hour while people walk
+by the real clock, so the gate's fields and markets are within about
+80 m of home and its people walk at 3 m/s. The clock moves by each
+frame's real time and people by the simulation's steps (four a frame
+at most), so under 15 frames a second the day runs ahead of them: a
+machine that slow fails the midday reading. Off a real GPU
+(CI) it runs the same day twice as long with four villages and a
+shorter flight, and checks all but the speed and the people's budget.
+The gate's own arithmetic (the valley's plan, the checks of the day, of
+the people's cost and of a loaded game) is tested without an editor by
+`tools/test_living_gate.py`.
+
+The trips' share: each trip looked at for having arrived finds its
+person by where it was last found in the scene's list
+(`Trip::person_at`), not by a search, while nobody is added or removed.
 
 ## Sound
 

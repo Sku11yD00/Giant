@@ -496,8 +496,13 @@ void PeopleTravel::update_rest(const world::Scene& scene) {
     const usize looked = std::min<usize>(std::clamp<u32>(settings.looked_a_frame, 1, 65536), m_trips.size());
     for (usize n = 0; n < looked && !m_trips.empty(); ++n) {
         if (m_cursor >= m_trips.size()) m_cursor = 0;
-        const Trip& t = m_trips[m_cursor];
-        if (world::find_person(scene.people, t.person) == nullptr) {
+        Trip& t = m_trips[m_cursor];
+        // (Its person where it was last found, else looked for: the list is by id, and seldom changes.)
+        if (t.person_at >= scene.people.size() || scene.people[t.person_at].id != t.person) {
+            const world::Person* person = world::find_person(scene.people, t.person);
+            if (person != nullptr) t.person_at = static_cast<u32>(person - scene.people.data());
+        }
+        if (t.person_at >= scene.people.size() || scene.people[t.person_at].id != t.person) {
             const world::PersonId id = t.person;
             end(m_cursor, false);
             m_places.erase(id);

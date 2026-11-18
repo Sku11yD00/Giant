@@ -437,6 +437,10 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     const double far_kept = far_made + (let_go - embody);
     const float seen_angle = view.half_angle + k_seen_margin, ahead_angle = view.half_angle + k_ahead_margin,
                 kept_angle = view.half_angle + k_kept_margin;
+    // Close by in view while the world runs: where nobody should appear or go (counted when one does).
+    const auto in_plain_view = [&](const DVec3& at) {
+        return strict && square_distance(at, camera) < hidden_within * hidden_within && within_angle(view, camera, at, seen_angle);
+    };
     // Everyone was put back, the camera was put somewhere, or nobody could have an entity until
     // now: what is seen changed at a stroke anyway, so those near are made whether seen or not,
     // once through the list.
@@ -458,7 +462,9 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     const auto look_changed = [&](const std::string& name) {
         m_scratch.clear();
         for (const auto& [id, held] : m_held) {
-            if (held.was.look == name) m_scratch.push_back(id);
+            if (held.was.look != name) continue;
+            m_scratch.push_back(id);
+            if (in_plain_view(held.at.position)) ++m_stats.vanished_in_view;
         }
         for (const world::PersonId id : m_scratch) {
             release(id);
@@ -467,6 +473,9 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     };
     if (looks.size() != m_looks.size()) {
         m_free_passes = 2;
+        for (const auto& [id, held] : m_held) {
+            if (in_plain_view(held.at.position)) ++m_stats.vanished_in_view;
+        }
         release_all(scene); // (a look made or removed: rare; everyone is made again over the next frames)
         m_looks = looks;
         m_look_cursor = 0;
@@ -531,6 +540,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         const bool no_ground = world != nullptr && world->ground_coming(world::cell_of(held.at.position));
         if (!there || too_far || no_ground) {
             m_scratch.push_back(id);
+            if (in_plain_view(held.at.position)) ++m_stats.vanished_in_view;
             // (Gone by an edit, a deletion or its ground: not by where the camera is. It is made
             // again where it stands, seen or not.)
             if (!too_far) again(id);
@@ -540,6 +550,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     // More held than may be (`most` lowered): any go (and come back, seen or not, if it is raised).
     while (m_held.size() > most) {
         const world::PersonId id = m_held.begin()->first;
+        if (in_plain_view(m_held.begin()->second.at.position)) ++m_stats.vanished_in_view;
         release(id);
         again(id);
     }
@@ -641,6 +652,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         m_held.emplace(person.id, std::move(held));
         ++made;
         ++m_stats.made;
+        if (in_plain_view(at.position)) ++m_stats.appeared_in_view;
     }
     flush(scene); // (those that gave theirs up)
     m_stats.embodied = static_cast<u32>(m_held.size());

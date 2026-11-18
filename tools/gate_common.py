@@ -66,7 +66,7 @@ def _median(values):
     return ordered[len(ordered) // 2] if ordered else 0.0
 
 
-def _weighted_median(pairs):
+def weighted_median(pairs):
     """The median of (weight, value) pairs: a sample's median counts for
     as many frames as it had."""
     ordered = sorted(pairs, key=lambda p: p[1])
@@ -113,10 +113,10 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0):
     names = set()
     for _, typical, _ in typicals:
         names.update(typical)
-    typical = {n: _weighted_median([(f, t.get(n, 0.0)) for f, t, _ in typicals]) for n in names}
+    typical = {n: weighted_median([(f, t.get(n, 0.0)) for f, t, _ in typicals]) for n in names}
     typical["render/rest"] = max(0.0, typical.get("render", 0.0) -
                                  sum(v for n, v in typical.items() if n.startswith("render/")))
-    typical_cpu = _weighted_median([(f, c) for f, _, c in typicals])
+    typical_cpu = weighted_median([(f, c) for f, _, c in typicals])
 
     def phases_of(frame):
         p = dict(frame["phases"])

@@ -58,7 +58,7 @@ void register_clock_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"day", {{"type", "integer"}, {"minimum", 1}, {"maximum", 365}, {"description", "Day of the year (80: spring equinox, 172: midsummer in the north)."}}},
                 {"latitude", number(-90, 90, "Degrees north (negative: south).")},
                 {"north_degrees", number(0, 360, "The compass heading the world's -Z points to (0: -Z is north).")},
-                {"speed", number(0, 86400, "Game seconds a real second in play (0: still). Default 60.")}}}},
+                {"speed", number(0, 86400, "Game seconds a real second in play, or simulating with `clock` (0: still). Default 60.")}}}},
          false,
          [&state](const Json& args, CommandContext& context) {
              Clock c = shown(state);
@@ -83,7 +83,7 @@ void register_clock_commands(ai::CommandRegistry& registry, EditorState& state) 
          }});
     add(registry,
         {"get_time",
-         "The scene's clock (as saved), the clock shown now (play moves its time on), where the sun and "
+         "The scene's clock (as saved), the clock shown now (play moves its time on, and simulating started with `clock`), where the sun and "
          "the moon are (elevation and compass azimuth in degrees, direction in the world), the moon's "
          "phase (age 0 new, 0.5 full; lit: the share of its disc lit), which is the light (sun, moon, or "
          "none: clock off), the sky's light against the day's (daylight) and how bright the stars are drawn.",

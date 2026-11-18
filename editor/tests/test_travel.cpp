@@ -125,6 +125,33 @@ GIANT_TEST("travel: a person sent to a place goes along the road by the clock, a
     GIANT_CHECK(f.near(id, 0, 0, -10) && f.run("get_travel").value["trips"] == 0 && f.run("get_travel").value["moved"] == 0);
 }
 
+GIANT_TEST("travel: a trip finds its person again when others are removed or added before it") {
+    Fixture f;
+    const world::PersonId first = f.person(90, -10), second = f.person(60, 5), third = f.person(100, 20);
+    f.travel.update(f.state.scene, 1, 0.0);
+    GIANT_CHECK(f.run("send_person", {{"id", third}, {"to", at(0, 0, -20)}, {"speed", 5.0}}).ok &&
+                f.run("send_person", {{"id", second}, {"to", at(0, 0, -20)}, {"speed", 5.0}}).ok);
+    f.to(0.0);
+    f.to(1.0); // (each trip looked at: where its person is in the list is kept)
+    GIANT_CHECK(f.travel.stats().trips == 2 && f.travel.trip(third)->phase == PeopleTravel::Phase::travelling);
+    // One before them goes: both are found one place down the list, and travel on.
+    GIANT_CHECK(f.run("remove_people", {{"ids", {first}}}).ok);
+    f.to(2.0);
+    GIANT_CHECK(f.travel.stats().trips == 2 && f.travel.trip(second) != nullptr && f.travel.trip(third) != nullptr &&
+                f.travel.trip(third)->phase == PeopleTravel::Phase::travelling);
+    // The one whose place the other now has goes: only its trip ends.
+    GIANT_CHECK(f.run("remove_people", {{"ids", {second}}}).ok);
+    f.to(3.0);
+    GIANT_CHECK(f.travel.stats().trips == 1 && f.travel.trip(second) == nullptr && f.travel.trip(third) != nullptr);
+    // Put back (undo): the list is as it was, and the trip that is left is still its own person's.
+    GIANT_CHECK(f.run("undo").ok && f.run("undo").ok);
+    f.to(4.0);
+    GIANT_CHECK(f.travel.stats().trips == 1 && f.travel.trip(third) != nullptr && f.travel.trip(first) == nullptr);
+    GIANT_CHECK(f.run("remove_people", {{"ids", {third}}}).ok);
+    f.to(5.0);
+    GIANT_CHECK(f.travel.stats().trips == 0);
+}
+
 GIANT_TEST("travel: no way, a person gone, roads changed: each trip ends saying why, the rest go on") {
     Fixture f;
     // A second road nothing joins to the first.

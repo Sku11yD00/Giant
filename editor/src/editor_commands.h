@@ -86,6 +86,10 @@ enum class FramePhase : u8 {
     physics,     // bodies following the scene, stepping
     animation,   // skinned entities' clips moving on, their poses; cloth
     begin_frame, // waiting for a frame in flight to finish
+    travel,      // the people's trips: ways looked for, those arrived
+    senses,      // what the people hear and see
+    routines,    // the people's routines and behaviours: those sent
+    people,      // entities for the people near the camera, walking and acting
     terrain,     // terrain meshes
     far_ground,  // far ground levels
     scatter,     // scatter placement results
@@ -99,7 +103,8 @@ enum class FramePhase : u8 {
     count
 };
 inline constexpr std::array<const char*, static_cast<usize>(FramePhase::count)> k_frame_phase_names = {
-    "events",     "mcp",     "scripts", "ui",     "weather", "physics",   "animation", "begin_frame", "terrain",
+    "events",     "mcp",     "scripts", "ui",     "weather", "physics",   "animation", "begin_frame", "travel",
+    "senses",     "routines", "people", "terrain",
     "far_ground", "scatter", "scene",   "render", "ui_draw", "end_frame", "streaming", "tail",        "other"};
 static_assert(k_frame_phase_names.back() != nullptr, "a name for every phase");
 static_assert(render::k_cpu_section_names.back() != nullptr, "a name for every section");
@@ -332,6 +337,11 @@ struct EditorState {
     std::vector<std::string> mods_scripts_loaded; // ids, in the order loaded
     // Who may allow a mod's scripts (enable_mod with scripts: true). Set by main; tests choose.
     ModsScriptsConsent mods_scripts_consent = ModsScriptsConsent::none;
+    // The scene's clock moves on while simulating, as it does in play (`simulate` with `clock`):
+    // for watching the people's day from the editor's own camera. View state.
+    bool simulate_clock = false;
+    // Whether the clock moves on this frame: in play, and while simulating when that was asked for.
+    bool clock_runs(bool playing, bool simulating) const { return playing || (simulate_clock && simulating); }
     // A mod whose scripts a command asked to have allowed, until the person answers in the window (the panels').
     std::optional<ModsScriptsRequest> mods_scripts_request;
 

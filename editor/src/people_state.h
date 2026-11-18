@@ -121,6 +121,15 @@ public:
         u32 acting = 0;     // of those held: playing their activity's clip now
         u32 unseen = 0;     // near and in view last time through the list, not made: waiting to be out of sight
         u64 swapped = 0;    // entities far off given up for someone near (`most` held)
+        // While the world runs: entities made, and taken away, close by in the camera's view (nearer
+        // than k_seen_made_within of embody_distance, where one is otherwise made only while unseen).
+        // What the rules above let through: the pass after everything changed at a stroke, an edit
+        // (to a person, a look, the looks' number), ground streamed in or out under one, `most`
+        // lowered. Not counted: everyone taken at once with the people turned off or held back (a
+        // loaded game), or with another scene. A flight that counts none, with none of those in it,
+        // saw nobody appear or go close by.
+        u64 appeared_in_view = 0;
+        u64 vanished_in_view = 0;
     };
 
     // Each frame, before the scene is drawn. `world`: the open world whose

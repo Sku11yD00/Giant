@@ -107,6 +107,7 @@ Json physics_json(const EditorState& state) {
     const sim::ForestStats f = p.forest().stats();
     const sim::DustStats d = p.dust().stats();
     return {{"simulating", p.simulating()},
+            {"clock", state.simulate_clock && p.simulating()},
             {"bodies", w.bodies},
             {"active", w.active},
             {"steps", w.steps},
@@ -269,15 +270,26 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
          "entities, kits, the ground). They are drawn where they move to, but the scene keeps where they "
          "were put (get_entity gives both: `simulated` is where it is now), so undo and saving are not "
          "touched; edits made meanwhile are followed (a moved entity is put there and falls from there). "
-         "Stopping draws every one where the scene has it again (and stops play). View state, not undoable.",
+         "Stopping draws every one where the scene has it again (and stops play). `clock` (with `on` true; default "
+         "false): the scene's clock moves on while simulating, at its `speed`, as it does in play, so the people's "
+         "day passes while watched from the editor's camera; without it the time of day stands still unless playing. "
+         "Asked for each time: stopping forgets it, and a game save does not keep it (a loaded game that simulates "
+         "again runs the clock only if this editor's simulating was last started with it). The clock moves by the "
+         "real time of each frame, bodies and people by the simulation's steps (at most four a frame): under 15 "
+         "frames a second the day runs ahead of them. "
+         "View state, not undoable.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"required", {"on"}},
-              {"properties", {{"on", {{"type", "boolean"}}}}}},
+              {"properties", {{"on", {{"type", "boolean"}}},
+                              {"clock", {{"type", "boolean"}, {"description", "With on true: the clock moves on while simulating. Default false."}}}}}},
          false,
          [&state](const Json& args, CommandContext&) {
              if (state.physics == nullptr) return no_physics();
              const bool on = args["on"].get<bool>();
+             const bool clock = args.value("clock", false);
+             if (clock && !on) return CommandResult::failure("clock: only with on true (the clock moves on while simulating)");
+             state.simulate_clock = clock; // (stopped, or started without it: the time of day stands still again)
              // Off while playing: play stops too (it needs the simulation).
              if (!on && state.play != nullptr && state.play->playing()) state.play->stop(state.camera);
              state.physics->set_simulating(on);

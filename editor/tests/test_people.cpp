@@ -785,6 +785,8 @@ GIANT_TEST("people near the camera: nobody appears or goes close by in view; tho
     GIANT_CHECK(has(1) && !has(2) && has(3) && has(4) && !has(5) && !has(6) && has(7) && people.stats().unseen == 1);
     ai::CommandResult r = f.run("set_people_settings");
     GIANT_CHECK(r.ok && r.value["unseen"] == 1 && r.value["view_distance"] == 200.0 && r.value["embodied"] == 4);
+    // Nobody appeared or went close by in view (7, just within embody_distance, is not close by).
+    GIANT_CHECK(r.value["appeared_in_view"] == 0 && r.value["vanished_in_view"] == 0);
     // Turned round: the one that waited is made (unseen now), the one far behind goes (unseen), the one far ahead is made.
     people.view = south;
     frames();
@@ -793,6 +795,7 @@ GIANT_TEST("people near the camera: nobody appears or goes close by in view; tho
     people.view = north;
     frames();
     GIANT_CHECK(has(2) && has(3) && has(4) && !has(5));
+    GIANT_CHECK(people.stats().appeared_in_view == 0 && people.stats().vanished_in_view == 0);
     // Its entity deleted while looked at, itself edited: made again where it stands (it was there
     // to be seen). Only it: another near and in view (8, made while the world runs) still waits.
     make({-25.0});
@@ -802,9 +805,12 @@ GIANT_TEST("people near the camera: nobody appears or goes close by in view; tho
     GIANT_CHECK(f.run("delete_entities", {{"ids", {people.entity_of(scene, 2)}}}).ok);
     frames();
     GIANT_CHECK(has(2) && !has(8) && people.stats().made == made_before + 1);
+    // (That is one gone and one come close by in view, and counted so: what an edit does is seen.)
+    GIANT_CHECK(people.stats().appeared_in_view == 1 && people.stats().vanished_in_view == 1);
     GIANT_CHECK(f.run("set_person", {{"id", 2}, {"name", "Ada"}}).ok);
     frames();
     GIANT_CHECK(has(2) && !has(8) && scene.find(people.entity_of(scene, 2))->name == "Ada");
+    GIANT_CHECK(people.stats().appeared_in_view == 2 && people.stats().vanished_in_view == 2);
     // Fewer may be held, then as many again: those that had to go come back, seen or not (and
     // with them the one that waited: everyone near, once).
     people.settings.most = 1;
@@ -831,9 +837,10 @@ GIANT_TEST("people near the camera: nobody appears or goes close by in view; tho
     GIANT_CHECK(has(4));
     // The camera put somewhere else (a load, a teleport): those near are made though seen, once.
     GIANT_CHECK(!has(6));
+    const u64 appeared_before = people.stats().appeared_in_view;
     camera.z = -370.0; // 30 m from 6, looking at it
     frames();
-    GIANT_CHECK(has(6) && people.stats().unseen == 0);
+    GIANT_CHECK(has(6) && people.stats().unseen == 0 && people.stats().appeared_in_view == appeared_before + 1);
     // Held back (a loaded game's people being put back) and let go: the same.
     people.hold = true;
     frames(1);

@@ -62,6 +62,7 @@ public:
         double since = 0.0; // the clock then
         bool held = false;  // an entity stands for it: it goes on as that walks (PeopleState)
         const char* reason = ""; // failed: why
+        u32 person_at = 0;  // where its person was last found in the scene's list (tried first: no search while nobody is added or removed)
     };
     struct Where {
         DVec3 position{};
