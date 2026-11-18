@@ -636,19 +636,31 @@ GIANT_TEST("mods: a mod's own files are found in its folder, and stay out of the
     GIANT_CHECK(commands.execute("list_mods").value["world"]["reopen"] == true);
     w.streaming.close();
     GIANT_CHECK(w.open() && w.scene.person_looks.size() == 2 && w.streaming.mods_laid().applied.problems.empty());
-    // A link in the mod's folder that leads out of it: its files are not the mod's own, and the mod is left out.
+    // A link in the mod's folder (it could lead a file of the mod's out of it): the mod is left out, and it says which.
     w.streaming.close();
     const std::filesystem::path outside = w.folder / "outside";
+    const std::filesystem::path art = w.folder / "mods" / "guards" / "art";
     std::error_code error;
     std::filesystem::create_directories(outside, error);
-    std::filesystem::create_directory_symlink(std::filesystem::absolute(outside), w.folder / "mods" / "guards" / "art", error);
+    GIANT_CHECK(write_text_file(outside / "skin.png", "not a picture"));
+    std::filesystem::create_directory_symlink(std::filesystem::absolute(outside), art, error);
     if (!error) { // (Windows makes links only for those allowed to)
-        GIANT_CHECK(w.open() && w.scene.person_looks.size() == 1 && w.streaming.mods_laid().applied.problems.size() == 1 &&
-                    w.streaming.mods_laid().applied.problems[0].message.find("a link there leads out") != std::string::npos);
-        w.streaming.close();
-        // A real folder of its own in its place: laid again.
-        std::filesystem::remove(w.folder / "mods" / "guards" / "art", error);
-        std::filesystem::create_directories(w.folder / "mods" / "guards" / "art", error);
-        GIANT_CHECK(w.open() && w.scene.person_looks.size() == 2);
+        const auto left_out = [&w](const char* named) {
+            const bool opened = w.open();
+            const std::vector<world::ModProblem>& problems = w.streaming.mods_laid().applied.problems;
+            const bool said = opened && w.scene.person_looks.size() == 1 && problems.size() == 1 &&
+                              problems[0].message.find("is a link") != std::string::npos && problems[0].message.find(named) != std::string::npos;
+            w.streaming.close();
+            return said;
+        };
+        GIANT_CHECK(left_out("\"art\""));
+        // A real folder in its place, and a file in it that is a link (a glTF's image beside it, say).
+        std::filesystem::remove(art, error);
+        std::filesystem::create_directories(art / "deep", error);
+        std::filesystem::create_symlink(std::filesystem::absolute(outside / "skin.png"), art / "deep" / "skin.png", error);
+        GIANT_CHECK(!error && left_out("skin.png"));
+        // No link there: laid again.
+        std::filesystem::remove(art / "deep" / "skin.png", error);
+        GIANT_CHECK(w.open() && w.scene.person_looks.size() == 2 && w.streaming.mods_laid().applied.problems.empty());
     }
 }

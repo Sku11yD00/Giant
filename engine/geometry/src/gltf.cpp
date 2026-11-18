@@ -1746,7 +1746,7 @@ std::vector<std::filesystem::path> gltf_buffer_files(const std::filesystem::path
     std::unique_ptr<cgltf_data, DataDeleter> data(raw);
     if (r != cgltf_result_success) return files;
     const std::u8string full_u8(full.begin(), full.end());
-    const std::filesystem::path folder = std::filesystem::path(full_u8).parent_path();
+    const std::filesystem::path folder = std::filesystem::path(full_u8).parent_path().lexically_normal(); // (as import's)
     for (cgltf_size i = 0; i < data->buffers_count; ++i) {
         const char* uri = data->buffers[i].uri;
         if (uri == nullptr || std::string_view(uri).starts_with("data:")) continue;

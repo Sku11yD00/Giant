@@ -156,9 +156,8 @@ constexpr std::string_view k_mod_file_prefix = "mod:";
 std::optional<std::string> check_mod_file_path(std::string_view path);
 // What is wrong among all the files its world names, with which (as "person_looks[2].mesh: ..."), or nothing.
 std::optional<std::string> check_mod_files(const ModWorld& world);
-// The mod's own files its world names, as paths in its folder (without "mod:"), each once, sorted.
-// (Before resolve_mod_files; for looking at them on the disk: a link may lead one out of the folder.)
-std::vector<std::string> mod_own_files(const ModWorld& world);
+// Whether its world names any file of the mod's own ("mod:...").
+bool has_mod_own_files(const ModWorld& world);
 // Makes each of the mod's own files' paths one a file is opened by:
 // `mod_folder` (UTF-8, forward slashes, as the editor would open it), "/",
 // and the path in it. What is wrong, or nothing; `world` is changed only

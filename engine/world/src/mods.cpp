@@ -678,9 +678,13 @@ std::optional<std::string> check_mod_file_path(std::string_view path) {
         std::string stem(part.substr(0, part.find('.')));
         std::transform(stem.begin(), stem.end(), stem.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; });
         while (!stem.empty() && stem.back() == ' ') stem.pop_back();
-        const bool numbered = stem.size() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem[3] >= '0' && stem[3] <= '9';
+        // (com1 to com9 and lpt1 to lpt9 also with the digit written small and high: ¹ ² ³, in UTF-8.)
+        const std::string_view number = std::string_view(stem).substr(std::min<usize>(stem.size(), 3));
+        const bool numbered = (stem.starts_with("com") || stem.starts_with("lpt")) &&
+                              ((number.size() == 1 && number[0] >= '0' && number[0] <= '9') || number == "\xc2\xb9" || number == "\xc2\xb2" ||
+                               number == "\xc2\xb3");
         if (numbered || stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" || stem == "conin$" || stem == "conout$") {
-            return "must not have a part named as a device is on Windows (con, prn, aux, nul, com0 to com9, lpt0 to lpt9)" + how;
+            return "must not have a part named as a device is on Windows (con, prn, aux, nul, conin$, conout$, com0 to com9, lpt0 to lpt9)" + how;
         }
         from = to + 1;
     }
@@ -731,17 +735,8 @@ std::optional<std::string> check_mod_files(const ModWorld& world) {
     return wrong;
 }
 
-std::vector<std::string> mod_own_files(const ModWorld& world) {
-    std::vector<std::string> files;
-    each_mod_file(world, [&files](const std::string& path, const std::string&) {
-        if (path.starts_with(k_mod_file_prefix)) {
-            files.push_back(path.substr(k_mod_file_prefix.size()));
-        }
-        return true;
-    });
-    std::sort(files.begin(), files.end());
-    files.erase(std::unique(files.begin(), files.end()), files.end());
-    return files;
+bool has_mod_own_files(const ModWorld& world) {
+    return !each_mod_file(world, [](const std::string& path, const std::string&) { return !path.starts_with(k_mod_file_prefix); });
 }
 
 std::optional<std::string> resolve_mod_files(ModWorld& world, std::string_view mod_folder) {

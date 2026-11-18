@@ -435,7 +435,7 @@ GIANT_TEST("mod worlds: the world's own people are told from the mods', and its 
 
 GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never from outside it") {
     for (const char* good : {"", "mod:guard.glb", "mod:art/people/guard v2.glb", "mod:a/b/c/d.png", "mod:art/a.gltf#image0", "art/guard.glb",
-                             "shared/x y.png", "console.png", "mod:art/com10.glb", "mod:.hidden/x.glb"}) {
+                             "shared/x y.png", "console.png", "mod:art/com10.glb", "mod:art/com.glb", "mod:compass.png", "mod:.hidden/x.glb"}) {
         GIANT_CHECK(!check_mod_file_path(good));
     }
     // Never out of its folder, nor (for a path that is not the mod's own) out of the folder the game runs in;
@@ -444,11 +444,11 @@ GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never f
          {"mod:", "mod:/guard.glb", "mod:art//guard.glb", "mod:art/", "mod:../guard.glb", "mod:art/../../x.glb", "mod:./x.glb", "mod:art/./x.glb",
           "mod:..", "mod:art\\x.glb", "mod:C:/x.glb", "mod:x.glb:stream", "mod:a\nb.glb", "mod:a\x7f.glb", "C:/art/x.glb", "../x.glb",
           "a/../../x.glb", "/abs/x.glb", "//server/share/a.glb", "\\\\server\\share\\a.glb", "Mod:../x", "mods:x", " mod:x.glb", "mod: art/x.glb",
-          "mod:CON.glb", "mod:art/nul", "mod:art/Com1.abc", "aux.png", "mod:lpt9", "mod:art/CONOUT$", "mod:con .glb", "mod:art/guard.glb.",
+          "mod:CON.glb", "mod:art/nul", "mod:art/Com1.abc", "aux.png", "mod:lpt9", "mod:art/CONOUT$", "mod:com\xc2\xb9.glb", "lpt\xc2\xb3", "mod:con .glb", "mod:art/guard.glb.",
           "mod:art/guard.glb ", "mod:art /x.glb", "mod:art/x?.glb", "mod:a*.glb", "mod:a<b.glb", "mod:a|b.glb", "mod:a\"b.glb", "x>y.png"}) {
         GIANT_CHECK(check_mod_file_path(bad).has_value());
     }
-    GIANT_CHECK(check_mod_file_path(std::string("mod:a\0b.glb", 12)).has_value() && check_mod_file_path(std::string("a\0b.glb", 8)).has_value());
+    GIANT_CHECK(check_mod_file_path(std::string("mod:a\0b.glb", 11)).has_value() && check_mod_file_path(std::string("a\0b.glb", 7)).has_value());
     // A mod's file with one is refused when loaded, saying which.
     ModWorld mod;
     mod.person_looks = {look("guard"), look("captain")};
@@ -462,7 +462,8 @@ GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never f
     mod.person_looks[1].parts[0].material.skin->detail_normal = "mod:art/pores.png";
     mod.person_looks[1].material.skin = SkinLook{};
     mod.person_looks[1].material.skin->detail_normal = "shared/pores.png";
-    GIANT_CHECK(mod_own_files(mod) == std::vector<std::string>({"art/coat_n.png", "art/guard.glb", "art/guard.png", "art/guard_hair.glb", "art/pores.png"}));
+    mod.person_looks[1].material.maps.roughness_metal = "mod:art/captain_rm.png";
+    GIANT_CHECK(has_mod_own_files(mod) && !has_mod_own_files(ModWorld{}));
     ModWorld back;
     GIANT_CHECK(!check_mod_files(mod) && !load_mod_world(save_mod_world(mod), back) && back == mod);
     ModWorld wrong = mod;
@@ -499,7 +500,8 @@ GIANT_TEST("mod worlds: a mod's own files are named from its folder, and never f
                 resolved.person_looks[0].material.maps.normal.empty() && resolved.person_looks[1].mesh == "shared/captain.glb" &&
                 resolved.person_looks[1].parts[0].material.maps.normal == "worlds/valley/mods/guards/art/coat_n.png" &&
                 resolved.person_looks[1].parts[0].material.skin->detail_normal == "worlds/valley/mods/guards/art/pores.png" &&
-                resolved.person_looks[1].material.skin->detail_normal == "shared/pores.png" && mod_own_files(resolved).empty());
+                resolved.person_looks[1].material.skin->detail_normal == "shared/pores.png" &&
+                resolved.person_looks[1].material.maps.roughness_metal == "worlds/valley/mods/guards/art/captain_rm.png" && !has_mod_own_files(resolved));
     ModWorld bare = mod; // (no folder: a path from where the game runs)
     GIANT_CHECK(!resolve_mod_files(bare, "") && bare.person_looks[0].mesh == "art/guard.glb");
     ModWorld slash = mod;

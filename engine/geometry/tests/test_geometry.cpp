@@ -697,6 +697,9 @@ GIANT_TEST("geometry: a .gltf file reads its buffer from next to it") {
     GIANT_CHECK(buffers.size() == 1 && buffers[0].filename() == "tri data.bin" &&
                 std::filesystem::exists(buffers[0]));
     GIANT_CHECK(gltf_buffer_files(dir / "missing.gltf").empty());
+    // (However the file's own path is written: one through a folder above.)
+    std::filesystem::create_directories(dir / "sub");
+    GIANT_CHECK(gltf_buffer_files(dir / "sub" / ".." / "tri.gltf").size() == 1);
     // One outside the file's folder is not among them (never read, so never looked at: a server's path would be called).
     for (const char* outside : {"../tri%20data.bin", "//server/share/b.bin", "/etc/hostname"}) {
         std::string json = f.json;
