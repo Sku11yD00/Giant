@@ -1,5 +1,7 @@
 #include "giant/core/text_files.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <ios>
 #include <string>
@@ -45,6 +47,24 @@ bool write_text_file(const std::filesystem::path& path, const std::string& text)
         std::filesystem::remove(partial, error); // (nothing half written is left lying)
     }
     return ok;
+}
+
+std::filesystem::path environment_path(const char* name) {
+#if defined(_WIN32)
+    // (Without the CRT's deprecated getenv.)
+    const std::wstring wide(name, name + std::strlen(name));
+    wchar_t* value = nullptr;
+    usize length = 0;
+    std::filesystem::path result;
+    if (_wdupenv_s(&value, &length, wide.c_str()) == 0 && value != nullptr) {
+        result = value;
+    }
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::filesystem::path(value) : std::filesystem::path();
+#endif
 }
 
 } // namespace giant

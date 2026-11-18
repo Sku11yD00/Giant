@@ -3,7 +3,9 @@
 // which are on. Read when asked (list_mods, enable_mod), never by a frame.
 // A mod's world.json (places, person looks, routines, behaviours, kits, people)
 // is laid over the world when it is opened (lay_mods), its own files
-// ("mod:...") found in its folder; scripts are the part to come.
+// ("mod:...") found in its folder. A mod's scripts (a C# assembly its
+// mod.json names) run beside the world's while it is open, when the
+// person at this machine allowed them (mods_scripts).
 #pragma once
 
 #include "giant/core/types.h"
@@ -53,6 +55,7 @@ struct ModsLaid {
     std::vector<world::Person> people; // those mods added, as they left them (in the order of their ids)
     std::vector<std::string> mods; // the ids of the mods loaded then, in order
     std::vector<u32> slots;        // each one's slot then (as long as `mods`; world::k_no_mod_slot: it had none)
+    std::vector<std::string> scripts; // each one's scripts as its mod.json named them then (as long as `mods`; empty: none)
     world::ModsApplied applied;    // what each did, and those left out (places in `mods`)
     // Each loaded mod's world.json as it was then (as long as `mods`): to tell when one changed since.
     struct File {
@@ -71,6 +74,87 @@ ModsLaid::File mod_world_file(const std::filesystem::path& world_folder, const s
 // out with why (in `applied.problems`). The mod's own files' paths
 // (world::resolve_mod_files) become paths in <world>/mods/<id>/. Reads the disk.
 ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene);
+
+// The scripts of the mods a world was opened with (part 3d): which run,
+// and which do not, with why. A script is a program with the person's own
+// rights, so a mod's run only when allowed on this machine: the list of
+// those allowed (world::ModScriptsAllowed) is a file of the editor's
+// settings, never the world's, so a world from someone else runs nothing
+// until its mods are allowed here.
+struct ModsScripts {
+    struct Run {
+        std::string mod;
+        std::string path; // the assembly, as the editor opens it: <world>/mods/<id>/<its scripts>
+        bool operator==(const Run&) const = default;
+    };
+    struct NotRun {
+        std::string mod;
+        std::string why;
+        bool operator==(const NotRun&) const = default;
+    };
+    std::vector<Run> run;        // in the load order
+    std::vector<NotRun> not_run; // mods that have scripts which are not run
+    u64 session = 0;             // the world's when they were found (WorldStreaming::session): they are that opening's
+    u64 stamp = 0;               // another whenever `run` changed since (one forbidden: forbid_mod_scripts_now)
+};
+// The machine's list as read for one world: which of its mods' scripts are allowed.
+struct ScriptsAllowed {
+    std::vector<world::ModScriptsAllowed> list; // sorted (empty when it could not be used)
+    std::string wrong;                          // the list is there and cannot be used: why (then none is allowed)
+    std::string world;                          // the world's folder as the list names it (empty: it has no such name)
+    bool has(const std::string& id) const;
+};
+// (`allowed_file` empty, or no file there: none is allowed.) Reads the disk.
+ScriptsAllowed read_scripts_allowed(const std::filesystem::path& allowed_file, const std::filesystem::path& world_folder);
+// Found from what was laid (`laid.mods`, `laid.scripts`): a mod's scripts
+// run when it was not left out, they are allowed here, its folder is a
+// real folder that holds no link, and the assembly is there. Reads the disk.
+ModsScripts mods_scripts(const std::filesystem::path& world_folder, const ModsLaid& laid, const ScriptsAllowed& allowed);
+// (Reads the list itself, and nothing when no mod laid has scripts.)
+ModsScripts mods_scripts(const std::filesystem::path& world_folder, const ModsLaid& laid, const std::filesystem::path& allowed_file);
+// Whether the mod's scripts are allowed on this machine (false when the list cannot be read).
+bool mod_scripts_allowed(const std::filesystem::path& allowed_file, const std::filesystem::path& world_folder, const std::string& id);
+// Why the mod's scripts cannot be allowed, or nothing: there is no list to
+// write (`allowed_file` empty), it is there and cannot be read, the world's
+// folder has no name the list can keep, the mod is not there or names no
+// scripts, or the list is full. Writes nothing.
+std::optional<std::string> can_allow_mod_scripts(const std::filesystem::path& allowed_file, const std::filesystem::path& world_folder,
+                                                 const std::string& id);
+// Allows the mod's scripts on this machine (when can_allow_mod_scripts), or
+// takes that back: writes the machine's list. What went wrong, or nothing.
+// A list that cannot be read is never overwritten. Taking back what was
+// never allowed is nothing wrong.
+std::optional<std::string> allow_mod_scripts(const std::filesystem::path& allowed_file, const std::filesystem::path& world_folder,
+                                             const std::string& id, bool allow);
+// Who may allow a mod's scripts. A script is a program with the person's
+// rights, so by default it is the person's to say, in the editor's window
+// (`ask`): a command only asks, since a command may come from the chat's
+// AI, an MCP client or a script. `by_command` is for automated runs
+// (--allow-mods-scripts-by-command, tests); `none`: there is no window to
+// ask in, so none can be allowed.
+enum class ModsScriptsConsent { none, ask, by_command };
+struct ModsScriptsRequest {
+    std::string world; // the world's folder (UTF-8), as the command had it
+    std::string mod;
+    bool operator==(const ModsScriptsRequest&) const = default;
+};
+
+// Whether `file` is in the world's mods folder (by where both really are on the disk): a mod's
+// scripts are run by allowing the mod, never by a command that names the file (load_scripts).
+bool in_mods_folder(const std::filesystem::path& world_folder, const std::filesystem::path& file);
+
+// The mod's scripts are no longer to run in this opening (they were forbidden while the world is open):
+// taken out of `run`, with why, and the stamp moved on. False when they were not to run.
+bool forbid_mod_scripts_now(ModsScripts& scripts, const std::string& id);
+// Which scripts the main loop should have loaded now: those found for the
+// world's opening while that world is the scene's (`world_active`), named
+// by that opening and the stamp; nothing ({}), when there are none to run.
+// It loads again whenever this is another than what it has loaded.
+struct ModsScriptsKey {
+    u64 session = 0, stamp = 0;
+    bool operator==(const ModsScriptsKey&) const = default;
+};
+ModsScriptsKey mods_scripts_key(const ModsScripts& scripts, bool world_active, u64 world_session);
 
 // Where a world's mods are: <world>/mods.
 std::filesystem::path mods_folder(const std::filesystem::path& world_folder);

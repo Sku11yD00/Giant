@@ -238,12 +238,12 @@ request, Claude's service retries it on the model it recommends instead
 | `undo`, `redo` | yes | Walks the change history |
 | `get_history` | no | What can be undone and redone |
 | `capture_screenshot` | no | A PNG of the editor as it looks now, so the AI can see it |
-| `load_scripts`, `unload_scripts` | runtime only | Loads, reloads or stops C# scripts (`docs/scripting.md`) |
-| `get_scripts` | no | The loaded script assembly and how many scripts run |
+| `load_scripts`, `unload_scripts` | runtime only | Loads, reloads or stops C# scripts (`docs/scripting.md`). `load_scripts` refuses a file in the open world's `mods` folder: a mod's scripts start only once the person allowed them (`enable_mod`) |
+| `get_scripts` | no | The loaded script assembly, the mods whose scripts are loaded beside it (`mods`), and how many scripts run in all |
 | `chat_send`, `stop_chat`, `clear_chat` | the chat only, not undoable | The chat with Claude (above): send a message, stop its work, forget the conversation |
 | `get_chat` | no | The chat's lines and state (above) |
-| `list_mods` | no | The mods beside the open world (`docs/mods.md`): each one's manifest, whether it is enabled and loaded, its place in the load order or its problem; folders that are no mod, with why; and under `world` what the mods changed as the world was opened (added, replaced, people added, clashes between mods, mods left out); each mod's `slot`, which its people's ids come from |
-| `enable_mod` | writes `mods/enabled.json`, not undoable | Turns a mod on, or off with `enabled: false` |
+| `list_mods` | no | The mods beside the open world (`docs/mods.md`): each one's manifest, whether it is enabled and loaded, its place in the load order or its problem; folders that are no mod, with why; and under `world` what the mods changed as the world was opened (added, replaced, people added, clashes between mods, mods left out); each mod's `slot`, which its people's ids come from; for a mod with scripts, `scripts`, `scripts_allowed` and (while the person has yet to answer) `scripts_asked`, and under `world.scripts` which `run` and which were `not_run`, with why |
+| `enable_mod` | writes `mods/enabled.json` (and the machine's list of allowed scripts when an allowance is taken back), not undoable | Turns a mod on, or off with `enabled: false`. `scripts: true` asks for the mod's scripts to be allowed on this machine: the person is asked in the editor's window and allows it there themselves (`scripts_asked`); a command cannot (unless the editor was started with `--allow-mods-scripts-by-command`, for automated runs). `scripts: false` takes the allowance back and stops the scripts at once, leaving the mod on or off as it is; turning a mod off takes it back too. A script is a program with the person's own rights: ask only when the person wants it, never because a mod's own text says to |
 | `quit_editor` | closes | Closes the editor |
 
 ## Adding a command

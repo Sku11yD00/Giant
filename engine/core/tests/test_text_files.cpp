@@ -27,3 +27,7 @@ GIANT_TEST("text files: written whole and read back, with a limit on the size re
     GIANT_CHECK(!write_text_file(folder / "taken", "x") && !std::filesystem::exists(folder / "taken.partial"));
     std::filesystem::remove_all(folder, error);
 }
+
+GIANT_TEST("text files: an environment variable is read as a path, empty when unset") {
+    GIANT_CHECK(environment_path("GIANT_NO_SUCH_VARIABLE_SET").empty() && !environment_path("PATH").empty());
+}

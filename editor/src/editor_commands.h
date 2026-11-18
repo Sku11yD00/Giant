@@ -8,6 +8,7 @@
 #include "giant/render/renderer.h"
 #include "giant/rhi/rhi.h"
 #include "giant/world/scene.h"
+#include "mods.h"
 
 #include <algorithm>
 #include <array>
@@ -322,6 +323,17 @@ struct EditorState {
     // Tools and tests: the world folder (UTF-8) whose mods are meant (list_mods, enable_mod), whatever is open.
     // Empty: the open world's.
     std::string mods_world;
+    // The machine's list of mods whose scripts may run (world::ModScriptsAllowed; UTF-8), in the editor's
+    // settings folder. Set by main (and tests). Empty: no mod's scripts run, and none can be allowed.
+    std::string mods_scripts_allowed_file;
+    // The scripts of the mods the open world was opened with (open_world finds them); the main loop
+    // loads those that run while that world is open, and says which it loaded.
+    ModsScripts mods_scripts;
+    std::vector<std::string> mods_scripts_loaded; // ids, in the order loaded
+    // Who may allow a mod's scripts (enable_mod with scripts: true). Set by main; tests choose.
+    ModsScriptsConsent mods_scripts_consent = ModsScriptsConsent::none;
+    // A mod whose scripts a command asked to have allowed, until the person answers in the window (the panels').
+    std::optional<ModsScriptsRequest> mods_scripts_request;
 
     u64 chat_stamp = 0;     // another number whenever the conversation may have changed (the main loop's)
     bool chat_busy = false; // Claude is working on a message (the main loop's)
@@ -380,6 +392,10 @@ void register_ragdoll_commands(ai::CommandRegistry& registry, EditorState& state
 void register_chat_commands(ai::CommandRegistry& registry, EditorState& state);
 // The mod commands (mods_commands.cpp).
 void register_mod_commands(ai::CommandRegistry& registry, EditorState& state);
+// The person's answer to EditorState::mods_scripts_request, given in the editor's window (the panels'
+// button) and on purpose by no command: a command may come from an AI or a script. Allows the scripts
+// of the mod and world the request named, or not; the request is gone either way. What to tell the person.
+std::string answer_mods_scripts_request(EditorState& state, bool allow);
 // Lets the ragdolls follow the fixed steps run by hand too (state.physics,
 // state.ragdolls and state.meshes set; after connect_walkers).
 void connect_ragdolls(EditorState& state);

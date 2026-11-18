@@ -4245,7 +4245,53 @@ saves do not record which mods were on (only the mods' kits are part of
 what tells a save's world); a world closed with `close_world`
 keeps the mods' things as plain ones (people among them, under their
 mod ids: saved as a new world's own, the same mod then finds its ids
-taken and is left out with that reason). Scripts are the part to come.
+taken and is left out with that reason).
+
+A mod's scripts (part 3d) are a C# assembly its `mod.json` names
+(`Mod::scripts`: a `.dll` by a path in its folder, under
+`check_mod_file_path`). The script host runs several assemblies side by
+side: the one `load_scripts` loaded and those added
+(`ScriptHost::add_scripts`, `unload_added_scripts`), each in its own
+collectible load context with its own `await` queue, updated and told of
+people's events one after another. A script is a program with the
+person's rights, which a `world.json` is not, so the editor runs a mod's
+scripts only when they were allowed on this machine:
+`world::ModScriptsAllowed` (the world's whole folder path and the mod's
+id) kept in the editor's settings folder (`mods_scripts_allowed.json`
+beside the chat's key), never in the world, so a world from someone else
+runs nothing until allowed. `open_world` finds what runs (`mods_scripts`:
+the mod loaded and not left out, allowed, no link in its folder, the
+assembly there) into `EditorState::mods_scripts` with the world's session,
+and the main loop's `ScriptRunner` adds those assemblies while that
+opening's world is the scene's (`mods_scripts_key`: the session and a
+stamp) and unloads them when it is not (closed, opened again, or the
+scene replaced), from a copy of the list, since a script may run
+`open_world` as it starts (a load broken off that way is done again the
+next frame). `load_scripts` refuses a file in the open world's mods
+folder (`in_mods_folder`), so the allowance cannot be walked around
+that way. Who may allow is `ModsScriptsConsent`: in the
+editor with its window, `enable_mod` with `scripts: true` only leaves a
+request (`EditorState::mods_scripts_request`) and the panels ask the
+person, whose button writes the list (`answer_mods_scripts_request`).
+One question at a time: a request for another mod while one waits is
+refused, so what the person reads is never changed under them, and the
+window takes no keyboard focus and enables its Allow button only after a
+moment on screen. That answer is on purpose not a
+command (the one exception to rule 7): a command may come from the chat's
+AI, an MCP client or a script, and a mod's own text could talk an AI into
+it. `--allow-mods-scripts-by-command` lets the command allow, for
+automated runs; a hidden editor without it allows none. Forbidding
+(`scripts: false`, or turning the mod off) needs no asking, writes the
+list and takes the mod out of what runs at once
+(`forbid_mod_scripts_now` moves the stamp: the rest are loaded again).
+Known limits: allowing is by folder and id, not by the assembly's bytes
+(a mod once allowed stays allowed when its files change, or when another
+world with a mod of that id is put in the same folder); one assembly per
+mod; the scripts are loaded on the frame after the world is opened, on
+the main thread; mods' scripts added beside the world's own hear the
+people's events those have yet to be told, a little from before they
+started; `load_scripts`, as before, loads any assembly a command names
+outside the mods folder without asking the person (to come under ask-before-change, LW6b).
 
 Whole text files are read and written by `giant/core/text_files.h`
 (written beside and renamed over); game saves keep their own writer, which

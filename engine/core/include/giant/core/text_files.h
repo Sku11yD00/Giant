@@ -19,4 +19,8 @@ std::optional<std::string> read_text_file(const std::filesystem::path& path, usi
 // never leaves half a file under its name. False when it could not be.
 bool write_text_file(const std::filesystem::path& path, const std::string& text);
 
+// An environment variable as a path; empty when unset. (Windows reads the
+// wide value, so folders with letters outside the code page come whole.)
+std::filesystem::path environment_path(const char* name);
+
 } // namespace giant

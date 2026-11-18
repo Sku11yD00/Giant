@@ -345,3 +345,65 @@ GIANT_TEST("mods: a mod that cannot load is left out with the reason, and so are
     const ModOrder chain = all_on(many);
     GIANT_CHECK(chain.order.size() == k_max_mods && chain.problems.empty() && chain.order.front() == k_max_mods - 1 && chain.order.back() == 0);
 }
+
+GIANT_TEST("mods: a mod's scripts are a .dll in its own folder, by a path that cannot leave it") {
+    Mod m = mod("winter", {1, 0, 0}, {}, {});
+    GIANT_CHECK(m.scripts.empty() && save_mod(m).find("scripts") == std::string::npos);
+    m.scripts = "scripts/Winter.dll";
+    Mod back;
+    GIANT_CHECK(!check_mod(m) && !load_mod(save_mod(m), back) && back == m);
+    m.scripts = "Winter.dll";
+    GIANT_CHECK(!check_mod(m));
+    for (const char* wrong : {"../Winter.dll", "/abs/Winter.dll", "c:/Winter.dll", "scripts\\Winter.dll", "mod:scripts/Winter.dll", "scripts/Winter.exe",
+                              "scripts/Winter", ".dll", "scripts/.dll", "scripts//Winter.dll", "./Winter.dll", "//server/share/Winter.dll",
+                              "scripts/nul.dll", "scripts/Winter.DLL", "scripts/ Winter.dll"}) {
+        m.scripts = wrong;
+        GIANT_CHECK(check_mod(m).value_or("").starts_with("scripts:"));
+        GIANT_CHECK(load_mod(save_mod(m), back).has_value());
+    }
+    m.scripts = std::string(k_max_mod_scripts_bytes - 3, 'a') + ".dll";
+    GIANT_CHECK(check_mod(m).value_or("").starts_with("scripts: must be at most"));
+    m.scripts = std::string(k_max_mod_scripts_bytes - 4, 'a') + ".dll";
+    GIANT_CHECK(!check_mod(m));
+    // Written and empty, or not text: refused (none is said by leaving it out).
+    const std::string head = R"({"format":"giant-mod","format_version":1,"id":"a","name":"A","version":"0.1.0",)";
+    GIANT_CHECK(load_mod(head + R"("scripts":""})", back).has_value() && load_mod(head + R"("scripts":["a.dll"]})", back).has_value() &&
+                !load_mod(head + R"("scripts":"a.dll"})", back) && back.scripts == "a.dll");
+}
+
+GIANT_TEST("mods: the list of mods whose scripts are allowed is saved sorted and loaded strictly") {
+    const std::vector<ModScriptsAllowed> allowed = {{"/worlds/b", "winter"}, {"/worlds/a", "winter"}, {"/worlds/b", "base"}, {"/worlds/a", "winter"}};
+    const std::string text = save_mods_scripts_allowed(allowed);
+    std::vector<ModScriptsAllowed> back;
+    GIANT_CHECK(text.back() == '\n' && text.find("\"format\": \"giant-mods-scripts\"") != std::string::npos && !load_mods_scripts_allowed(text, back));
+    GIANT_CHECK(back == std::vector<ModScriptsAllowed>({{"/worlds/a", "winter"}, {"/worlds/b", "base"}, {"/worlds/b", "winter"}}) &&
+                save_mods_scripts_allowed(back) == text);
+    // What would not load is not written.
+    const std::vector<ModScriptsAllowed> some = {{"", "winter"}, {"/w", "Winter"}, {std::string(k_max_allowed_world_bytes + 1, 'w'), "a"}, {"two\nlines", "a"}, {"/w", "a"}};
+    GIANT_CHECK(!load_mods_scripts_allowed(save_mods_scripts_allowed(some), back) && back == std::vector<ModScriptsAllowed>({{"/w", "a"}}));
+    GIANT_CHECK(!load_mods_scripts_allowed(save_mods_scripts_allowed({}), back) && back.empty());
+    // A folder's name that is not UTF-8 would not be read back as it was written: not kept.
+    GIANT_CHECK(mod_scripts_world_ok("/w/caf\xc3\xa9/\xe2\x82\xac/\xf0\x9f\x98\x80") && mod_scripts_world_ok(std::string(k_max_allowed_world_bytes, 'w')));
+    // (The ends of each range.)
+    for (const char* right : {"\xf4\x8f\xbf\xbf", "\xed\x9f\xbf", "\xe0\xa0\x80", "\xf0\x90\x80\x80", "\xc2\x80", "\xdf\xbf", "\xee\x80\x80"}) {
+        GIANT_CHECK(mod_scripts_world_ok(right));
+    }
+    for (const char* wrong : {"\xf5\x80\x80\x80", "\xf0\x9f\x98", "\xf0\x8f\xbf\xbf", "\xc1\xbf", "\xe0\x9f\xbf", "\xf0\x9f\x98\x41"}) {
+        GIANT_CHECK(!mod_scripts_world_ok(wrong));
+    }
+    for (const char* wrong : {"", "/w\xff", "/w\xfe", "/w\xc3", "/w\xc0\xaf", "/w\xe0\x80\xaf", "/w\xed\xa0\x80", "/w\xf4\x90\x80\x80", "/w\x80", "/w\xe2\x82",
+                              "/w\ty", "/w\x7f"}) {
+        GIANT_CHECK(!mod_scripts_world_ok(wrong));
+    }
+    const std::vector<ModScriptsAllowed> bytes = {{"/w\xff", "a"}, {"/w\xfe", "a"}, {"/w/caf\xc3\xa9", "a"}};
+    GIANT_CHECK(!load_mods_scripts_allowed(save_mods_scripts_allowed(bytes), back) && back == std::vector<ModScriptsAllowed>({{"/w/caf\xc3\xa9", "a"}}));
+    // Strict: nothing of a list that is wrong is kept.
+    back = {{"/kept", "kept"}};
+    const std::string head = R"({"format":"giant-mods-scripts","format_version":1,)";
+    for (const char* wrong : {R"("allowed":{}})", R"("allowed":[1]})", R"("allowed":[{"world":"/w"}]})", R"("allowed":[{"world":"/w","mod":"A"}]})",
+                              R"("allowed":[{"world":"","mod":"a"}]})", R"("allowed":[{"world":"/w","mod":"a","more":1}]})",
+                              R"("allowed":[{"world":"/w","mod":"a"},{"world":"/w","mod":"a"}]})", R"("allowed":[],"other":1})", R"("other":1})"}) {
+        GIANT_CHECK(load_mods_scripts_allowed(head + wrong, back).has_value() && back.size() == 1 && back[0].mod == "kept");
+    }
+    GIANT_CHECK(load_mods_scripts_allowed("", back).has_value() && load_mods_scripts_allowed(R"({"format":"giant-mods","format_version":1,"allowed":[]})", back).has_value());
+}

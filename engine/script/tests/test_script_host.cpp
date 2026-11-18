@@ -26,8 +26,9 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
         calls.push_back(std::string(name) + " " + std::string(args));
         if (name == "reenter") {
             // A script asking to reload or unload scripts mid-update.
-            reentry_refused = !live_host->load_scripts(scripts);
+            reentry_refused = !live_host->load_scripts(scripts) && !live_host->add_scripts(scripts);
             live_host->unload_scripts();
+            live_host->unload_added_scripts();
             return {true, "{}"};
         }
         if (name == "echo") {
@@ -162,6 +163,64 @@ GIANT_TEST("script host: C# scripts run commands, survive a crash and unload") {
     }
     GIANT_CHECK(logged_fragile);
     GIANT_CHECK(host->load_scripts(scripts)); // (all running again for what follows)
+    calls.clear();
+
+    // Assemblies added beside it (mods' scripts): each started, told and unloaded on its own.
+    const auto count = [&calls](const std::string& needle) {
+        usize found = 0;
+        for (const auto& call : calls) {
+            found += call.find(needle) != std::string::npos ? usize{1} : usize{0};
+        }
+        return found;
+    };
+    GIANT_CHECK(host->add_scripts(scripts) && host->running_scripts() == 16 && count("\"what\":\"start\"") == 1);
+    GIANT_CHECK(host->add_scripts(scripts) && host->running_scripts() == 24 && count("\"what\":\"start\"") == 2);
+    calls.clear();
+    {
+        const PersonEvent events[] = {{11, "b", "x", "y", 0.0}};
+        host->person_events(events);
+    }
+    GIANT_CHECK(count("\"what\":\"person\",\"person\":11") == 3); // (the Listener of each)
+    // One that cannot be loaded leaves the rest running.
+    set_console_logging(false);
+    GIANT_CHECK(!host->add_scripts("does/not/exist.dll") && host->running_scripts() == 24);
+    set_console_logging(true);
+    // The one loaded is replaced without those added, and those added go without it.
+    calls.clear();
+    GIANT_CHECK(host->load_scripts(scripts) && host->running_scripts() == 24 && count("\"what\":\"stop\"") == 1 &&
+                count("\"what\":\"start\"") == 1);
+    calls.clear();
+    host->unload_added_scripts();
+    GIANT_CHECK(host->running_scripts() == 8 && count("\"what\":\"stop\"") == 2);
+    host->unload_added_scripts(); // (none: nothing to do)
+    // Added with none loaded, they run all the same.
+    host->unload_scripts();
+    calls.clear();
+    GIANT_CHECK(host->add_scripts(scripts) && host->running_scripts() == 8);
+    set_console_logging(false);
+    reentry_refused = false;
+    host->update(0.016f);
+    GIANT_CHECK(has("\"frame\":1"));
+    // Its awaits are its own: what waits on a task comes back in a later update of this assembly,
+    // and a script of it asking for scripts to be added or unloaded while it runs is refused.
+    for (int i = 0; i < 200 && !has("after task"); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        host->update(0.016f);
+    }
+    host->update(0.016f);
+    set_console_logging(true);
+    GIANT_CHECK(has("\"what\":\"after task\",\"answer\":42") && has("after yield") && reentry_refused && host->running_scripts() == 7);
+    host->unload_added_scripts();
+    // Unloaded, nothing of it runs again: no update, no event, no await left over.
+    calls.clear();
+    {
+        const PersonEvent events[] = {{12, "b", "x", "y", 0.0}};
+        host->person_events(events);
+    }
+    for (int i = 0; i < 3; ++i) {
+        host->update(0.016f);
+    }
+    GIANT_CHECK(calls.empty() && host->running_scripts() == 0 && host->load_scripts(scripts));
     calls.clear();
 
     host->unload_scripts();

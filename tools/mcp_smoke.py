@@ -12,6 +12,7 @@ wrong answer, or if the editor does not exit cleanly.
 import base64
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -1036,13 +1037,114 @@ def n1_gate(tool, call, check):
     tool("new_scene")
 
 
+def mod_scripts_gate(tool, call, check, sample, settings):
+    """A mod's scripts (LW7 part 3d): run beside the world while it is open, and only once allowed
+    on this machine (the list is in the editor's settings folder, not the world's)."""
+    def log_mark():
+        lines = tool("get_log", {"count": 1})["lines"]
+        return lines[-1]["sequence"] if lines else 0
+
+    def logged_since(mark, text):
+        return sum(1 for line in tool("get_log", {"count": 500})["lines"] if line["sequence"] > mark and text in line["text"])
+
+    def listing():
+        return sorted(os.path.relpath(os.path.join(at, name), world) for at, _, names in os.walk(world) for name in names)
+
+    def frames(until):
+        for _ in range(300):
+            if until():
+                return True
+            call("ping")
+        return until()
+
+    with tempfile.TemporaryDirectory() as folder:
+        world = os.path.join(folder, "modded")
+        if tool("get_world").get("open"):
+            tool("close_world")  # (a gate before left its world open)
+        tool("new_scene")
+        tool("save_world", {"folder": world})
+        mod = os.path.join(world, "mods", "hello")
+        os.makedirs(os.path.join(mod, "scripts"))
+        for name in os.listdir(os.path.dirname(sample)):
+            if name.startswith("HelloGiant."):
+                shutil.copy(os.path.join(os.path.dirname(sample), name), os.path.join(mod, "scripts", name))
+        with open(os.path.join(mod, "mod.json"), "w", encoding="utf-8") as out:
+            json.dump({"format": "giant-mod", "format_version": 1, "id": "hello", "name": "Hello",
+                       "version": "1.0.0", "scripts": "scripts/HelloGiant.dll"}, out)
+        # On, and not allowed: nothing of it runs, and list_mods says why.
+        on = tool("enable_mod", {"id": "hello"})
+        check(on["loaded"] and on["scripts_allowed"] is False, f"the mod is on, its scripts not allowed, got {on}")
+        tool("open_world", {"folder": world})
+        for _ in range(30):
+            call("ping")
+        told = tool("list_mods")["world"]["scripts"]
+        check(told["run"] == [] and len(told["not_run"]) == 1 and "not allowed" in told["not_run"][0]["why"],
+              f"scripts not allowed are not run, got {told}")
+        state = tool("get_scripts")
+        check(state["mods"] == [] and state["running"] == 0, f"nothing of the mod ran, got {state}")
+        # Not by loading the file either: a mod's scripts start only once allowed.
+        around = call("tools/call", {"name": "load_scripts", "arguments": {"path": os.path.join(mod, "scripts", "HelloGiant.dll")}})
+        check(around.get("isError") is True and "mods folder" in around["content"][0]["text"],
+              f"load_scripts refuses a file in the world's mods folder, got {around}")
+        files = listing()
+        # Allowed here: said to need the world opened again, then loaded with it.
+        on = tool("enable_mod", {"id": "hello", "scripts": True})
+        check(on["scripts_allowed"] is True and tool("list_mods")["world"]["reopen"] is True, f"allowed, got {on}")
+        check(os.path.isfile(os.path.join(settings, "Giant", "mods_scripts_allowed.json")), "kept in the settings folder")
+        check(listing() == files, "and nothing of it in the world's folder")
+        mark = log_mark()
+        tool("open_world", {"folder": world, "discard_unsaved": True})  # (the script changed the sky)
+        check(frames(lambda: tool("get_scripts")["mods"] == ["hello"]), f"the mod's scripts load, got {tool('get_scripts')}")
+        state = tool("get_scripts")
+        check(state["running"] == 1 and state["loaded"] == "", f"the mod's script runs, got {state}")
+        check(logged_since(mark, "Hello from C#") == 1, "it was started once")
+        before = tool("get_clear_color")
+        for _ in range(30):
+            call("ping")
+        check(tool("get_clear_color") != before, "the mod's script changes the background through commands")
+        # The world's own scripts beside it, loaded and unloaded without touching the mod's.
+        tool("load_scripts", {"path": sample})
+        check(frames(lambda: tool("get_scripts")["running"] == 2), "both run")
+        tool("unload_scripts")
+        check(frames(lambda: tool("get_scripts")["running"] == 1) and tool("get_scripts")["mods"] == ["hello"],
+              "the mod's runs on")
+        # Opened again: stopped, and started anew with it.
+        mark = log_mark()
+        tool("open_world", {"folder": world, "discard_unsaved": True})  # (the script changed the sky)
+        check(frames(lambda: logged_since(mark, "Hello from C#") == 1), "started anew with the world")
+        state = tool("get_scripts")
+        check(state["mods"] == ["hello"] and state["running"] == 1 and logged_since(mark, "SunsetFade stopped.") == 1,
+              f"the one before was stopped, got {state}")
+        # Forbidden: stopped at once, the world still open.
+        mark = log_mark()
+        off = tool("enable_mod", {"id": "hello", "scripts": False})
+        check(off["enabled"] is True and off["scripts_allowed"] is False, f"forbidden, the mod still on, got {off}")
+        check(frames(lambda: tool("get_scripts")["mods"] == []) and logged_since(mark, "SunsetFade stopped.") == 1,
+              "its script was stopped at once")
+        check(tool("get_scripts")["running"] == 0 and tool("get_world")["open"], "nothing of it runs, the world still open")
+        # Allowed and opened again, then the world closed: stopped with it.
+        tool("enable_mod", {"id": "hello", "scripts": True})
+        tool("open_world", {"folder": world, "discard_unsaved": True})
+        check(frames(lambda: tool("get_scripts")["mods"] == ["hello"]), "loaded again once allowed again")
+        mark = log_mark()
+        tool("close_world")
+        check(frames(lambda: tool("get_scripts")["mods"] == []), "unloaded with the world")
+        state = tool("get_scripts")
+        check(state["running"] == 0 and logged_since(mark, "SunsetFade stopped.") == 1, f"stopped with the world, got {state}")
+        tool("new_scene")
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    command = [sys.argv[1], "--mcp", *sys.argv[2:]]
+    # (A run with no person at the window: enable_mod may allow a mod's scripts itself.)
+    command = [sys.argv[1], "--mcp", "--allow-mods-scripts-by-command", *sys.argv[2:]]
+    # The editor's settings folder for this run (which mods' scripts are allowed is kept there).
+    settings_folder = tempfile.mkdtemp(prefix="giant_smoke_settings_")
     editor = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                              stderr=None, text=True, encoding="utf-8", bufsize=1)
+                              stderr=None, text=True, encoding="utf-8", bufsize=1,
+                              env=dict(os.environ, APPDATA=settings_folder, XDG_CONFIG_HOME=settings_folder))
     timer = threading.Timer(TIMEOUT, editor.kill)
     timer.start()
     next_id = 0
@@ -1197,6 +1299,7 @@ def main() -> int:
             state = tool("get_scripts")
             check(state["loaded"] == "" and state["running"] == 0,
                   f"load then unload leaves nothing loaded, got {state}")
+            mod_scripts_gate(tool, call, check, sample, settings_folder)
         else:
             print("mcp_smoke: C# scripts skipped (GIANT_SAMPLE_SCRIPTS not set)")
 
@@ -1210,6 +1313,7 @@ def main() -> int:
         return 1
     finally:
         timer.cancel()
+        shutil.rmtree(settings_folder, ignore_errors=True)
 
     # A client that just goes away must not leave the editor running.
     editor = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
