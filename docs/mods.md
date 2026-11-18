@@ -5,9 +5,9 @@ you can turn it off and the world is as it was. This page is for people
 who make mods and people who install them.
 
 So far a mod can change a world's places, the looks of its people, their
-routines and their behaviours, and bring people of its own, with its own
-art files. Kits and scripts are parts still being built; this page will
-grow with them.
+routines and their behaviours, its kits, and bring people of its own,
+with its own art files. Scripts are the part still being built; this
+page will grow with them.
 
 ## Where mods go
 
@@ -62,8 +62,8 @@ to you instead of being ignored.
 
 ## What a mod changes: world.json
 
-A mod's `world.json` holds places, person looks, routines, behaviours and
-people. All but the people (see below) are written exactly as a world's own `world.json` writes them (the easiest way
+A mod's `world.json` holds places, person looks, routines, behaviours,
+kits and people. All but the people (see below) are written exactly as a world's own `world.json` writes them (the easiest way
 to make one is to build the things in the editor, save the world, and copy
 them out of its `world.json`):
 
@@ -115,7 +115,8 @@ With the mod in `<world>/mods/guards/`, that is the file
 another world's `mods` folder and its art comes with it.
 
 - This works for a look's `mesh`, its `hair.file`, the maps of its
-  `material` and of each of its `parts`, and a skin's `detail_normal`.
+  `material` and of each of its `parts`, a skin's `detail_normal`, and a
+  kit piece's `mesh` and material maps.
 - Use forward slashes. The path may not leave the mod's folder: no `..`,
   no `.`, no empty part, no backslash, no colon. Nor may it hold what
   Windows reads as something else: a part that ends in a dot or a space
@@ -137,6 +138,40 @@ another world's `mods` folder and its art comes with it.
   file's name, and no such file will be found.
 - The whole path (the world's folder, `mods/<id>/`, and the path in the
   mod) can be at most 1024 bytes.
+
+### Kits
+
+A mod can bring kits (a house, a wall, a tower: pieces placed together),
+under `kits`, written as a world's own are:
+
+```json
+"kits": [
+  {"name": "watchtower", "breakable": true, "pieces": [
+    {"name": "base", "shape": "mesh", "mesh": "mod:art/tower_base.glb"},
+    {"name": "top", "shape": "mesh", "mesh": "mod:art/tower_top.glb",
+     "position": [0, 6, 0]}
+  ]}
+]
+```
+
+Kits go by name like the rest:
+
+- A kit whose name the world already has **takes its place**: every
+  placement of that kit in the world is built from the mod's pieces
+  while the mod is on. That is how a mod gives the world's houses a new
+  look.
+- A kit with a new name is **added**. Nothing in the world places it;
+  it is there for the mod's scripts to place, and for you to try out in
+  the editor.
+
+A piece's `mesh` and its material's maps may be the mod's own files
+(`mod:...`).
+
+Saving the world with the mod on keeps the world's own kits as its file
+had them, and never writes the mod's. Because the world must still open
+without the mod, the save is refused while one of the world's own
+entities or scatter layers places a kit that only a mod brings; the
+error names the first one.
 
 ### People
 

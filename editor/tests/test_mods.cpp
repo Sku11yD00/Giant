@@ -12,6 +12,7 @@
 
 #include "giant_test.h"
 
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <system_error>
@@ -663,4 +664,78 @@ GIANT_TEST("mods: a mod's own files are found in its folder, and stay out of the
         std::filesystem::remove(art / "deep" / "skin.png", error);
         GIANT_CHECK(w.open() && w.scene.person_looks.size() == 2 && w.streaming.mods_laid().applied.problems.empty());
     }
+}
+
+GIANT_TEST("mods: a mod's kits are laid over the world's, and the world is never saved needing them") {
+    SavedWorld w("giant_mods_test_kits");
+    const auto kit = [](const char* name, usize pieces, const char* mesh = "") {
+        world::Kit k;
+        k.name = name;
+        k.pieces.resize(pieces);
+        if (*mesh != 0) {
+            k.pieces[0].shape = world::Shape::mesh;
+            k.pieces[0].mesh = mesh;
+        }
+        return k;
+    };
+    // The world has a house (placed once) and a shed of its own.
+    GIANT_CHECK(w.open());
+    w.scene.kits = {kit("house", 2, "kits/house.glb"), kit("shed", 1)};
+    world::Entity placed;
+    placed.shape = world::Shape::kit;
+    placed.kit = "house";
+    w.scene.add(placed);
+    GIANT_CHECK(w.streaming.save(w.scene, {}).error.empty() && w.file().kits.size() == 2 &&
+                w.file().meshes == std::vector<std::string>({"kits/house.glb", "people/villager.glb"}));
+    const world::WorldIndex authored = w.file();
+    w.streaming.close();
+    // The mod: another house (its own art), and a watchtower.
+    world::ModWorld forts;
+    forts.kits = {kit("house", 4, "mod:art/stone_house.glb"), kit("watchtower", 3, "mod:art/tower.glb")};
+    w.put_world("forts", forts);
+    const std::string in_mod = MeshLibrary::normalize(path_to_utf8(w.folder / "mods" / "forts")) + "/";
+    GIANT_CHECK(w.open() && w.streaming.mods_laid().applied.problems.empty() && w.scene.kits.size() == 3);
+    GIANT_CHECK(w.scene.find_kit("house")->pieces.size() == 4 && w.scene.find_kit("house")->pieces[0].mesh == in_mod + "art/stone_house.glb" &&
+                w.scene.find_kit("watchtower")->pieces[0].mesh == in_mod + "art/tower.glb" && w.scene.find_kit("shed") != nullptr);
+    GIANT_CHECK(w.streaming.mods_laid().kits.size() == 2 && w.streaming.mods_laid().applied.changes.size() == 2 && !w.streaming.unsaved_settings(w.scene));
+    // Saved: the world's own house as its file had it, no kit and no mesh of the mod's.
+    WorldStreaming::Saved saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.mods_not_kept.empty() && w.file().kits == authored.kits && w.file().meshes == authored.meshes);
+    // The world's own shed changed and a barn made: saved. The mod's watchtower changed: not saved, and named.
+    w.scene.find_kit("shed")->breakable = true;
+    w.scene.kits.push_back(kit("barn", 2, "kits/barn.glb"));
+    w.scene.find_kit("watchtower")->pieces.pop_back();
+    GIANT_CHECK(w.streaming.unsaved_settings(w.scene));
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && saved.mods_not_kept == std::vector<std::string>{"watchtower"} && !w.streaming.unsaved_settings(w.scene));
+    world::WorldIndex file = w.file();
+    GIANT_CHECK(file.kits.size() == 3 && file.kits[0] == authored.kits[0] && file.kits[1].breakable && file.kits[2].name == "barn" &&
+                file.meshes == std::vector<std::string>({"kits/barn.glb", "kits/house.glb", "people/villager.glb"}));
+    // One of the world's own entities placing a kit only the mod brings: the world would not load without the mod, so it is not saved.
+    const std::string before = read_text_file(w.folder / "world.json").value_or("");
+    placed.kit = "watchtower";
+    const world::EntityId tower_id = w.scene.add(placed);
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.find("places the kit \"watchtower\"") != std::string::npos && saved.error.find("only a mod brings") != std::string::npos &&
+                read_text_file(w.folder / "world.json") == before);
+    GIANT_CHECK(w.scene.remove(tower_id).has_value());
+    // So too a scatter layer of the world's.
+    world::ScatterLayer layer;
+    layer.name = "towers";
+    world::ScatterItem item;
+    item.shape = world::Shape::kit;
+    item.kit = "watchtower";
+    layer.items = {item};
+    w.scene.scatter.push_back(layer);
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.find("scatter layer \"towers\"") != std::string::npos && read_text_file(w.folder / "world.json") == before);
+    // The house the mod replaced is the world's too: placing it is fine.
+    w.scene.scatter.back().items[0].kit = "house";
+    saved = w.streaming.save(w.scene, {});
+    GIANT_CHECK(saved.error.empty() && w.file().scatter.size() == 1);
+    if (!saved.error.empty()) std::fprintf(stderr, "    %s\n", saved.error.c_str());
+    // With the mod off, the world is its own.
+    w.streaming.close();
+    GIANT_CHECK(!set_mod_on(w.folder, "forts", false) && w.open() && w.scene.kits.size() == 3 && w.scene.find_kit("house")->pieces.size() == 2 &&
+                w.scene.find_kit("watchtower") == nullptr && w.scene.find_kit("barn") != nullptr);
 }

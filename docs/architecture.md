@@ -4178,6 +4178,15 @@ leaves out the people mods brought (by id) and names those changed;
 `world_own_people_are` answers "anything unsaved?" without copying
 65,536 people.
 
+A mod's kits (part 3c) are laid by name like the other things
+(`ModThing::kit`): one the world has is replaced whole, so its
+placements build the mod's pieces; any other is added. `world_own` tells
+the world's own kits at save, the save lists only their meshes
+(`open_world` imports the mods' kits' meshes itself), and it is refused
+while a world's own entity (of a loaded cell; the others are as their
+files have them, saved when this held) or scatter layer places a kit
+only a mod brings.
+
 A mod's own files (part 3b) are named `mod:<path in its folder>` in its
 `world.json` (a look's mesh, its hair's file, its materials' maps and
 skin detail). A mod may be anyone's, so it is not trusted with the rest
@@ -4224,8 +4233,7 @@ written since), which keeps the undo history honest. Known limits: game
 saves do not record which mods were on; a world closed with `close_world`
 keeps the mods' things as plain ones (people among them, under their
 mod ids: saved as a new world's own, the same mod then finds its ids
-taken and is left out with that reason). Kits and scripts are the
-parts to come.
+taken and is left out with that reason). Scripts are the part to come.
 
 Whole text files are read and written by `giant/core/text_files.h`
 (written beside and renamed over); game saves keep their own writer, which

@@ -3100,6 +3100,9 @@ std::string save_mod_world(const ModWorld& world) {
     if (!world.behaviours.empty()) {
         out["behaviours"] = behaviours_json(world.behaviours);
     }
+    if (!world.kits.empty()) {
+        out["kits"] = kits_json(world.kits);
+    }
     return out.dump(2) + "\n";
 }
 
@@ -3116,6 +3119,7 @@ std::optional<LoadError> load_mod_world(std::string_view text, ModWorld& out) {
     PersonId next_person_id = 1;
     read_people(root, world.places, world.person_looks, world.routines, world.people, next_person_id, error, PeopleRead::mod);
     read_behaviours(root, world.behaviours, nobody, error);
+    read_kits(root, world.kits, error);
     root.finish();
     if (error.empty()) {
         if (const auto wrong = check_mod_files(world)) {

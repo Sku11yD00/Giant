@@ -225,9 +225,14 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
         for (world::PersonLook& look : worlds[i].person_looks) {
             look.mesh = MeshLibrary::normalize(look.mesh); // (one spelling per file, as the world's own)
         }
+        for (world::Kit& kit : worlds[i].kits) {
+            for (world::KitPiece& piece : kit.pieces) {
+                if (!piece.mesh.empty()) piece.mesh = MeshLibrary::normalize(piece.mesh);
+            }
+        }
         given[i] = &worlds[i];
     }
-    laid.applied = world::apply_mod_worlds(given, slots, scene.places, scene.person_looks, scene.routines, scene.behaviours, scene.people,
+    laid.applied = world::apply_mod_worlds(given, slots, scene.places, scene.person_looks, scene.routines, scene.behaviours, scene.kits, scene.people,
                                            scene.next_person_id);
     laid.applied.problems.insert(laid.applied.problems.end(), std::make_move_iterator(unread.begin()), std::make_move_iterator(unread.end()));
     std::sort(laid.applied.problems.begin(), laid.applied.problems.end(),
@@ -258,6 +263,7 @@ ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene
     brought(world::ModThing::person_look, scene.person_looks, laid.person_looks);
     brought(world::ModThing::routine, scene.routines, laid.routines);
     brought(world::ModThing::behaviour, scene.behaviours, laid.behaviours);
+    brought(world::ModThing::kit, scene.kits, laid.kits);
     return laid;
 }
 

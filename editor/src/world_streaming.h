@@ -238,8 +238,8 @@ private:
     u64 m_writes = 0; // cell files written since open (Cell::written)
     u64 m_epoch = 0; // reads from an older epoch (a closed world) are dropped
     world::WorldIndex m_index;
-    ModsLaid m_mods; // what mods laid over the index's places, looks, routines, behaviours and people at open (kept until close)
-    // The world's own places, looks, routines, behaviours and people as the scene has
+    ModsLaid m_mods; // what mods laid over the index's places, looks, routines, behaviours, people and kits at open (kept until close)
+    // The world's own places, looks, routines, behaviours, people and kits as the scene has
     // them now: the scene's, less what mods laid over them (world::world_own, world_own_people).
     struct Own {
         std::vector<world::Place> places;
@@ -247,6 +247,7 @@ private:
         std::vector<world::Routine> routines;
         std::vector<world::Behaviour> behaviours;
         std::vector<world::Person> people;
+        std::vector<world::Kit> kits;
     };
     // `not_kept`, when given, takes the names of the mods' things changed or
     // removed in the scene (they are not the world's to save).

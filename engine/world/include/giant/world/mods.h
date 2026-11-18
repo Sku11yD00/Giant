@@ -125,8 +125,11 @@ struct ModWorld {
     std::vector<Routine> routines;
     std::vector<Behaviour> behaviours;
     std::vector<Person> people;
+    // Kits (part 3c), by name as the rest: one the world has is replaced, whole (its placements then build
+    // the mod's); any other is added, for the mod's scripts to place.
+    std::vector<Kit> kits;
     bool empty() const {
-        return places.empty() && person_looks.empty() && routines.empty() && behaviours.empty() && people.empty();
+        return places.empty() && person_looks.empty() && routines.empty() && behaviours.empty() && people.empty() && kits.empty();
     }
     bool operator==(const ModWorld&) const = default;
 };
@@ -141,8 +144,8 @@ std::optional<LoadError> load_mod_world(std::string_view text, ModWorld& out);
 
 // --- The files a mod names (part 3b) ------------------------------------------
 //
-// A file a mod's world.json names (a look's mesh, its hair's file, its
-// materials' image maps and skin detail) is the mod's own when it is
+// A file a mod's world.json names (a look's mesh, its hair's file, a kit
+// piece's mesh, their materials' image maps and skin detail) is the mod's own when it is
 // written "mod:<path>": a path in the mod's folder. So a mod is one folder
 // that can be copied whole. Any other is a path from the folder the game
 // runs in, as a world's own are. Either way a mod is not trusted with the
@@ -165,7 +168,7 @@ bool has_mod_own_files(const ModWorld& world);
 std::optional<std::string> resolve_mod_files(ModWorld& world, std::string_view mod_folder);
 
 // The kinds of thing a mod changes, as changes name them.
-enum class ModThing : u8 { place, person_look, routine, behaviour };
+enum class ModThing : u8 { place, person_look, routine, behaviour, kit };
 std::string_view mod_thing_name(ModThing thing);
 
 // One thing a mod did to the world.
@@ -205,7 +208,7 @@ struct ModsApplied {
 // are never changed: a mod's are put among them, in the order of their ids.
 ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::span<const u32> slots, std::vector<Place>& places,
                              std::vector<PersonLook>& person_looks, std::vector<Routine>& routines, std::vector<Behaviour>& behaviours,
-                             std::vector<Person>& people, PersonId next_person_id);
+                             std::vector<Kit>& kits, std::vector<Person>& people, PersonId next_person_id);
 
 // The world's own people, told from the mods' for saving the world while
 // mods are on: those there `now` but the ones mods brought (`brought`, as

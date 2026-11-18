@@ -1,9 +1,9 @@
 // The mods beside the open world (world/mods.h; living-world plan LW7):
 // <world>/mods/<id>/mod.json for each, and <world>/mods/enabled.json for
 // which are on. Read when asked (list_mods, enable_mod), never by a frame.
-// A mod's world.json (places, person looks, routines, behaviours, people)
+// A mod's world.json (places, person looks, routines, behaviours, kits, people)
 // is laid over the world when it is opened (lay_mods), its own files
-// ("mod:...") found in its folder; kits and scripts are parts to come.
+// ("mod:...") found in its folder; scripts are the part to come.
 #pragma once
 
 #include "giant/core/types.h"
@@ -49,6 +49,7 @@ struct ModsLaid {
     std::vector<world::PersonLook> person_looks;
     std::vector<world::Routine> routines;
     std::vector<world::Behaviour> behaviours;
+    std::vector<world::Kit> kits;
     std::vector<world::Person> people; // those mods added, as they left them (in the order of their ids)
     std::vector<std::string> mods; // the ids of the mods loaded then, in order
     std::vector<u32> slots;        // each one's slot then (as long as `mods`; world::k_no_mod_slot: it had none)
@@ -65,7 +66,7 @@ struct ModsLaid {
 // A mod's world.json as it is now (ModsLaid::files).
 ModsLaid::File mod_world_file(const std::filesystem::path& world_folder, const std::string& id);
 // Lays the world's loaded mods over the scene's places, person looks,
-// routines, behaviours and people (the world's own, just read). A mod with no
+// routines, behaviours, kits and people (the world's own, just read). A mod with no
 // world.json changes nothing; one whose world.json cannot be used is left
 // out with why (in `applied.problems`). The mod's own files' paths
 // (world::resolve_mod_files) become paths in <world>/mods/<id>/. Reads the disk.
