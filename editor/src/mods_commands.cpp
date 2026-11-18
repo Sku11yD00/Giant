@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <utility>
@@ -65,6 +66,52 @@ Json mod_json(const ModList::Found& found) {
     return out;
 }
 
+// What the mods did to the world as it was opened; `order` is the load order now.
+Json laid_json(const ModsLaid& laid, const std::vector<std::string>& order, const std::filesystem::path& world_folder) {
+    // Other mods load now, or one's world.json is not the file it was.
+    bool reopen = laid.mods != order;
+    for (usize i = 0; !reopen && i < laid.mods.size() && i < laid.files.size(); ++i) {
+        reopen = !(mod_world_file(world_folder, laid.mods[i]) == laid.files[i]);
+    }
+    constexpr usize k_most_listed = 256; // (a mod may change as many things as a world keeps)
+    Json changes = Json::array();
+    usize added = 0, replaced = 0, clashes = 0;
+    for (const world::ModChange& change : laid.applied.changes) {
+        added += change.did == world::ModChange::Did::added ? 1 : 0;
+        replaced += change.did == world::ModChange::Did::replaced_world ? 1 : 0;
+        clashes += change.did == world::ModChange::Did::replaced_mod ? 1 : 0;
+    }
+    // The clashes first (they are what to look at), then the rest, in the order done.
+    for (const bool clash : {true, false}) {
+        for (const world::ModChange& change : laid.applied.changes) {
+            if ((change.did == world::ModChange::Did::replaced_mod) != clash || changes.size() >= k_most_listed) {
+                continue;
+            }
+            Json one = {{"mod", laid.mods[change.mod]}, {"thing", world::mod_thing_name(change.thing)}, {"name", change.name}};
+            switch (change.did) {
+            case world::ModChange::Did::added: one["did"] = "added"; break;
+            case world::ModChange::Did::replaced_world: one["did"] = "replaced_world"; break;
+            case world::ModChange::Did::replaced_mod:
+                one["did"] = "replaced_mod";
+                one["over"] = laid.mods[change.over];
+                break;
+            }
+            changes.push_back(std::move(one));
+        }
+    }
+    Json problems = Json::array();
+    for (const world::ModProblem& problem : laid.applied.problems) {
+        problems.push_back({{"mod", laid.mods[problem.mod]}, {"problem", problem.message}});
+    }
+    return {{"mods", laid.mods},
+            {"added", added},
+            {"replaced_world", replaced},
+            {"clashes", clashes},
+            {"changes", std::move(changes)},
+            {"problems", std::move(problems)},
+            {"reopen", reopen}};
+}
+
 } // namespace
 
 void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
@@ -78,8 +125,15 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
          "circle). `broken` are folders that are no mod, with why (folders whose names begin with . or _ are passed over); `missing` are ids enabled with no mod there; "
          "`load_order` is the ids loaded, first to last; `error` is there when enabled.json cannot be used (then no mod "
          "is on), `folder_error` when the mods folder could not be read through, `too_many` when it has more than 256 "
-         "folders (the rest are not looked at). Reads the disk when called. So far a mod is its manifest and "
-         "its place in the order: what mods hold is not loaded into the world yet.",
+         "folders (the rest are not looked at). Reads the disk when called. A mod's world.json (format "
+         "\"giant-mod-world\": places, person_looks, routines, behaviours, written as a world's own) is laid over the "
+         "world when it is opened, in the load order: a thing whose name is there already is replaced, any other "
+         "added; the world's files are not changed. `world` tells what the mods did as this world was opened: `mods` "
+         "(those loaded then), counts `added`, `replaced_world` and `clashes` (a thing two mods set: the later one's "
+         "is used), `changes` [{mod, thing, name, did: added | replaced_world | replaced_mod, over}] (clashes first, "
+         "at most 256), `problems` [{mod, problem}] (mods whose world changes were left out, whole), and `reopen`: "
+         "true when the mods that load now are not those the world was opened with, or a mod's world.json was written "
+         "since (open_world again to load them).",
          Json::parse(R"({"type": "object", "additionalProperties": false})"),
          true,
          [&state](const Json&, CommandContext&) {
@@ -110,6 +164,9 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
              if (list.too_many) {
                  out["too_many"] = true;
              }
+             if (state.mods_world.empty()) { // (the open world's own mods: what they did as it was opened)
+                 out["world"] = laid_json(state.world->mods_laid(), list.order, *world);
+             }
              return CommandResult::success(std::move(out));
          }});
 
@@ -117,7 +174,8 @@ void register_mod_commands(ai::CommandRegistry& registry, EditorState& state) {
         {"enable_mod",
          "Turns a mod of the open world on (or off, with enabled: false). Which mods are on is kept with the world, in "
          "<world>/mods/enabled.json, written at once: this writes a file and is not on the undo history (run it "
-         "again to change back). A mod that is not there cannot be turned on (list_mods shows those there); one that "
+         "again to change back). What mods change of the world is laid over it when the world is opened: after turning "
+         "mods on or off, open_world again to see it (list_mods: `world.reopen`). A mod that is not there cannot be turned on (list_mods shows those there); one that "
          "is gone can be turned off. Answers with whether the mod is loaded now, its problem if it is on and cannot "
          "load (see list_mods), and the load order.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["id"],

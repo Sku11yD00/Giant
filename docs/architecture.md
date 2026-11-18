@@ -4149,9 +4149,41 @@ listed with why (links to folders among them; names beginning with `.` or
 said, not shown as empty. Names and descriptions hold no control
 characters: they are shown to people and to Claude. A list of enabled mods that cannot be read turns none on
 and is never overwritten. At most 256 mods, manifests of at most 64 KB.
-So far a mod is its manifest and its place in the order: world changes,
-data overrides, assets and scripts are the parts to come, applied in this
-order.
+
+A mod's `world.json` (format `giant-mod-world`, LW7 part 2:
+`world::ModWorld`, `load_mod_world`) holds places, person looks, routines
+and behaviours, read by the same readers as a world's own.
+`world::apply_mod_worlds` lays the mods over a world's lists in the load
+order: by name, a thing there already is replaced whole, any other added.
+Each change is recorded (`ModChange`: added, replaced the world's, or
+replaced an earlier mod's, which is a clash), and a mod goes in whole or
+not at all: after each mod the lists are checked as a world's are
+(`check_people`, `check_behaviours`), and a mod that fails is undone and
+given a problem.
+
+The editor lays the mods when a world is opened (`lay_mods`, from
+`WorldStreaming::open`), over the scene only: `WorldStreaming`'s index
+stays what `world.json` holds. So that saving with mods on keeps the
+world's files its own, the things mods set are kept as they left them for
+as long as the world is open (`ModsLaid`), and `world::world_own` tells
+the world's own from the mods' by name: a name a mod set is the mods',
+whatever was done to the thing since (the file's own of that name is kept
+as it was, and a change to the mods' thing is reported, not saved); every
+other name is the world's, as it is now. So what a save writes depends
+only on the scene, never on the saves and undos before it, and a mod's
+thing can never become the world's by accident. `save_world` writes
+those, lists the world's own looks' meshes and not the mods' (`open_world`
+imports the mods' looks' meshes itself), refuses when the world's people
+would need what only a mod brings (the world must load without its mods),
+and `unsaved_settings` compares the world's own so found with the file's.
+Laying keeps an undo list per mod instead of copies, and the mods are
+laid before the old world is closed. Turning a mod on or
+off changes only the list: the scene changes when the world is next
+opened (`list_mods` reports `reopen`, also when a mod's `world.json` was
+written since), which keeps the undo history honest. Known limits: game
+saves do not record which mods were on; a world closed with `close_world`
+keeps the mods' things as plain ones. People of a mod's own, kits, assets and scripts are the parts to
+come.
 
 Whole text files are read and written by `giant/core/text_files.h`
 (written beside and renamed over); game saves keep their own writer, which

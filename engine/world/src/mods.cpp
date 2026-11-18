@@ -1,10 +1,13 @@
 #include "giant/world/mods.h"
+#include "giant/world/people.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <charconv>
+#include <functional>
 #include <initializer_list>
+#include <map>
 #include <string_view>
 #include <set>
 #include <system_error>
@@ -489,6 +492,143 @@ ModOrder order_mods(std::span<const Mod> mods, std::span<const u8> on) {
         }
     }
     return result;
+}
+
+std::string_view mod_thing_name(ModThing thing) {
+    switch (thing) {
+    case ModThing::place: return "place";
+    case ModThing::person_look: return "person_look";
+    case ModThing::routine: return "routine";
+    case ModThing::behaviour: return "behaviour";
+    }
+    return "place";
+}
+
+namespace {
+
+// One kind of thing while mods are laid over it: where each name is (found
+// once, when a mod first touches the kind), who set each last, and what the
+// mod being laid did, so that it can be undone.
+template <typename T>
+struct Laying {
+    std::vector<T>& into;
+    ModThing thing;
+    std::map<std::string, usize, std::less<>> at;     // every name's place in `into` (its own copies: `into` grows)
+    std::map<std::string, usize, std::less<>> set_by; // the mod (its place in the list) that set a name last
+    bool found = false;
+    struct Done {
+        usize index = 0;
+        std::optional<T> was;         // replaced: what was there; added: nothing
+        std::optional<usize> set_was; // who had set the name before, if a mod had
+    };
+    std::vector<Done> done; // what the mod being laid did, in order
+
+    // Lays the mod's things over the kind; what is wrong with them, or nothing.
+    std::optional<std::string> lay(const std::vector<T>& from, usize mod, std::vector<ModChange>& changes) {
+        if (from.empty()) {
+            return std::nullopt;
+        }
+        if (!found) {
+            found = true;
+            for (usize i = 0; i < into.size(); ++i) {
+                at.emplace(into[i].name, i);
+            }
+        }
+        for (const T& one : from) {
+            ModChange change{mod, thing, one.name, ModChange::Did::added, 0};
+            Done did;
+            if (const auto by = set_by.find(one.name); by != set_by.end()) {
+                if (by->second == mod) { // (refused when a mod's file is loaded; given here all the same)
+                    return "it sets the " + std::string(mod_thing_name(thing)) + " \"" + one.name + "\" twice";
+                }
+                did.set_was = by->second;
+            }
+            if (const auto place = at.find(one.name); place != at.end()) {
+                if (did.set_was) {
+                    change.did = ModChange::Did::replaced_mod;
+                    change.over = *did.set_was;
+                } else {
+                    change.did = ModChange::Did::replaced_world;
+                }
+                did.index = place->second;
+                did.was = std::move(into[place->second]);
+                into[place->second] = one;
+            } else {
+                did.index = into.size();
+                at.emplace(one.name, into.size());
+                into.push_back(one);
+            }
+            set_by.insert_or_assign(one.name, mod);
+            done.push_back(std::move(did));
+            changes.push_back(std::move(change));
+        }
+        return std::nullopt;
+    }
+
+    // Undoes what the mod being laid did (the last first).
+    void undo() {
+        for (usize i = done.size(); i-- > 0;) {
+            Done& did = done[i];
+            const std::string name = into[did.index].name;
+            if (did.was) {
+                into[did.index] = std::move(*did.was);
+            } else {
+                into.pop_back(); // (added ones are the last, undone last first)
+                at.erase(name);
+            }
+            if (did.set_was) {
+                set_by.insert_or_assign(name, *did.set_was);
+            } else {
+                set_by.erase(name);
+            }
+        }
+        done.clear();
+    }
+};
+
+} // namespace
+
+ModsApplied apply_mod_worlds(std::span<const ModWorld* const> mods, std::vector<Place>& places, std::vector<PersonLook>& person_looks,
+                             std::vector<Routine>& routines, std::vector<Behaviour>& behaviours, std::span<const Person> people,
+                             PersonId next_person_id) {
+    ModsApplied applied;
+    Laying<Place> lay_places{places, ModThing::place, {}, {}, false, {}};
+    Laying<PersonLook> lay_looks{person_looks, ModThing::person_look, {}, {}, false, {}};
+    Laying<Routine> lay_routines{routines, ModThing::routine, {}, {}, false, {}};
+    Laying<Behaviour> lay_behaviours{behaviours, ModThing::behaviour, {}, {}, false, {}};
+    for (usize m = 0; m < mods.size(); ++m) {
+        if (mods[m] == nullptr || mods[m]->empty()) {
+            continue;
+        }
+        const ModWorld& mod = *mods[m];
+        const usize changes_before = applied.changes.size();
+        std::optional<std::string> wrong = lay_places.lay(mod.places, m, applied.changes);
+        if (!wrong) wrong = lay_looks.lay(mod.person_looks, m, applied.changes);
+        if (!wrong) wrong = lay_routines.lay(mod.routines, m, applied.changes);
+        if (!wrong) wrong = lay_behaviours.lay(mod.behaviours, m, applied.changes);
+        // The world with it must be one that loads.
+        if (!wrong) {
+            if (const auto people_wrong = check_people(places, person_looks, routines, people, next_person_id)) {
+                wrong = "the world would not load with them (" + *people_wrong + ")";
+            } else if (const auto behaviours_wrong = check_behaviours(behaviours, people)) {
+                wrong = "the world would not load with them (" + *behaviours_wrong + ")";
+            }
+        }
+        if (wrong) {
+            lay_behaviours.undo();
+            lay_routines.undo();
+            lay_looks.undo();
+            lay_places.undo();
+            applied.changes.resize(changes_before);
+            applied.problems.push_back({m, "its world changes were left out: " + *wrong});
+        } else {
+            lay_places.done.clear();
+            lay_looks.done.clear();
+            lay_routines.done.clear();
+            lay_behaviours.done.clear();
+        }
+    }
+    return applied;
 }
 
 } // namespace giant::world

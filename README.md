@@ -429,7 +429,9 @@ Open-world systems:
 - LW7 part 1: mods as folders beside a world, each with a manifest (id,
   version, the mods it needs), a load order that is the same every time,
   and every problem said (`list_mods`, `enable_mod`; `docs/mods.md`).
-  What mods hold is loaded by the parts to come.
+- LW7 part 2: a mod's `world.json` adds or replaces places, person looks,
+  routines and behaviours when the world is opened; a later mod wins and
+  every clash is reported; the world's own files stay its own when saved.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

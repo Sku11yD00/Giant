@@ -1,10 +1,16 @@
 #include "mods.h"
 
+#include "mesh_library.h"
+
 #include "giant/core/text.h"
 #include "giant/core/text_files.h"
+#include "giant/world/people.h"
 
 #include <algorithm>
 #include <exception>
+#include <iterator>
+#include <set>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -14,6 +20,8 @@ namespace {
 
 constexpr const char* k_manifest = "mod.json";
 constexpr const char* k_enabled = "enabled.json";
+constexpr const char* k_mod_world = "world.json";
+constexpr usize k_max_mod_world_bytes = usize{64} << 20; // (a world's 65,536 places are about a quarter of it)
 
 // Nothing is there under the name (not: something is, and it cannot be looked at).
 bool is_absent(const std::filesystem::path& path) {
@@ -137,6 +145,77 @@ ModList read_mods(const std::filesystem::path& world_folder) {
         list.mods[problem.mod].problem = std::move(problem.message);
     }
     return list;
+}
+
+ModsLaid lay_mods(const std::filesystem::path& world_folder, world::Scene& scene) {
+    ModsLaid laid;
+    const ModList list = read_mods(world_folder);
+    if (list.order.empty()) {
+        return laid;
+    }
+    laid.mods = list.order;
+    std::vector<world::ModWorld> worlds(laid.mods.size());
+    std::vector<const world::ModWorld*> given(laid.mods.size(), nullptr);
+    std::vector<world::ModProblem> unread;
+    for (usize i = 0; i < laid.mods.size(); ++i) {
+        const std::filesystem::path file = mods_folder(world_folder) / laid.mods[i] / k_mod_world;
+        laid.files.push_back(mod_world_file(world_folder, laid.mods[i]));
+        if (is_absent(file)) {
+            continue;
+        }
+        const std::optional<std::string> text = read_text_file(file, k_max_mod_world_bytes);
+        if (!text) {
+            unread.push_back({i, std::string(k_mod_world) + " could not be read (or is over " + std::to_string(k_max_mod_world_bytes >> 20) + " MB)"});
+            continue;
+        }
+        if (const auto bad = world::load_mod_world(*text, worlds[i])) {
+            unread.push_back({i, std::string(k_mod_world) + ": " + bad->message});
+            continue;
+        }
+        for (world::PersonLook& look : worlds[i].person_looks) {
+            look.mesh = MeshLibrary::normalize(look.mesh); // (one spelling per file, as the world's own)
+        }
+        given[i] = &worlds[i];
+    }
+    laid.applied = world::apply_mod_worlds(given, scene.places, scene.person_looks, scene.routines, scene.behaviours, scene.people,
+                                           scene.next_person_id);
+    laid.applied.problems.insert(laid.applied.problems.end(), std::make_move_iterator(unread.begin()), std::make_move_iterator(unread.end()));
+    std::sort(laid.applied.problems.begin(), laid.applied.problems.end(),
+              [](const world::ModProblem& l, const world::ModProblem& r) { return l.mod < r.mod; });
+    // The things mods set, each once, as they are now (the last to set it left it so).
+    std::set<std::pair<world::ModThing, std::string_view>> set;
+    for (const world::ModChange& change : laid.applied.changes) {
+        set.emplace(change.thing, change.name);
+    }
+    laid.any = !set.empty();
+    // (One pass over each list: a mod may set as many things as a world keeps.)
+    const auto brought = [&set](world::ModThing thing, const auto& now, auto& out) {
+        for (const auto& one : now) {
+            if (set.contains({thing, std::string_view(one.name)})) {
+                out.push_back(one);
+            }
+        }
+    };
+    brought(world::ModThing::place, scene.places, laid.places);
+    brought(world::ModThing::person_look, scene.person_looks, laid.person_looks);
+    brought(world::ModThing::routine, scene.routines, laid.routines);
+    brought(world::ModThing::behaviour, scene.behaviours, laid.behaviours);
+    return laid;
+}
+
+ModsLaid::File mod_world_file(const std::filesystem::path& world_folder, const std::string& id) {
+    const std::filesystem::path file = mods_folder(world_folder) / id / k_mod_world;
+    ModsLaid::File out;
+    if (is_absent(file)) {
+        return out;
+    }
+    out.there = true;
+    std::error_code error;
+    const auto bytes = std::filesystem::file_size(file, error);
+    out.bytes = error ? 0 : static_cast<u64>(bytes);
+    const auto written = std::filesystem::last_write_time(file, error);
+    out.written = error ? 0 : static_cast<i64>(written.time_since_epoch().count());
+    return out;
 }
 
 std::optional<std::string> set_mod_on(const std::filesystem::path& world_folder, const std::string& id, bool on) {
