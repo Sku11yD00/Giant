@@ -757,6 +757,8 @@ int run(const Options& options) {
 
         scripts.update(menus.paused() ? 0.0f : delta); // (a menu over play: scripts stand still too)
         chat.update(); // (a command Claude asked for, if one waits)
+        state.chat_stamp = chat.stamp();
+        state.chat_busy = chat.busy();
         mark(editor::FramePhase::scripts);
 
         // Playing: the mouse and keys are the player's (the panels get

@@ -319,6 +319,8 @@ struct EditorState {
 
     // The chat with Claude (chat.h). Null where there is none (tests).
     ChatLink* chat = nullptr;
+    u64 chat_stamp = 0;     // another number whenever the conversation may have changed (the main loop's)
+    bool chat_busy = false; // Claude is working on a message (the main loop's)
 };
 
 // A change to the current scene: its undo and redo only run while the scene

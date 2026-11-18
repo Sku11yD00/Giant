@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstddef>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -223,6 +225,64 @@ ChatToolReply run_chat_tool(ai::CommandRegistry& registry, std::string_view name
         return run_command(registry, input);
     }
     return {false, "there is no tool named \"" + std::string(name) + "\""};
+}
+
+bool ChatView::update(ai::CommandRegistry& commands, const EditorState& state) {
+    if (state.chat_stamp == m_seen) {
+        return false;
+    }
+    m_seen = state.chat_stamp;
+    bool changed = false;
+    // (A few reads at most: the rest the next time it is drawn.)
+    for (int read = 0; read < 8; ++read) {
+        const CommandResult reply = commands.execute("get_chat", {{"after", m_after}, {"limit", 256}});
+        if (!reply.ok || !reply.value.is_object()) {
+            break;
+        }
+        const Json& v = reply.value;
+        m_started = v.value("started", false);
+        m_key_found = v.value("key_found", false);
+        m_model = v.value("model", std::string());
+        m_input_tokens = v.value("input_tokens", u64{0});
+        m_output_tokens = v.value("output_tokens", u64{0});
+        // Lines the conversation no longer keeps (it was cleared, or they are too old) go here too.
+        const u64 oldest = v.value("oldest", u64{0});
+        const auto kept = std::find_if(m_lines.begin(), m_lines.end(), [oldest](const Line& l) { return l.serial >= oldest; });
+        if (kept != m_lines.begin()) {
+            m_lines.erase(m_lines.begin(), kept);
+            changed = true;
+        }
+        usize added = 0;
+        if (v.contains("entries") && v["entries"].is_array()) {
+            for (const Json& e : v["entries"]) {
+                if (!e.is_object()) {
+                    continue;
+                }
+                Line line;
+                line.serial = e.value("serial", u64{0});
+                line.kind = e.value("kind", std::string());
+                line.text = e.value("text", std::string());
+                line.tool = e.value("tool", std::string());
+                line.ok = e.value("ok", true);
+                m_lines.push_back(std::move(line));
+                ++added;
+            }
+        }
+        changed = changed || added > 0;
+        const u64 after = v.value("after", m_after);
+        const bool more = added == 256 && after > m_after;
+        m_after = after;
+        if (!more) {
+            break;
+        }
+        if (read == 7) {
+            m_seen = ~u64{0}; // (more to read: again at the next draw)
+        }
+    }
+    if (m_lines.size() > k_most_lines) {
+        m_lines.erase(m_lines.begin(), m_lines.begin() + static_cast<std::ptrdiff_t>(m_lines.size() - k_most_lines));
+    }
+    return changed;
 }
 
 void register_chat_commands(ai::CommandRegistry& registry, EditorState& state) {

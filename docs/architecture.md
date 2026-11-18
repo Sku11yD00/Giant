@@ -4110,7 +4110,18 @@ key, a command found, described, run and undone, what the service was
 sent). None of
 them reaches Claude's real service.
 
-Not yet: the Chat panel, Claude's words arriving as they are written
+The Chat panel (`EditorPanels::draw_chat`, LW6b part 2) keeps its own
+copy of the lines (`ChatView`) and reads `get_chat` only when
+`EditorState::chat_stamp` moved: the bridge bumps it when the C# side's
+stamp (the newest line's serial and whether Claude is working, returned by
+its per-frame update) changes, and on every send, stop and clear. A frame
+in which nothing happened costs the panel one comparison. New lines are
+read from the view's cursor, a few pages a frame; lines the conversation
+no longer keeps (cleared, or older than its 2,000) leave the view too. It
+draws the newest 300 (wrapped text is measured as it is drawn). Sending,
+stopping and clearing are the chat's commands.
+
+Not yet: Claude's words arriving as they are written
 (replies come whole), pictures (a screenshot's result says there was one),
 asking before each change, shortening a long conversation (clear it when
 Claude's service says it is too long), and counting the tokens of requests

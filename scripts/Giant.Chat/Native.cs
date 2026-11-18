@@ -101,7 +101,8 @@ public static unsafe class Native
 
     /// <summary>
     /// Runs one tool Claude is waiting for, if any (one a frame: a command
-    /// may take a while). Returns 1 while Claude is working, else 0.
+    /// may take a while). Returns the conversation's stamp: odd while Claude
+    /// is working, and another number whenever a line was added.
     /// </summary>
     [UnmanagedCallersOnly]
     public static int Update()
@@ -113,7 +114,7 @@ public static unsafe class Native
                 return 0;
             }
             s_conversation.RunPending(RunTool);
-            return s_conversation.Busy ? 1 : 0;
+            return s_conversation.Stamp;
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {

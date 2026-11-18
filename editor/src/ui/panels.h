@@ -4,6 +4,7 @@
 // undo history. Panel visibility and layout are view state, not commands.
 #pragma once
 
+#include "../chat.h"
 #include "../editor_commands.h"
 #include "../people_list.h"
 
@@ -43,6 +44,7 @@ private:
     void draw_water();         // the lakes, rivers and sea: level, waves, shown
     void draw_effects();       // effects running, and buttons playing each once
     void draw_people();        // the People panel: list, filter, follow one, what it does and why
+    void draw_chat();          // the Chat panel: the conversation with Claude, and a box to write in
     void draw_log();
     void draw_commands();
     void draw_engine(const FrameInfo& frame);
@@ -58,6 +60,7 @@ private:
 
     bool m_show_scene = true;
     bool m_show_people = true;
+    bool m_show_chat = true;
     bool m_show_log = true;
     bool m_show_commands = true;
     bool m_show_engine = true;
@@ -79,6 +82,13 @@ private:
     std::string m_person_why;                       // person_why of that one, made anew a few times a second
     int m_person_why_frame = -1;                    // the frame it was made
     int m_people_frame = -1;                        // the frame the list was last updated
+
+    ChatView m_chat;                          // the Chat panel's copy of the conversation
+    std::array<char, 4096> m_chat_input{};    // ImGui edits this in place
+    std::string m_chat_error;                 // why the last message could not be sent
+    bool m_chat_details = false;              // show what each tool was given and gave back
+    bool m_chat_to_end = true;                // scroll to the newest line at the next draw
+    bool m_chat_focus = false;                // put the keyboard back in the box at the next draw
 
     u32 m_edit_epoch = 1; // bumped whenever no widget is being edited
 };

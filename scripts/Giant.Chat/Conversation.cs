@@ -123,6 +123,21 @@ internal sealed class Conversation
         }
     }
 
+    /// <summary>
+    /// A number that changes whenever the conversation does (a line added, work begun or
+    /// ended): its lowest bit is whether Claude is working, the rest the newest line's serial.
+    /// </summary>
+    public int Stamp
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return (int)((_serial & 0x3fffffff) << 1) | (_talk.Busy ? 1 : 0);
+            }
+        }
+    }
+
     /// <summary>Sends what the person wrote. Null when it went out, else why not.</summary>
     public string? Send(string text) => Send(text, out _);
 

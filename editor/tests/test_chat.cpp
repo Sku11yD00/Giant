@@ -212,3 +212,100 @@ GIANT_TEST("chat commands: each asks the conversation; without one they say so")
     GIANT_CHECK(!f.commands.can_undo());
     GIANT_CHECK(f.commands.find("get_chat")->read_only && !f.commands.find("chat_send")->read_only);
 }
+
+namespace {
+
+// A conversation of numbered lines, read as get_chat reads the real one.
+struct LinesLink final : ChatLink {
+    u64 oldest = 1;
+    u64 latest = 0;
+    bool started = true;
+    int reads = 0;
+    ai::CommandResult ask(std::string_view what, const Json& args) override {
+        if (what != "read") {
+            return ai::CommandResult::success();
+        }
+        ++reads;
+        const u64 after = args.value("after", u64{0});
+        const u64 limit = args.value("limit", u64{64});
+        Json entries = Json::array();
+        u64 cursor = after;
+        for (u64 serial = std::max(after + 1, oldest); serial <= latest && entries.size() < limit; ++serial) {
+            Json e = {{"serial", serial}, {"kind", serial % 2 == 1 ? "you" : "result"}, {"text", "line " + std::to_string(serial)}};
+            if (serial % 2 == 0) {
+                e["tool"] = "run_command";
+                e["ok"] = serial % 4 == 0;
+            }
+            entries.push_back(std::move(e));
+            cursor = serial;
+        }
+        Json reply = {{"entries", std::move(entries)}, {"after", std::min(cursor, latest)}, {"latest", latest},
+                      {"oldest", oldest},              {"busy", false},                     {"started", started}};
+        if (started) {
+            reply.update({{"key_found", true}, {"model", "claude-opus-5-5"}, {"input_tokens", 120}, {"output_tokens", 30}});
+        }
+        return ai::CommandResult::success(std::move(reply));
+    }
+};
+
+} // namespace
+
+GIANT_TEST("chat view: reads the conversation only when it changed, and follows clears and dropped lines") {
+    Fixture f;
+    LinesLink link;
+    f.state.chat = &link;
+    ChatView view;
+    // Before any message: read once, nothing there, nothing started.
+    link.started = false;
+    GIANT_CHECK(!view.update(f.commands, f.state) && link.reads == 1);
+    GIANT_CHECK(view.lines().empty() && !view.started() && !view.key_found() && view.model().empty());
+    GIANT_CHECK(!view.update(f.commands, f.state) && link.reads == 1); // nothing changed: not read again
+    // Lines arrive.
+    link.started = true;
+    link.latest = 3;
+    f.state.chat_stamp = 1;
+    GIANT_CHECK(view.update(f.commands, f.state) && link.reads == 2);
+    GIANT_CHECK(view.lines().size() == 3 && view.lines()[0].serial == 1 && view.lines()[0].kind == "you" && view.lines()[0].text == "line 1");
+    GIANT_CHECK(view.lines()[1].kind == "result" && view.lines()[1].tool == "run_command" && !view.lines()[1].ok);
+    GIANT_CHECK(view.started() && view.key_found() && view.model() == "claude-opus-5-5" && view.input_tokens() == 120 && view.output_tokens() == 30);
+    for (int i = 0; i < 100; ++i) {
+        GIANT_CHECK(!view.update(f.commands, f.state));
+    }
+    GIANT_CHECK(link.reads == 2);
+    // Only what is new is read; a stamp that moved with nothing new adds nothing.
+    link.latest = 5;
+    f.state.chat_stamp = 2;
+    GIANT_CHECK(view.update(f.commands, f.state) && view.lines().size() == 5 && view.lines()[4].serial == 5 && view.lines()[3].ok);
+    f.state.chat_stamp = 3;
+    GIANT_CHECK(!view.update(f.commands, f.state) && view.lines().size() == 5);
+    // Many at once: read in pages, all in one go while they are few pages.
+    link.latest = 5 + 600;
+    f.state.chat_stamp = 4;
+    const int before = link.reads;
+    GIANT_CHECK(view.update(f.commands, f.state) && view.lines().size() == 605 && link.reads == before + 3);
+    for (usize i = 0; i < view.lines().size(); ++i) {
+        GIANT_CHECK(view.lines()[i].serial == i + 1); // none skipped, none twice
+    }
+    // Cleared: the conversation keeps only a new line; the old ones go from the view too.
+    link.oldest = link.latest = 606;
+    f.state.chat_stamp = 5;
+    GIANT_CHECK(view.update(f.commands, f.state) && view.lines().size() == 1 && view.lines()[0].serial == 606);
+    // More than a few pages at once: the rest at the next update; never more kept than the most.
+    link.oldest = 606;
+    link.latest = 606 + 3000;
+    f.state.chat_stamp = 6;
+    GIANT_CHECK(view.update(f.commands, f.state));
+    GIANT_CHECK(view.lines().size() == 1 + 8 * 256 - (1 + 8 * 256 > ChatView::k_most_lines ? 1 + 8 * 256 - ChatView::k_most_lines : 0));
+    GIANT_CHECK(view.update(f.commands, f.state)); // (the stamp did not move: it reads on by itself)
+    GIANT_CHECK(view.lines().size() == ChatView::k_most_lines && view.lines().back().serial == 3606);
+    GIANT_CHECK(view.lines().front().serial == 3606 - ChatView::k_most_lines + 1);
+    GIANT_CHECK(!view.update(f.commands, f.state));
+    // The conversation dropped its oldest lines: so does the view.
+    link.oldest = 3000;
+    f.state.chat_stamp = 7;
+    GIANT_CHECK(view.update(f.commands, f.state) && view.lines().front().serial == 3000 && view.lines().back().serial == 3606);
+    // No chat at all (a tool without one): nothing, and no failure.
+    f.state.chat = nullptr;
+    f.state.chat_stamp = 8;
+    GIANT_CHECK(!view.update(f.commands, f.state));
+}

@@ -127,12 +127,18 @@ ai::CommandResult ChatBridge::ask(std::string_view what, const ai::Json& args) {
     if (what == "send") {
         m_busy = true; // (until the next update says otherwise)
     }
+    ++m_stamp; // (a message sent, the work stopped, the conversation cleared: something to read anew)
     return ai::CommandResult::success(std::move(*value));
 }
 
 void ChatBridge::update() {
     if (m_started) {
-        m_busy = m_update() != 0;
+        const int now = m_update();
+        m_busy = (now & 1) != 0;
+        if (now != m_last) {
+            m_last = now;
+            ++m_stamp;
+        }
     }
 }
 

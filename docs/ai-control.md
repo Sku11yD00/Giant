@@ -56,7 +56,15 @@ It needs two things:
   see your usage in the Claude Console for the bill).
 - **The .NET 10 runtime**, as C# scripts do.
 
-For now the chat is its commands (the panel is the next part):
+The **Chat panel** (Window menu, docked on the right) is where you use it:
+write in the box at the bottom and press Enter (Ctrl+Enter starts a new
+line). Claude's answers appear above, with a dim line for each command it
+runs; one that did not work is shown in yellow with why. **Stop** halts
+its work, **Clear** starts a new conversation, and **Details** shows what
+each command was given and gave back. If a message cannot be sent (no key
+yet, say), the reason is shown above the box.
+
+The panel is these commands, which the AI over MCP can use too:
 
 | Command | What it does |
 | --- | --- |

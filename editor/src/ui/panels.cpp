@@ -34,6 +34,7 @@ namespace {
 
 constexpr const char* k_scene = "Scene";
 constexpr const char* k_people = "People";
+constexpr const char* k_chat = "Chat";
 constexpr const char* k_log = "Log";
 constexpr const char* k_commands = "Commands";
 constexpr const char* k_engine = "Engine";
@@ -106,6 +107,7 @@ void EditorPanels::draw(const FrameInfo& frame) {
     draw_menu_bar();
     if (m_show_scene) draw_scene_settings();
     if (m_show_people) draw_people();
+    if (m_show_chat) draw_chat();
     if (m_show_log) draw_log();
     if (m_show_commands) draw_commands();
     if (m_show_engine) draw_engine(frame);
@@ -130,6 +132,7 @@ void EditorPanels::build_default_layout(unsigned int dockspace_id) {
     ImGui::DockBuilderDockWindow(k_engine, left);
     ImGui::DockBuilderDockWindow(k_commands, right);
     ImGui::DockBuilderDockWindow(k_people, right);
+    ImGui::DockBuilderDockWindow(k_chat, right);
     ImGui::DockBuilderDockWindow(k_log, bottom);
     ImGui::DockBuilderFinish(dockspace_id);
 }
@@ -170,6 +173,7 @@ void EditorPanels::draw_menu_bar() {
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem(k_scene, nullptr, &m_show_scene);
         ImGui::MenuItem(k_people, nullptr, &m_show_people);
+        ImGui::MenuItem(k_chat, nullptr, &m_show_chat);
         ImGui::MenuItem(k_log, nullptr, &m_show_log);
         ImGui::MenuItem(k_commands, nullptr, &m_show_commands);
         ImGui::MenuItem(k_engine, nullptr, &m_show_engine);
@@ -1241,6 +1245,152 @@ void EditorPanels::draw_people() {
             }
         }
         ImGui::EndDisabled();
+    }
+    ImGui::End();
+}
+
+// The Chat panel: the conversation with Claude (chat.h). Sending, stopping
+// and clearing are the chat's commands; the lines are read (get_chat) only
+// when the conversation changed.
+void EditorPanels::draw_chat() {
+    if (!ImGui::Begin(k_chat, &m_show_chat)) {
+        ImGui::End();
+        return;
+    }
+    if (m_chat.update(m_commands, m_state)) {
+        m_chat_to_end = true;
+    }
+    const bool busy = m_state.chat_busy;
+    const std::vector<ChatView::Line>& lines = m_chat.lines();
+
+    // The top line: what Claude is doing, and the conversation's buttons.
+    if (busy) {
+        ImGui::TextColored({0.55f, 0.8f, 1.0f, 1.0f}, "Claude is working...");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Stop")) {
+            run("stop_chat");
+        }
+    } else if (m_chat.started() && !m_chat.key_found()) {
+        ImGui::TextColored(level_color(LogLevel::warning), "No Claude key found");
+    } else if (m_chat.started()) {
+        ImGui::TextDisabled("%s  -  %llu tokens in, %llu out", m_chat.model().c_str(),
+                            static_cast<unsigned long long>(m_chat.input_tokens()),
+                            static_cast<unsigned long long>(m_chat.output_tokens()));
+    } else {
+        ImGui::TextDisabled("Claude works in this editor with its own commands.");
+    }
+    ImGui::SameLine(std::max(0.0f, ImGui::GetWindowWidth() - 150.0f)); // (at the right)
+    ImGui::Checkbox("Details", &m_chat_details);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(lines.empty());
+    if (ImGui::SmallButton("Clear")) {
+        run("clear_chat");
+        m_chat_error.clear();
+    }
+    ImGui::EndDisabled();
+    ImGui::Separator();
+
+    // The conversation, over the box to write in.
+    const float input_height = ImGui::GetTextLineHeight() * 4.0f + ImGui::GetStyle().FramePadding.y * 2.0f;
+    const float below = input_height + ImGui::GetStyle().ItemSpacing.y * 2.0f +
+                        (m_chat_error.empty() ? 0.0f : ImGui::GetTextLineHeightWithSpacing() * 2.0f);
+    if (ImGui::BeginChild("conversation", ImVec2(0.0f, std::max(60.0f, ImGui::GetContentRegionAvail().y - below)))) {
+        if (lines.empty()) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("Say what you want in plain words, for example:\n"
+                                "  Put a row of ten trees along the road.\n"
+                                "  Make it a rainy evening.\n"
+                                "  Why is the person I selected standing still?\n\n"
+                                "What Claude changes can be undone with Ctrl+Z, like your own work. It needs your Claude "
+                                "key: see docs/ai-control.md.");
+            ImGui::PopTextWrapPos();
+        }
+        // The newest few hundred: wrapped text is measured every frame it is drawn.
+        constexpr usize k_most_drawn = 300;
+        const usize first = lines.size() > k_most_drawn ? lines.size() - k_most_drawn : 0;
+        if (first > 0) {
+            ImGui::TextDisabled("(%zu earlier lines not shown)", first);
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        for (usize i = first; i < lines.size(); ++i) {
+            const ChatView::Line& line = lines[i];
+            const char* text = line.text.c_str();
+            const char* end = text + line.text.size();
+            if (line.kind == "you") {
+                ImGui::Spacing();
+                ImGui::TextColored({0.55f, 0.8f, 1.0f, 1.0f}, "You");
+                ImGui::TextUnformatted(text, end);
+            } else if (line.kind == "claude") {
+                ImGui::Spacing();
+                ImGui::TextColored({0.95f, 0.7f, 0.45f, 1.0f}, "Claude");
+                ImGui::TextUnformatted(text, end);
+            } else if (line.kind == "tool") {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                if (m_chat_details) {
+                    ImGui::Text("> %s", line.tool.c_str());
+                    ImGui::TextUnformatted(text, end);
+                } else {
+                    // One line: the tool, and the start of what it was given.
+                    ImGui::Text("> %s %.80s%s", line.tool.c_str(), text, line.text.size() > 80 ? "..." : "");
+                }
+                ImGui::PopStyleColor();
+            } else if (line.kind == "result") {
+                if (!line.ok) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, level_color(LogLevel::warning));
+                    ImGui::TextUnformatted("  did not work: ");
+                    ImGui::SameLine(0.0f, 0.0f);
+                    ImGui::TextUnformatted(text, end);
+                    ImGui::PopStyleColor();
+                } else if (m_chat_details) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextUnformatted(text, end);
+                    ImGui::PopStyleColor();
+                }
+            } else {
+                const bool error = line.kind == "error";
+                ImGui::PushStyleColor(ImGuiCol_Text, error ? level_color(LogLevel::error) : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextUnformatted(text, end);
+                ImGui::PopStyleColor();
+            }
+        }
+        ImGui::PopTextWrapPos();
+        if (m_chat_to_end) {
+            m_chat_to_end = false;
+            ImGui::SetScrollHereY(1.0f);
+        }
+    }
+    ImGui::EndChild();
+
+    if (!m_chat_error.empty()) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(level_color(LogLevel::warning), "%s", m_chat_error.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    // Enter sends, Ctrl+Enter starts a new line.
+    if (m_chat_focus) {
+        m_chat_focus = false;
+        ImGui::SetKeyboardFocusHere();
+    }
+    const float send_width = 60.0f;
+    bool send = ImGui::InputTextMultiline("##chat_input", m_chat_input.data(), m_chat_input.size(),
+                                          ImVec2(std::max(60.0f, ImGui::GetContentRegionAvail().x - send_width - ImGui::GetStyle().ItemSpacing.x), input_height),
+                                          ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CtrlEnterForNewLine);
+    ImGui::SameLine();
+    const bool empty = std::string_view(m_chat_input.data()).find_first_not_of(" \t\r\n") == std::string_view::npos;
+    ImGui::BeginDisabled(busy || empty);
+    send = ImGui::Button("Send", ImVec2(send_width, input_height)) || (send && !busy && !empty);
+    ImGui::EndDisabled();
+    if (send && !busy && !empty) {
+        // (Not through run(): why it could not be sent, the missing key say, is for this panel, not only the log.)
+        const ai::CommandResult sent = m_commands.execute("chat_send", {{"text", std::string(m_chat_input.data())}});
+        if (sent.ok) {
+            m_chat_input[0] = '\0';
+            m_chat_error.clear();
+            m_chat_to_end = true;
+        } else {
+            m_chat_error = sent.error;
+        }
+        m_chat_focus = true;
     }
     ImGui::End();
 }
