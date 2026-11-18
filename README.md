@@ -426,6 +426,10 @@ Open-world systems:
   your Claude key: `docs/ai-control.md`.
 - LW6b part 2: the Chat panel: the conversation, a box to write in,
   Stop and Clear.
+- LW7 part 1: mods as folders beside a world, each with a manifest (id,
+  version, the mods it needs), a load order that is the same every time,
+  and every problem said (`list_mods`, `enable_mod`; `docs/mods.md`).
+  What mods hold is loaded by the parts to come.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

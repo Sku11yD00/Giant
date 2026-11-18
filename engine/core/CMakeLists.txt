@@ -7,6 +7,7 @@ giant_module(core
     src/math.cpp
     src/image.cpp
     src/png.cpp
+    src/text_files.cpp
     src/thread_time.cpp
     src/wind.cpp
 )
@@ -22,6 +23,7 @@ giant_module_tests(core
     tests/test_log_history.cpp
     tests/test_math.cpp
     tests/test_png.cpp
+    tests/test_text_files.cpp
     tests/test_thread_time.cpp
     tests/test_wind.cpp
 )

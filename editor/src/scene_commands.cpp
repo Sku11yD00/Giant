@@ -1051,9 +1051,7 @@ Json far_ground_json(const FarGround& far) {
     return {{"levels", std::move(levels)}, {"hidden", s.hidden}, {"reading", s.reading}, {"failed", s.failed}};
 }
 
-std::filesystem::path utf8_path(const std::string& path) {
-    return std::filesystem::path(std::u8string(path.begin(), path.end()));
-}
+std::filesystem::path utf8_path(const std::string& path) { return path_from_utf8(path); }
 
 
 world::KitPiece piece_from(const Entity& e) {

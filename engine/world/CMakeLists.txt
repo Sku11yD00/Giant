@@ -14,6 +14,7 @@ giant_module(world
   src/people.cpp
   src/routes.cpp
   src/effects.cpp
+  src/mods.cpp
   DEPENDS core
 )
 # JSON stays private: the scene API is plain C++ types.
@@ -30,4 +31,5 @@ giant_module_tests(world
     tests/test_people.cpp
     tests/test_routes.cpp
     tests/test_effects.cpp
+    tests/test_mods.cpp
 )
