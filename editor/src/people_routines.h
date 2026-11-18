@@ -169,7 +169,7 @@ public:
         u8 entry = 0;          // its routine's entry then (`own`: the state's place among its behaviour's)
         bool own = false;      // what it acted on was its behaviour's state's own, not its routine's
         bool failed = false;
-        bool own_trip = false; // the trip it is on is the routine's (or the state's)
+        bool own_trip = false; // the trip it is on is the routine's (or the state's); told even when `kept` gives nothing else
         std::string place;     // where it was sent ("" for nowhere)
         std::string behaviour; // its behaviour ("": no state is kept)
         std::string state;     // the state it is in, by name
@@ -187,8 +187,11 @@ public:
     // Puts back the state a person was in and what it had acted on (after its trip, if any, was
     // sent again). The state is put back when its behaviour still has one of that name (else it
     // begins the behaviour afresh). False: no such person, or what it had acted on is not put back
-    // (it has no routine with that entry now, or no such state, or it says something else now).
-    bool restore(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, const Kept& had);
+    // (it has no routine with that entry now, or no such state, or it says something else now); with
+    // nothing acted on to put back (`said` 0, or `state_only`: the state alone, to be acted on
+    // again), whether the state was.
+    bool restore(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, const Kept& had,
+                 bool state_only = false);
     // While set nobody is looked at (a loaded game's people are being put back: game_saves.h).
     bool hold = false;
     // The hour a person keeps at `hours` (late by its share of spread_minutes; 0 to under 24).

@@ -1294,8 +1294,16 @@ GIANT_TEST("game saves: each person's behaviour is in the state it was in, for a
              {{"name", "back"}, {"activity", "walk"}, {"at", "home"}, {"speed", 20.0}}});
         GIANT_CHECK(run("set_behaviour", {{"name", "errand"}, {"states", errand}}).ok);
         GIANT_CHECK(run("set_behaviour", {{"name", "idle"}, {"states", Json::array({{{"name", "only"}}})}}).ok);
-        const auto person = [&](const char* behaviour, Json position) {
+        // One whose state leaves it to its routine, until it has arrived.
+        GIANT_CHECK(run("set_behaviour", {{"name", "commute"},
+                                          {"states", Json::array({{{"name", "travel"}, {"transitions", Json::array({{{"to", "there"}, {"when", when({{"is", "arrived"}})}}})}},
+                                                                  {{"name", "there"}}})}})
+                        .ok);
+        GIANT_CHECK(run("set_routine", {{"name", "work"}, {"entries", {{{"from", 0}, {"activity", "work"}, {"at", "place"}, {"name", "mill"}, {"speed", 10.0}}}}}).ok);
+        routines.settings.spread_minutes = 0.0f;
+        const auto person = [&](const char* behaviour, Json position, const char* routine = "") {
             Json one = {{"look", "villager"}, {"home", "cottage"}, {"behaviour", behaviour}};
+            if (routine[0] != 0) one["routine"] = routine;
             if (!position.is_null()) one["position"] = std::move(position);
             const ai::CommandResult made = run("create_people", {{"people", {one}}});
             GIANT_CHECK(made.ok);
@@ -1304,6 +1312,7 @@ GIANT_TEST("game saves: each person's behaviour is in the state it was in, for a
         const world::PersonId walker = person("errand", nullptr);          // on its way to the mill when saved
         const world::PersonId sitter = person("errand", at(399, 0, 5));    // at the mill already: resting when saved, never moved
         const world::PersonId idler = person("idle", nullptr);             // in its first state, at home: not written
+        const world::PersonId commuter = person("commute", nullptr, "work"); // in its first state, on its routine's way
         GIANT_CHECK(streaming.create(folder, scene, state.scene_generation, {}).error.empty());
         const auto frame = [&] {
             physics.update(scene, scene.take_changes(), 1.0 / 60.0);
@@ -1320,12 +1329,12 @@ GIANT_TEST("game saves: each person's behaviour is in the state it was in, for a
         GIANT_CHECK(run("simulate", {{"on", true}}).ok);
         for (int i = 0; i < 360; ++i) frame(); // 6 s: the walker some 80 m on, the sitter resting some 4 s
         GIANT_CHECK(in(walker) == "go" && travel.trip(walker) != nullptr && in(sitter) == "rest" && in(idler) == "only");
-        GIANT_CHECK(routines.stats().sent == 1 && travel.trip(sitter) == nullptr);
+        GIANT_CHECK(routines.stats().sent == 2 && travel.trip(sitter) == nullptr && in(commuter) == "travel");
         const double rested = told(sitter)["state"]["seconds"].get<double>(), walked = told(walker)["state"]["seconds"].get<double>();
         GIANT_CHECK(rested > 3.0 && rested < 4.5 && walked > 3.0 && walked < 4.5);
         const double walker_x = travel.where(*world::find_person(scene.people, walker)).position.x;
         ai::CommandResult r = run("save_game", {{"slot", "errands"}, {"wait", true}});
-        GIANT_CHECK(r.ok && r.value["people"] == 2); // (not the idler)
+        GIANT_CHECK(r.ok && r.value["people"] == 3); // (not the idler)
         // The save's text says the states.
         std::string text;
         for (const auto& entry : std::filesystem::directory_iterator(folder / "saves" / "errands" / "sections")) {
@@ -1334,16 +1343,21 @@ GIANT_TEST("game saves: each person's behaviour is in the state it was in, for a
             text.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
         }
         GIANT_CHECK(text.find("\"state\": \"rest\"") != std::string::npos && text.find("\"state\": \"go\"") != std::string::npos);
-        GIANT_CHECK(text.find("\"own\": true") != std::string::npos && text.find("\"behaviour\": \"errand\"") != std::string::npos);
+        usize owns = 0;
+        for (usize found = text.find("\"own\": true"); found != std::string::npos; found = text.find("\"own\": true", found + 1)) ++owns;
+        GIANT_CHECK(owns == 2 && text.find("\"behaviour\": \"errand\"") != std::string::npos); // (the walker's and the sitter's, not the commuter's)
+        GIANT_CHECK(text.find("\"state\": \"travel\"") != std::string::npos);
         // Stopped, and loaded: each in its state, the seconds going on; the walker's trip is its state's still, and nobody is sent again.
         GIANT_CHECK(run("simulate", {{"on", false}}).ok);
         frame();
         GIANT_CHECK(in(sitter).empty());
         const u64 before = routines.changes();
         r = run("load_game", {{"slot", "errands"}, {"wait", true}});
-        GIANT_CHECK(r.ok && physics.simulating() && r.value["people"] == 2);
+        GIANT_CHECK(r.ok && physics.simulating() && r.value["people"] == 3);
         for (int i = 0; i < 6; ++i) frame();
-        GIANT_CHECK(saves.people_waiting() == 0 && saves.status().people_applied == 2);
+        GIANT_CHECK(saves.people_waiting() == 0 && saves.status().people_applied == 3);
+        GIANT_CHECK(in(commuter) == "travel" && travel.trip(commuter) != nullptr && travel.trip(commuter)->speed == 10.0);
+        GIANT_CHECK(told(commuter)["doing"]["activity"] == "work" && told(commuter)["doing"]["own"] == false);
         GIANT_CHECK(in(walker) == "go" && in(sitter) == "rest" && in(idler) == "only");
         GIANT_CHECK(routines.stats().sent == 0 && routines.stats().failed == 0 && routines.stats().changed == 0);
         GIANT_CHECK(travel.trip(walker) != nullptr && travel.trip(walker)->place == "mill" && travel.trip(walker)->speed == 20.0);
@@ -1387,6 +1401,22 @@ GIANT_TEST("game saves: each person's behaviour is in the state it was in, for a
         for (int i = 0; i < 6; ++i) frame();
         GIANT_CHECK(in(walker).empty() && travel.trip(walker) == nullptr && told(walker)["doing"].is_null());
 
+        // Its routine says something else since (another speed): what it had done is not put back, and it has
+        // not arrived by that; it is in its state still, and sent afresh.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(run("set_routine", {{"name", "work"}, {"entries", {{{"from", 0}, {"activity", "work"}, {"at", "place"}, {"name", "mill"}, {"speed", 12.0}}}}}).ok);
+        r = run("load_game", {{"slot", "errands"}, {"wait", true}});
+        GIANT_CHECK(r.ok);
+        frame();
+        frame();
+        GIANT_CHECK(in(commuter) == "travel");
+        for (int i = 0; i < 6; ++i) frame();
+        GIANT_CHECK(in(commuter) == "travel" && travel.trip(commuter) != nullptr && travel.trip(commuter)->speed == 12.0);
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        GIANT_CHECK(run("set_routine", {{"name", "work"}, {"entries", {{{"from", 0}, {"activity", "work"}, {"at", "place"}, {"name", "mill"}, {"speed", 10.0}}}}}).ok);
+
         // Bad states are refused with the whole load; a save with none (an older one) loads.
         GIANT_CHECK(run("simulate", {{"on", false}}).ok);
         const auto write = [&](const char* bad) {
@@ -1410,6 +1440,22 @@ GIANT_TEST("game saves: each person's behaviour is in the state it was in, for a
         for (int i = 0; i < 6; ++i) frame();
         // (In the state, its own not acted on yet: acted on now, and sent home.)
         GIANT_CHECK(in(sitter) == "back" && told(sitter)["state"]["seconds"].get<double>() >= 7.5 && travel.trip(sitter) != nullptr);
+        // A trip that was its routine's and cannot be sent again (nowhere near a road): it is in its state
+        // still, with its seconds, has not arrived by that, and its routine sends it afresh.
+        GIANT_CHECK(run("simulate", {{"on", false}}).ok);
+        frame();
+        write("{\"people\": [{\"id\": 4, \"trip\": {\"to\": [50000, 0, 50000], \"speed\": 10, \"within\": 1},"
+              " \"did\": {\"said\": 5, \"entry\": 0, \"own_trip\": true},"
+              " \"in\": {\"behaviour\": \"commute\", \"state\": \"travel\", \"seconds\": 3.5, \"settled\": true}}]}");
+        GIANT_CHECK(commuter == 4);
+        r = run("load_game", {{"slot", "errands"}, {"wait", true}});
+        GIANT_CHECK(r.ok);
+        frame();
+        frame();
+        GIANT_CHECK(in(commuter) == "travel");
+        for (int i = 0; i < 6; ++i) frame();
+        GIANT_CHECK(in(commuter) == "travel" && told(commuter)["state"]["seconds"].get<double>() >= 3.5);
+        GIANT_CHECK(travel.trip(commuter) != nullptr && travel.trip(commuter)->place == "mill");
     }
     std::error_code error;
     std::filesystem::remove_all(folder, error);

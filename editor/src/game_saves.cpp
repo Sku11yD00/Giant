@@ -489,8 +489,10 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
         usize waiting = state.physics->runs() == m_people_run ? m_people_next : m_people_waiting.size();
         const auto& moved = state.travel->moved();
         if (state.routines != nullptr) state.routines->ready(state.scene, *state.travel);
+        // (Those in a later state of their behaviour are written too: at most those behaving.)
+        const usize behaving = state.routines != nullptr ? state.routines->stats().behaving : 0;
         people.reserve(std::min(state.scene.people.size(),
-                                moved.size() + state.travel->stats().trips + (m_people_waiting.size() - waiting)));
+                                moved.size() + state.travel->stats().trips + (m_people_waiting.size() - waiting) + behaving));
         for (usize i = 0; i < state.scene.people.size(); ++i) {
             const world::Person& person = state.scene.people[i];
             while (waiting < m_people_waiting.size() && m_people_waiting[waiting].id < person.id) ++waiting;
@@ -524,6 +526,12 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
                 // (Its routine's trip failed and the routine has not looked since: failed, to be tried again.)
                 if (s.kept.own_trip && !s.trip) s.kept.failed = true;
                 if (!s.trip) s.kept.own_trip = false;
+            }
+            // (A trip a state or the routine began, with what began it not kept, it left that state
+            // and was not looked at since: not written as one sent by hand, which nothing would stop.)
+            if (s.trip && s.kept.own_trip && s.kept.said == 0) {
+                s.trip = false;
+                s.kept.own_trip = false;
             }
             if (s.moved || s.trip || s.did) people.push_back(std::move(s));
         }
@@ -1222,10 +1230,7 @@ void GameSaves::place_people(EditorState& state) {
         } else if (s.did && state.routines != nullptr && !s.kept.behaviour.empty()) {
             // (Its trip could not be sent again: it is in its state still, and what the state or its
             // routine says is acted on afresh.)
-            PeopleRoutines::Kept only = s.kept;
-            only.said = 0;
-            only.settled = false;
-            (void)state.routines->restore(state.scene, *state.travel, s.id, only);
+            (void)state.routines->restore(state.scene, *state.travel, s.id, s.kept, true);
         }
         ++m_status.people_applied;
     }

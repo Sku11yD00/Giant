@@ -727,7 +727,16 @@ bool PeopleRoutines::kept(const world::Scene& scene, const PeopleTravel& travel,
     if (slot.id != person.id) return false;
     // The state it is in, if its behaviour is still the one the slot found.
     const world::Behaviour* behaviour = slot.behaviour < scene.behaviours.size() ? &scene.behaviours[slot.behaviour] : nullptr;
-    if (behaviour != nullptr && (behaviour->name != person.behaviour || slot.state >= behaviour->states.size())) behaviour = nullptr;
+    if (behaviour != nullptr && behaviour->name != person.behaviour) behaviour = nullptr;
+    // (At another place in the list since it was last looked at, one before it removed: the same one still.)
+    if (behaviour == nullptr && slot.behaviour != k_no_behaviour && !person.behaviour.empty() &&
+        static_cast<u32>(hash_of(person.behaviour)) == slot.behaviour_name) {
+        behaviour = world::find_behaviour(scene.behaviours, person.behaviour);
+    }
+    if (behaviour != nullptr && slot.state >= behaviour->states.size()) behaviour = nullptr;
+    // (Told whatever else is: a trip that was the state's or the routine's is not written as one sent by hand.)
+    const PeopleTravel::Trip* trip = travel.trip(slot.id);
+    out.own_trip = slot.trip != 0 && trip != nullptr && trip->serial == slot.trip;
     if (behaviour != nullptr) {
         out.behaviour = behaviour->name;
         out.state = behaviour->states[slot.state].name;
@@ -743,14 +752,13 @@ bool PeopleRoutines::kept(const world::Scene& scene, const PeopleTravel& travel,
     out.entry = slot.entry;
     out.own = slot.by_state;
     out.failed = slot.failed;
-    const PeopleTravel::Trip* trip = travel.trip(slot.id);
-    out.own_trip = slot.trip != 0 && trip != nullptr && trip->serial == slot.trip;
     const world::Place* place = sent_to(scene, slot);
     out.place = place != nullptr ? place->name : std::string();
     return true;
 }
 
-bool PeopleRoutines::restore(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, const Kept& had) {
+bool PeopleRoutines::restore(const world::Scene& scene, const PeopleTravel& travel, world::PersonId id, const Kept& had,
+                             bool state_only) {
     follow(scene, travel);
     const world::Person* person = world::find_person(scene.people, id);
     if (!m_running || person == nullptr) return false;
@@ -764,9 +772,10 @@ bool PeopleRoutines::restore(const world::Scene& scene, const PeopleTravel& trav
     // What it had acted on: the state's own, or its routine's entry, if that says the same still.
     const world::Routine* routine = nullptr;
     bool acted = false;
-    if (had.said != 0 && had.own) {
+    const u32 had_said = state_only ? 0 : had.said;
+    if (had_said != 0 && had.own) {
         acted = state.has_value() && behaviour->states[*state].own && said(*person, behaviour->states[*state].does) == had.said;
-    } else if (had.said != 0 && !person->routine.empty()) {
+    } else if (had_said != 0 && !person->routine.empty()) {
         routine = world::find_routine(scene.routines, person->routine);
         const world::RoutineEntry* entry = routine != nullptr ? entry_of(*routine, had.entry) : nullptr;
         // (Its routine changed since: it says something else now, and is acted on afresh.)
@@ -781,10 +790,11 @@ bool PeopleRoutines::restore(const world::Scene& scene, const PeopleTravel& trav
         slot.behaviour_name = static_cast<u32>(hash_of(behaviour->name));
         slot.state = static_cast<u8>(*state);
         slot.entered = travel.seconds() - std::max(0.0, had.in_state);
-        // (A state's own whose doing is not put back is acted on again.)
-        slot.settled = had.settled && (acted || !behaviour->states[*state].own);
+        // (What it had done is not put back: the state is acted on again, and until then it has
+        // neither arrived nor failed. One that had done nothing its state did not say is as it was.)
+        slot.settled = had.settled && !state_only && (acted || (had.said == 0 && !behaviour->states[*state].own));
     }
-    if (!acted) return had.said == 0;
+    if (!acted) return had_said == 0;
     slot.acted = had.said;
     slot.entry = had.own ? slot.state : had.entry;
     slot.by_state = had.own;

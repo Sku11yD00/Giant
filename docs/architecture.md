@@ -3651,12 +3651,17 @@ The state of its behaviour a person is in is kept too (LW6 part 5):
 and `did.own` when what it had acted on was the state's own. One in a
 later state than the first, or doing what a state says, is written
 though it stands where the scene has it; one at home in its first
-state still is not (a loaded game begins it there). Loaded, it is in
+state still is not (a loaded game begins it there, and tells of it
+as beginning; one in its first state that moved is written, and goes
+on in it). Loaded, it is in
 that state with the seconds it had (one hiding for a minute hides the
 rest of it), its trip is the state's again, and nothing is told of it
 as beginning. A behaviour that has no state of that name now, or a
 person given another behaviour since, begins afresh, and a trip that
-was the state's is not gone on with. A save without `in` (an older
+was the state's is not gone on with. What it had done not put back
+(its routine or the state says something else now, or its trip could
+not be sent again), it is in its state still and acts on it again,
+neither arrived nor failed until then. A save without `in` (an older
 one) loads as before. What alarmed people is not kept: a loaded game
 is calm.
 
