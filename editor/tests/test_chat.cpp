@@ -1,7 +1,7 @@
 // The chat with Claude, as far as it needs no .NET: the tools Claude works
 // with (searching, describing and running the editor's commands) and the
 // chat's own commands. The conversation is tested in C#
-// (tests/managed/ChatTests) and end to end by tools/mcp_smoke.py.
+// (tests/managed/ChatTests) and end to end by tools/chat_smoke.py.
 #include "../src/chat.h"
 #include "../src/clock_state.h"
 #include "../src/editor_commands.h"
@@ -9,6 +9,7 @@
 
 #include "giant_test.h"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -82,7 +83,7 @@ GIANT_TEST("chat tools: find_commands searches names and descriptions, best firs
     GIANT_CHECK(lists(found, "set_time") && lists(found, "get_time"));
     // A word in the name counts for more than one in a description.
     GIANT_CHECK(found["commands"][0]["name"] == "set_time" || found["commands"][0]["name"] == "get_time");
-    GIANT_CHECK(found["of"] == f.commands.commands().size() && found["matched"].get<usize>() >= 2);
+    GIANT_CHECK(found["of"] == f.commands.commands().size() - 4 && found["matched"].get<usize>() >= 2); // (not the chat's four)
     for (const Json& c : found["commands"]) {
         GIANT_CHECK(c["about"].get<std::string>().size() <= 160 && !c["about"].get<std::string>().empty());
         if (c["name"] == "get_time") {
@@ -103,8 +104,19 @@ GIANT_TEST("chat tools: find_commands searches names and descriptions, best firs
     // The most asked for, and no more than the most there is.
     found = f.value("find_commands", {{"words", "the a scene entity"}, {"limit", 3}});
     GIANT_CHECK(found["commands"].size() == 3 && found["matched"].get<usize>() > 3);
+    const usize matched = found["matched"].get<usize>();
+    GIANT_CHECK(f.value("find_commands", {{"words", "scene entity"}})["matched"] == matched); // ("the" and "a" find nothing)
     found = f.value("find_commands", {{"words", "the a scene entity"}, {"limit", 100000}});
-    GIANT_CHECK(found["commands"].size() <= k_chat_most_found);
+    GIANT_CHECK(found["commands"].size() == std::min(matched, k_chat_most_found));
+    GIANT_CHECK(f.value("find_commands", {{"words", "scene entity"}, {"limit", 2.0}})["commands"].size() == 2);
+    GIANT_CHECK(f.value("find_commands", {{"words", "scene entity"}, {"limit", -5}})["commands"].size() == 1);
+    GIANT_CHECK(f.value("find_commands", {{"words", "scene entity"}, {"limit", 18446744073709551615ull}})["commands"].size() ==
+                std::min(matched, k_chat_most_found));
+    // A word is found where a word starts with it, not inside one: "tity" is in no command, "ent" in many.
+    GIANT_CHECK(f.value("find_commands", {{"words", "tity"}})["matched"] == 0);
+    GIANT_CHECK(f.value("find_commands", {{"words", "ent"}})["matched"].get<usize>() > 0);
+    // Nothing but small words: refused, with why.
+    GIANT_CHECK(!f.tool("find_commands", {{"words", "the of a"}}).ok);
     // Nothing fits: an empty list, not a failure (Claude tries other words).
     found = f.value("find_commands", {{"words", "zzzqqq"}});
     GIANT_CHECK(found["commands"].empty() && found["matched"] == 0);

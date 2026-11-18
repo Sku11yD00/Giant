@@ -14,6 +14,7 @@ Fails (exit 1) on any wrong answer, or if the editor does not exit cleanly.
 import http.server
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ import time
 
 TIMEOUT = 600  # seconds for the whole run
 FILE_KEY = "key-from-the-settings-file"
+NEW_KEY = "a-corrected-key"
 
 
 def message(stop_reason, *blocks):
@@ -44,6 +46,7 @@ class Service:
     def __init__(self):
         self.replies = []
         self.requests = []  # (path, headers, body)
+        self.gate = None  # when set (a threading.Event), a request is answered only once it is
         self.lock = threading.Lock()
         service = self
 
@@ -53,6 +56,9 @@ class Service:
                 with service.lock:
                     service.requests.append((self.path, {k.lower(): v for k, v in self.headers.items()}, body))
                     reply = service.replies.pop(0) if service.replies else None
+                    gate = service.gate
+                if gate is not None:
+                    gate.wait(TIMEOUT)
                 if reply is None:
                     status, out = 500, {"type": "error", "error": {"type": "api_error", "message": "no reply was set up"}}
                 else:
@@ -176,11 +182,14 @@ def main() -> int:
                     use("toolu_5", "run_command", {"name": "quit_editor"})),
             message("end_turn", text("The background is blue now.")),
         ]
+        service.gate = threading.Event()  # (the service holds its first answer: Claude is working for as long)
         sent = tool("chat_send", {"text": "Make the background blue."})
-        check(sent["started"] is True, f"the message went out: {sent}")
+        check(sent["started"] is True and sent["after"] == 1, f"the message went out, as line 1: {sent}")
         busy = raw_tool("chat_send", {"text": "And green."})
-        # (Claude's work takes frames: a request, then a tool a frame. The next message is there before it ends.)
         check(busy.get("isError") and "still working" in busy["content"][0]["text"], f"one message at a time: {busy}")
+        check(tool("get_chat")["busy"] is True, "and Claude is said to be working")
+        service.gate.set()
+        service.gate = None
         chat = finish()
 
         kinds = [e["kind"] for e in chat["entries"]]
@@ -238,13 +247,25 @@ def main() -> int:
         check([e["kind"] for e in chat["entries"]] == ["note", "you", "claude"], "a new conversation")
         check(len(service.requests[-1][2]["messages"]) == 1, "which starts fresh for Claude too")
 
+        # A key corrected while the editor runs is the one used from then on.
+        with open(os.path.join(settings, "Giant", "claude_key.txt"), "w", encoding="utf-8") as file:
+            file.write("  " + NEW_KEY + "  \n\nnot the key\n")
+        service.replies = [message("end_turn", text("Hello again."))]
+        tool("chat_send", {"text": "With the new key."})
+        finish()
+        headers = service.requests[-1][1]
+        sent_key = headers.get("x-api-key", "") + headers.get("authorization", "")
+        check(NEW_KEY in sent_key and FILE_KEY not in sent_key, "the corrected key is used")
+
         # The service failing is said in the chat, and the editor carries on.
         service.replies = []
         tool("chat_send", {"text": "Once more."})
         chat = finish()
         check(chat["entries"][-1]["kind"] == "error", f"an error from the service is a line of the chat: {chat['entries'][-1]}")
         lines = tool("get_log", {"count": 200})["lines"]
-        check(not any(FILE_KEY in line["text"] for line in lines), "the key is never logged")
+        check(not any(FILE_KEY in line["text"] or NEW_KEY in line["text"] for line in lines), "the key is never logged")
+        everything = json.dumps(tool("get_chat", {"limit": 256}))
+        check(FILE_KEY not in everything and NEW_KEY not in everything, "nor in the chat")
 
         tool("quit_editor")
         code = editor.wait(timeout=TIMEOUT)
@@ -257,6 +278,7 @@ def main() -> int:
     finally:
         timer.cancel()
         service.server.shutdown()
+        shutil.rmtree(settings, ignore_errors=True)
     print("chat_smoke: all checks passed")
     return 0
 

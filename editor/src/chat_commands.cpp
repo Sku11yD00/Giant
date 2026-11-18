@@ -33,24 +33,22 @@ bool not_for_claude(std::string_view name) {
     return std::find(k_not_for_claude.begin(), k_not_for_claude.end(), name) != k_not_for_claude.end();
 }
 
-std::string lower(std::string_view text) {
-    std::string out(text);
-    for (char& c : out) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return out;
-}
+// Words that say nothing of what is looked for.
+constexpr std::array<std::string_view, 14> k_small_words = {"the", "and", "for", "with", "from", "into", "that",
+                                                            "this", "all", "any", "how", "can", "please", "command"};
 
-// The words of a search: letters and digits, lower case; a plural's "s" dropped
-// ("trees" finds "tree").
-std::vector<std::string> words_of(std::string_view text) {
+// The words of a text: letters and digits, lower case; a plural's "s" dropped
+// ("trees" finds "tree"). `searched`: without the words too short or too
+// common to find anything by.
+std::vector<std::string> words_of(std::string_view text, bool searched) {
     std::vector<std::string> words;
     std::string word;
     const auto end_word = [&] {
         if (word.size() > 3 && word.back() == 's') {
             word.pop_back();
         }
-        if (!word.empty()) {
+        const bool small = word.size() < 3 || std::find(k_small_words.begin(), k_small_words.end(), word) != k_small_words.end();
+        if (!word.empty() && !(searched && small)) {
             words.push_back(word);
         }
         word.clear();
@@ -81,32 +79,39 @@ ChatToolReply find_commands(const ai::CommandRegistry& registry, const Json& inp
     if (!input.contains("words") || !input["words"].is_string()) {
         return {false, "find_commands needs `words`: what to look for"};
     }
-    const std::vector<std::string> words = words_of(input["words"].get<std::string>());
+    const std::vector<std::string> words = words_of(input["words"].get<std::string>(), true);
     if (words.empty()) {
-        return {false, "`words` holds nothing to look for"};
+        return {false, "`words` holds nothing to look for (words of three letters or more, other than \"the\", \"and\" and the like)"};
     }
     usize limit = 20;
-    if (input.contains("limit") && input["limit"].is_number_integer()) {
-        limit = static_cast<usize>(std::clamp<long long>(input["limit"].get<long long>(), 1, static_cast<long long>(k_chat_most_found)));
+    if (input.contains("limit") && input["limit"].is_number()) {
+        limit = static_cast<usize>(std::clamp(input["limit"].get<double>(), 1.0, static_cast<double>(k_chat_most_found)));
     }
-    // A word in a command's name counts for more than one in its description.
+    // A word asked for is found where a word of the command starts with it
+    // ("rain" in "rain" and "rainfall", not in "terrain"). One in a command's
+    // name counts for more than one in its description.
     struct Found {
         int score = 0;
         usize index = 0;
     };
     std::vector<Found> found;
     const auto& commands = registry.commands();
+    const auto starts = [](const std::vector<std::string>& in, const std::string& word) {
+        return std::any_of(in.begin(), in.end(), [&word](const std::string& w) { return w.starts_with(word); });
+    };
+    usize searched = 0;
     for (usize i = 0; i < commands.size(); ++i) {
         if (not_for_claude(commands[i].name)) {
             continue;
         }
-        const std::string name = lower(commands[i].name);
-        const std::string description = lower(commands[i].description);
+        ++searched;
+        const std::vector<std::string> name = words_of(commands[i].name, false);
+        const std::vector<std::string> description = words_of(commands[i].description, false);
         int score = 0;
         for (const std::string& word : words) {
-            if (name.find(word) != std::string::npos) {
+            if (starts(name, word)) {
                 score += 4;
-            } else if (description.find(word) != std::string::npos) {
+            } else if (starts(description, word)) {
                 score += 1;
             }
         }
@@ -120,7 +125,7 @@ ChatToolReply find_commands(const ai::CommandRegistry& registry, const Json& inp
         const ai::CommandDesc& c = commands[found[i].index];
         list.push_back({{"name", c.name}, {"about", start_of(c.description)}, {"changes_nothing", c.read_only}});
     }
-    return {true, ai::to_json_text(Json{{"commands", std::move(list)}, {"matched", found.size()}, {"of", commands.size()}})};
+    return {true, ai::to_json_text(Json{{"commands", std::move(list)}, {"matched", found.size()}, {"of", searched}})};
 }
 
 ChatToolReply describe_command(const ai::CommandRegistry& registry, const Json& input) {
@@ -234,7 +239,7 @@ void register_chat_commands(ai::CommandRegistry& registry, EditorState& state) {
          "editor's own commands (its work is on the undo history like the person's). Returns at once; the answer "
          "and what Claude does arrive over the next seconds: read them with get_chat (`busy` is true until it is "
          "done). One message at a time. Needs the person's Claude key: the ANTHROPIC_API_KEY environment variable, "
-         "or the key file get_chat's error names; and the .NET runtime.",
+         "or the key file this command's error names when there is none; and the .NET runtime.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "required": ["text"],
              "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 20000,
                                      "description": "What to say to Claude."}}})"),
@@ -245,8 +250,9 @@ void register_chat_commands(ai::CommandRegistry& registry, EditorState& state) {
          "Reads the chat with Claude: the lines after serial `after`, oldest first. A line's `kind` is \"you\" (the "
          "person), \"claude\" (its words), \"tool\" (a tool it called: `tool` names it, `text` is the arguments), "
          "\"result\" (what came back; `ok`), \"note\" or \"error\". Pass the reply's `after` as the next call's to "
-         "read on. Also: `busy` (Claude is working), `key_found`, `model`, the tokens used so far, and `latest` and "
-         "`oldest` (the newest line's serial and the oldest kept; 2,000 are).",
+         "read on. Also: `busy` (Claude is working), `latest` and `oldest` (the newest line's serial and the oldest "
+         "kept; 2,000 are), `started` (false until the first message is sent), and once started `key_found`, "
+         "`model` and the tokens of the requests answered so far.",
          Json::parse(R"({"type": "object", "additionalProperties": false,
              "properties": {"after": {"type": "integer", "minimum": 0, "maximum": 9007199254740991,
                                       "description": "Read the lines after this serial (default 0: from the oldest kept)."},
@@ -257,7 +263,7 @@ void register_chat_commands(ai::CommandRegistry& registry, EditorState& state) {
     add(registry,
         {"stop_chat",
          "Stops Claude's work on the last chat message: no further commands are run (one running now finishes). "
-         "What it already did stays (undo takes it back).",
+         "What it already did stays (undo takes it back). The work ends a moment later: `busy` in get_chat says when.",
          Json{{"type", "object"}, {"additionalProperties", false}}, false,
          [ask](const Json& args, CommandContext&) { return ask("stop", args); }});
 

@@ -459,6 +459,11 @@ int run(const Options& options) {
     // The chat with Claude: its C# side starts with the first message.
     editor::ChatBridge chat(commands, [&scripts] { return scripts.host(); }, find_managed_dir());
     state.chat = &chat;
+    // (Gone from the state before it is destroyed: scripts' OnStop, which runs after, may ask for it.)
+    struct ChatGone {
+        editor::EditorState& state;
+        ~ChatGone() { state.chat = nullptr; }
+    } chat_gone{state};
     state.scripts_to_load = options.scripts;
     editor::TerrainBrushTool terrain_brush;
     // Records the scene and the panels into `target` (an sRGB image).
@@ -716,6 +721,7 @@ int run(const Options& options) {
         if (window->minimized()) {
             // Nothing to show: idle instead of spinning a CPU core.
             window->wait_events(100);
+            chat.update(); // (Claude's work goes on behind a minimised window)
             last_frame = std::chrono::steady_clock::now();
             phase_ms = {}; // minimised time is no frame's
             device_mark = device->counts();

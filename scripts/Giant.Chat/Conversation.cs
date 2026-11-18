@@ -57,6 +57,7 @@ internal sealed class Conversation
         public readonly Queue<Waiting> Tools = new();
         public CancellationTokenSource? Stop;
         public bool Busy;
+        public bool Stopping; // the person stopped the work on the last message (until it has ended)
     }
 
     private readonly Lock _lock = new();
@@ -68,6 +69,10 @@ internal sealed class Conversation
     private long _serial;
     private long _inputTokens;
     private long _outputTokens;
+    private int _working; // messages being worked on, a cleared conversation's last included
+
+    /// <summary>Whether any work is still ending (a stopped or cleared conversation's too): for tests.</summary>
+    internal bool Working => Volatile.Read(ref _working) != 0;
 
     /// <param name="connect">The client, or null while there is no key.</param>
     public Conversation(Func<AnthropicClient?> connect, IReadOnlyList<ToolSpec> tools, string system)
@@ -119,8 +124,12 @@ internal sealed class Conversation
     }
 
     /// <summary>Sends what the person wrote. Null when it went out, else why not.</summary>
-    public string? Send(string text)
+    public string? Send(string text) => Send(text, out _);
+
+    /// <summary>The same; <paramref name="serial"/> is the line the message became (read on from it).</summary>
+    public string? Send(string text, out long serial)
     {
+        serial = 0;
         if (string.IsNullOrWhiteSpace(text))
         {
             return "there is nothing to send";
@@ -133,7 +142,9 @@ internal sealed class Conversation
             talk = _talk;
             if (talk.Busy)
             {
-                return "Claude is still working on the last message (stop_chat stops it)";
+                return talk.Stopping
+                    ? "Claude is still stopping its work on the last message: try again in a moment (get_chat's `busy` says when)"
+                    : "Claude is still working on the last message (stop_chat stops it)";
             }
             client = _connect();
             if (client == null)
@@ -145,6 +156,7 @@ internal sealed class Conversation
             stop = talk.Stop.Token;
             talk.Messages.Add(new BetaUserMessageParam { Content = text });
             Add(talk, "you", text);
+            serial = _serial;
         }
         _ = Task.Run(() => RunAsync(client, talk, stop), CancellationToken.None);
         return null;
@@ -159,7 +171,8 @@ internal sealed class Conversation
             {
                 return false;
             }
-            _talk.Stop?.Cancel();
+            _talk.Stopping = true;
+            Cancel(_talk);
             return true;
         }
     }
@@ -169,10 +182,25 @@ internal sealed class Conversation
     {
         lock (_lock)
         {
-            _talk.Stop?.Cancel();
+            // (The new conversation first: whatever stopping the old one does, it is gone.)
+            Talk old = _talk;
             _talk = new Talk();
             _entries.Clear();
             Add(_talk, "note", "The conversation was cleared.");
+            old.Stopping = true;
+            Cancel(old);
+        }
+    }
+
+    // (Locked by the caller.) What waits on the stop is told at once, here; none of it may break the caller.
+    private static void Cancel(Talk talk)
+    {
+        try
+        {
+            talk.Stop?.Cancel();
+        }
+        catch (AggregateException)
+        {
         }
     }
 
@@ -188,7 +216,12 @@ internal sealed class Conversation
             while (_talk.Tools.Count > 0)
             {
                 Waiting waiting = _talk.Tools.Dequeue();
-                if (!waiting.Done.Task.IsCompleted) // (not one stopped while it waited)
+                if (_talk.Stopping)
+                {
+                    // (Stopped before its wait was set up to hear of it: not run all the same.)
+                    waiting.Done.TrySetCanceled();
+                }
+                else if (!waiting.Done.Task.IsCompleted) // (not one stopped while it waited)
                 {
                     waiting.Taken = true;
                     next = waiting;
@@ -273,6 +306,7 @@ internal sealed class Conversation
 
     private async Task RunAsync(AnthropicClient client, Talk talk, CancellationToken stop)
     {
+        Interlocked.Increment(ref _working);
         try
         {
             for (int step = 0; ; ++step)
@@ -292,10 +326,23 @@ internal sealed class Conversation
                 // (Before anything of the reply is used: a declined reply's content is not to be kept.)
                 if (reply.StopReason == BetaStopReason.Refusal)
                 {
-                    Note(talk, "error", "Claude declined to answer this." + Why(reply));
+                    if (step == 0)
+                    {
+                        // The message that was declined is taken back, or it would go out again,
+                        // and be declined again, with every later one.
+                        lock (_lock)
+                        {
+                            talk.Messages.RemoveAt(talk.Messages.Count - 1);
+                        }
+                        Note(talk, "error", "Claude declined to answer this, and the message was taken back: Claude will not remember it." + Why(reply));
+                    }
+                    else
+                    {
+                        Note(talk, "error", "Claude declined to go on with this." + Why(reply) +
+                                            " If it declines the next message too, clear the chat (clear_chat) and start again.");
+                    }
                     break;
                 }
-                bool cut = reply.StopReason == BetaStopReason.MaxTokens;
                 List<BetaContentBlockParam> said = [];
                 List<BetaToolUseBlock> asked = [];
                 StringBuilder words = new();
@@ -315,8 +362,11 @@ internal sealed class Conversation
                     BetaContentBlock block = reply.Content[i];
                     if (block.TryPickText(out BetaTextBlock? text))
                     {
-                        said.Add(new BetaTextBlockParam { Text = text.Text });
-                        words.Append(text.Text);
+                        if (!string.IsNullOrWhiteSpace(text.Text)) // (an empty one may not be handed back)
+                        {
+                            said.Add(new BetaTextBlockParam { Text = text.Text });
+                            words.Append(text.Text);
+                        }
                     }
                     else if (block.TryPickFallback(out BetaFallbackBlock? fallback))
                     {
@@ -348,22 +398,31 @@ internal sealed class Conversation
                 {
                     Note(talk, "claude", words.ToString());
                 }
-                if (cut)
+                bool whole = reply.StopReason == BetaStopReason.ToolUse;
+                if (asked.Count > 0 && !whole)
                 {
-                    // (A tool's arguments may be cut short too: none is run, and the reply is not kept.)
-                    Note(talk, "error", "Claude's answer was cut off at its length limit. Ask for it in smaller parts.");
+                    // Cut short (the length limit, or anything else that is not Claude asking for
+                    // its tools): a tool's arguments may be cut short too. None is run, and the
+                    // reply is not kept (a call kept must be answered).
+                    Note(talk, "error", "Claude's answer was cut off before it finished. Ask for it in smaller parts.");
                     break;
                 }
-                if (said.Count == 0)
+                if (words.Length == 0 && asked.Count == 0)
                 {
+                    // Nothing to keep (a reply of thoughts alone may not be handed back).
+                    Note(talk, "note", "Claude had nothing to say.");
                     break;
-                }
-                lock (_lock)
-                {
-                    talk.Messages.Add(new BetaAssistantMessageParam { Content = said });
                 }
                 if (asked.Count == 0)
                 {
+                    lock (_lock)
+                    {
+                        talk.Messages.Add(new BetaAssistantMessageParam { Content = said });
+                    }
+                    if (reply.StopReason == BetaStopReason.MaxTokens)
+                    {
+                        Note(talk, "note", "Claude's answer reached its length limit. Say \"go on\" for the rest.");
+                    }
                     break;
                 }
                 // Every tool asked for is answered, in one message, or the next request is refused.
@@ -397,11 +456,13 @@ internal sealed class Conversation
                     }
                     string given = answer.Text.Length <= MostResultChars
                         ? answer.Text
-                        : string.Concat(answer.Text.AsSpan(0, MostResultChars), "\n(cut: the result was longer; ask for less at once)");
+                        : string.Concat(Start(answer.Text, MostResultChars), "\n(cut: the result was longer; ask for less at once)");
                     results.Add(new BetaToolResultBlockParam { ToolUseID = use.ID, Content = given, IsError = !answer.Ok });
                 }
+                // Claude's reply and the answers to it, together or not at all.
                 lock (_lock)
                 {
+                    talk.Messages.Add(new BetaAssistantMessageParam { Content = said });
                     talk.Messages.Add(new BetaUserMessageParam { Content = results });
                 }
                 if (stopped)
@@ -411,17 +472,22 @@ internal sealed class Conversation
                 }
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
         {
             Note(talk, "note", "Stopped.");
         }
+        catch (OperationCanceledException)
+        {
+            Note(talk, "error", "Claude's service took too long to answer. Try again.");
+        }
         catch (AnthropicUnauthorizedException)
         {
-            Note(talk, "error", "Claude's service did not accept the key. Check " + Keys.Variable + " (or " + Keys.FilePath() + ").");
+            Note(talk, "error", "Claude's service did not accept the key. Check " + Keys.Variable + " (or " + Keys.FilePath() +
+                                "); a corrected key file is read with the next message.");
         }
         catch (AnthropicRateLimitException)
         {
-            Note(talk, "error", "Claude's service is asking to slow down (the key's rate limit). Try again in a little while.");
+            Note(talk, "error", "Claude's service says this key has reached its rate limit for now. Try again in a little while.");
         }
         catch (AnthropicApiException e)
         {
@@ -436,9 +502,11 @@ internal sealed class Conversation
             lock (_lock)
             {
                 talk.Busy = false;
+                talk.Stopping = false;
                 talk.Stop?.Dispose();
                 talk.Stop = null;
             }
+            Interlocked.Decrement(ref _working);
         }
     }
 
@@ -501,7 +569,11 @@ internal sealed class Conversation
         reply.StopDetails is { Explanation: { Length: > 0 } explanation } ? " " + explanation : "";
 
     private static string Shown(string text) =>
-        text.Length <= MostShownChars ? text : string.Concat(text.AsSpan(0, MostShownChars), " …");
+        text.Length <= MostShownChars ? text : string.Concat(Start(text, MostShownChars), " …");
+
+    // The first `most` characters, not through the middle of one (a surrogate pair).
+    private static ReadOnlySpan<char> Start(string text, int most) =>
+        text.AsSpan(0, char.IsHighSurrogate(text[most - 1]) ? most - 1 : most);
 
     private void Note(Talk talk, string kind, string text, string? tool = null, bool ok = true)
     {

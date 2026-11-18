@@ -23,6 +23,8 @@ internal sealed class FakeService : HttpMessageHandler
     public TaskCompletionSource? Hold;
     /// <summary>Answers every request the same way once the replies run out.</summary>
     public string? Always;
+    /// <summary>When set, the next request fails with it instead of being answered.</summary>
+    public Exception? Throw;
 
     public void Reply(string body, HttpStatusCode status = HttpStatusCode.OK)
     {
@@ -77,6 +79,11 @@ internal sealed class FakeService : HttpMessageHandler
             {
                 reply = (HttpStatusCode.InternalServerError, "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"no reply was set up\"}}");
             }
+        }
+        if (Throw is { } thrown)
+        {
+            Throw = null;
+            throw thrown;
         }
         if (Hold is { } hold)
         {
@@ -252,7 +259,7 @@ internal static class Program
         (Conversation c, FakeService service) = Make();
         service.Hold = new TaskCompletionSource();
         service.Reply(Message("end_turn", Text("One.")));
-        Check(c.Send("first") == null, "the first goes out");
+        Check(c.Send("first", out long serial) == null && serial == 1, "the first goes out, as line 1");
         string? error = c.Send("second");
         Check(error != null && error.Contains("still working", StringComparison.Ordinal), "the second waits its turn: " + error);
         service.Hold.SetResult();
@@ -272,12 +279,57 @@ internal static class Program
         c.Send("something else");
         Check(Finish(c) && Kinds(c) == "you error you claude", "the conversation goes on: " + Kinds(c));
         JsonElement messages = service.Request(1).GetProperty("messages");
-        bool onlyThePerson = true;
-        foreach (JsonElement m in messages.EnumerateArray())
-        {
-            onlyThePerson &= m.GetProperty("role").GetString() == "user";
-        }
-        Check(onlyThePerson && messages.GetArrayLength() == 2, "without the declined reply");
+        Check(messages.GetArrayLength() == 1 && messages[0].GetProperty("role").GetString() == "user" &&
+              messages[0].GetProperty("content").ToString().Contains("something else", StringComparison.Ordinal),
+              "without the declined reply, and without the message that was declined (it would be declined again)");
+
+        // Declined part way through the work: what was done stays said, and the person is told what to do if it goes on.
+        service.Reply(Message("tool_use", Use("toolu_1", "run_command", "{\"name\":\"a\"}")));
+        service.Reply(Message("refusal"));
+        service.Reply(Message("end_turn", Text("Yes.")));
+        c.Send("a third thing");
+        Check(Finish(c) && Lines(c)[^1].Kind == "error" && Lines(c)[^1].Text.Contains("clear", StringComparison.Ordinal), "declined after a tool: " + Lines(c)[^1].Text);
+        c.Send("and now?");
+        Check(Finish(c) && Lines(c)[^1].Text == "Yes.", "the next message is answered");
+        messages = service.Request(service.Requests - 1).GetProperty("messages");
+        Check(messages.GetArrayLength() == 6 && messages[4].GetProperty("content")[0].GetProperty("tool_use_id").GetString() == "toolu_1" &&
+              messages[5].GetProperty("content").ToString().Contains("and now?", StringComparison.Ordinal), "with the tool's call and its answer kept together");
+    }
+
+    private static void RepliesThatCannotBeKept()
+    {
+        // Thoughts alone, or a text with nothing in it: nothing to hand back.
+        (Conversation c, FakeService service) = Make();
+        service.Reply(Message("end_turn", "{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"sig\"}", Text("  ")));
+        c.Send("hm");
+        Check(Finish(c) && Kinds(c) == "you note" && Lines(c)[1].Text.Contains("nothing to say", StringComparison.Ordinal), "the person is told: " + Kinds(c));
+        service.Reply(Message("end_turn"));
+        c.Send("hm?");
+        Check(Finish(c) && Kinds(c) == "you note you note", "a reply of nothing at all too: " + Kinds(c));
+        Check(service.Request(1).GetProperty("messages").GetArrayLength() == 2, "neither was kept");
+        // An empty text beside real content is left out of what is handed back.
+        service.Reply(Message("tool_use", Text(""), Text("Looking."), Use("toolu_1", "run_command", "{\"name\":\"a\"}")));
+        service.Reply(Message("end_turn", Text("Done.")));
+        c.Send("go");
+        Check(Finish(c), "the work ends");
+        JsonElement said = service.Request(service.Requests - 1).GetProperty("messages")[3].GetProperty("content");
+        Check(said.GetArrayLength() == 2 && said[0].GetProperty("text").GetString() == "Looking.", "the empty text is not handed back");
+        // Tools asked for by a reply that did not end by asking for them (cut short some other way): not run.
+        service.Reply(Message("model_context_window_exceeded", Use("toolu_2", "run_command", "{\"name\":\"b\"}")));
+        int ran = 0;
+        c.Send("more");
+        Check(Finish(c, (_, _) => { ++ran; return new ToolReply(true, "{}"); }) && ran == 0 && Lines(c)[^1].Kind == "error", "a reply cut short some other way runs nothing");
+        // Words cut at the length limit are kept, so "go on" has something to go on from.
+        service.Reply(Message("max_tokens", Text("Once upon a")));
+        service.Reply(Message("end_turn", Text(" time.")));
+        c.Send("a story");
+        Check(Finish(c) && Lines(c)[^1].Kind == "note" && Lines(c)[^1].Text.Contains("go on", StringComparison.Ordinal), "cut words: the person is told how to get the rest");
+        int before = service.Requests;
+        c.Send("go on");
+        Check(Finish(c), "answered");
+        JsonElement messages = service.Request(before).GetProperty("messages");
+        Check(messages[messages.GetArrayLength() - 2].GetProperty("role").GetString() == "assistant" &&
+              messages[messages.GetArrayLength() - 2].GetProperty("content").ToString().Contains("Once upon a", StringComparison.Ordinal), "and Claude has what it wrote");
     }
 
     private static void ACutOffReplyRunsNothing()
@@ -325,6 +377,12 @@ internal static class Program
         Check(Until(() => service.Requests == 1), "the request is out");
         c.Stop();
         Check(Until(() => !c.Busy) && Kinds(c) == "you note", "it stops: " + Kinds(c));
+        service.Hold = null;
+        service.Reply(Message("end_turn", Text("Now.")));
+        c.Send("and now");
+        Check(Finish(c) && Lines(c)[^1].Text == "Now.", "the next message is answered");
+        JsonElement after = service.Request(service.Requests - 1).GetProperty("messages");
+        Check(after.GetArrayLength() == 2 && after[1].GetProperty("role").GetString() == "user", "with nothing of the stopped request's answer");
     }
 
     private static void AToolBeingRunIsNotStopped()
@@ -380,6 +438,14 @@ internal static class Program
         Check(service.Requests == Conversation.MostSteps, "after the most steps: " + service.Requests);
         var lines = Lines(c, 0, 256);
         Check(lines[^1].Kind == "note" && lines[^1].Text.Contains("go on", StringComparison.Ordinal), "and the person is told how to let it go on");
+        service.Always = null;
+        service.Reply(Message("end_turn", Text("Finished.")));
+        c.Send("go on");
+        Check(Finish(c) && Lines(c, 0, 256)[^1].Text == "Finished.", "which it then does");
+        JsonElement messages = service.Request(service.Requests - 1).GetProperty("messages");
+        int count = messages.GetArrayLength();
+        Check(count == 2 + 2 * Conversation.MostSteps && messages[count - 2].GetProperty("content")[0].GetProperty("type").GetString() == "tool_result" &&
+              messages[count - 3].GetProperty("role").GetString() == "assistant", "every call of the forty answered before the new message: " + count);
     }
 
     private static void ClearingStartsAfresh()
@@ -397,26 +463,50 @@ internal static class Program
         Check(Kinds(c) == "note you claude", "only the new lines are kept: " + Kinds(c));
         JsonElement messages = service.Request(service.Requests - 1).GetProperty("messages");
         Check(messages.GetArrayLength() == 1 && messages[0].GetProperty("content").ToString().Contains("second", StringComparison.Ordinal), "and only the new message is sent");
-        Thread.Sleep(50); // (the old work has ended by now: it adds nothing)
+        Check(Until(() => !c.Working), "the old conversation's work ends");
         Check(Kinds(c) == "note you claude", "the old work adds nothing: " + Kinds(c));
     }
 
     private static void TheServicesErrorsAreSaid()
     {
         (Conversation c, FakeService service) = Make();
-        service.Reply("{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}", HttpStatusCode.Unauthorized);
+        service.Reply("{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"no\"}}", HttpStatusCode.Unauthorized);
         c.Send("hi");
-        Check(Finish(c) && Kinds(c) == "you error" && Lines(c)[1].Text.Contains("key", StringComparison.Ordinal), "a refused key: " + Lines(c)[^1].Text);
-        Check(!Lines(c)[1].Text.Contains("test-key", StringComparison.Ordinal), "the key itself is never shown");
-        service.Reply("{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}", HttpStatusCode.TooManyRequests);
+        Check(Finish(c) && Kinds(c) == "you error" && Lines(c)[1].Text.Contains("did not accept the key", StringComparison.Ordinal), "a refused key: " + Lines(c)[^1].Text);
+        service.Reply("{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"no\"}}", HttpStatusCode.TooManyRequests);
         c.Send("hi");
-        Check(Finish(c) && Lines(c)[^1].Kind == "error" && Lines(c)[^1].Text.Contains("slow down", StringComparison.Ordinal), "a rate limit: " + Lines(c)[^1].Text);
+        Check(Finish(c) && Lines(c)[^1].Kind == "error" && Lines(c)[^1].Text.Contains("rate limit", StringComparison.Ordinal), "a rate limit: " + Lines(c)[^1].Text);
+        // The service not answering in time is not the person stopping the work.
+        service.Throw = new TaskCanceledException("timed out", new TimeoutException());
+        c.Send("hi");
+        Check(Finish(c) && Lines(c)[^1].Kind == "error" && Lines(c)[^1].Text.Contains("too long", StringComparison.Ordinal), "no answer in time: " + Lines(c)[^1].Text);
+        service.Throw = new HttpRequestException("no route to host");
+        c.Send("hi");
+        Check(Finish(c) && Lines(c)[^1].Kind == "error" && Lines(c)[^1].Text.Contains("could not be reached", StringComparison.Ordinal), "no connection: " + Lines(c)[^1].Text);
+        // An error after a tool ran: the call and its answer were kept together.
+        service.Reply(Message("tool_use", Use("toolu_9", "run_command", "{\"name\":\"a\"}")));
+        service.Reply("{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"boom\"}}", HttpStatusCode.InternalServerError);
+        c.Send("hi");
+        Check(Finish(c) && Lines(c)[^1].Kind == "error", "an error part way through");
+        foreach ((string kind, string text, _, _) in Lines(c))
+        {
+            Check(!text.Contains("test-key", StringComparison.Ordinal), "the key itself is never shown (" + kind + ")");
+        }
         service.Reply("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}", (HttpStatusCode)529);
         c.Send("hi");
         Check(Finish(c) && Lines(c)[^1].Kind == "error", "an overloaded service: " + Lines(c)[^1].Text);
         service.Reply(Message("end_turn", Text("Back.")));
         c.Send("hi");
         Check(Finish(c) && Lines(c)[^1].Text == "Back.", "and the conversation goes on after");
+        JsonElement messages = service.Request(service.Requests - 1).GetProperty("messages");
+        int count = messages.GetArrayLength();
+        bool answered = false;
+        for (int i = 0; i + 1 < count; ++i)
+        {
+            answered |= messages[i].GetProperty("role").GetString() == "assistant" && messages[i].GetProperty("content")[0].GetProperty("id").GetString() == "toolu_9" &&
+                        messages[i + 1].GetProperty("content")[0].GetProperty("tool_use_id").GetString() == "toolu_9";
+        }
+        Check(answered, "with the tool's call still followed by its answer");
     }
 
     private static void LongResultsAreCut()
@@ -429,6 +519,31 @@ internal static class Program
         string given = service.Request(1).GetProperty("messages")[2].GetProperty("content")[0].GetProperty("content").ToString();
         Check(given.Length < Conversation.MostResultChars + 200 && given.Contains("(cut", StringComparison.Ordinal), "Claude gets the start, and is told it was cut: " + given.Length);
         Check(Lines(c)[2].Text.Length <= Conversation.MostShownChars + 2, "the line kept for reading is shorter still");
+    }
+
+    private static void OnlyTheNewestLinesAreKept()
+    {
+        (Conversation c, FakeService service) = Make();
+        service.Always = Message("end_turn", Text("yes"));
+        int rounds = Conversation.MostEntries / 2 + 5;
+        for (int i = 0; i < rounds; ++i)
+        {
+            c.Send("q");
+            if (!Finish(c))
+            {
+                Check(false, "answered");
+                return;
+            }
+        }
+        using JsonDocument read = JsonDocument.Parse(c.Read(0, 3, true));
+        JsonElement root = read.RootElement;
+        Check(root.GetProperty("latest").GetInt64() == 2 * rounds && root.GetProperty("oldest").GetInt64() == 2 * rounds - Conversation.MostEntries + 1, "the oldest kept moves on");
+        Check(root.GetProperty("entries")[0].GetProperty("serial").GetInt64() == root.GetProperty("oldest").GetInt64() && root.GetProperty("after").GetInt64() == root.GetProperty("oldest").GetInt64() + 2,
+              "reading from before it starts at it");
+        c.Clear();
+        using JsonDocument cleared = JsonDocument.Parse(c.Read(5, 64, true));
+        Check(cleared.RootElement.GetProperty("entries").GetArrayLength() == 1 && cleared.RootElement.GetProperty("oldest").GetInt64() == 2 * rounds + 1 &&
+              cleared.RootElement.GetProperty("after").GetInt64() == 2 * rounds + 1, "a reader from before a clear reads on into the new conversation");
     }
 
     private static void ReadingByCursor()
@@ -462,6 +577,8 @@ internal static class Program
             ("one message at a time", OneMessageAtATime),
             ("a declined request is not kept", ADeclinedRequestIsNotKept),
             ("a cut off reply runs nothing", ACutOffReplyRunsNothing),
+            ("replies that cannot be kept", RepliesThatCannotBeKept),
+            ("only the newest lines are kept", OnlyTheNewestLinesAreKept),
             ("stopping leaves the conversation whole", StoppingLeavesTheConversationWhole),
             ("a tool being run is not stopped", AToolBeingRunIsNotStopped),
             ("another model taking over", AnotherModelTakingOver),

@@ -46,11 +46,14 @@ It needs two things:
   environment variable before starting the editor, or put the key alone on
   the first line of a text file: `%APPDATA%\Giant\claude_key.txt` on
   Windows (`~/.config/Giant/claude_key.txt` on Linux). The file is read
-  when you send a message, so the editor need not be restarted. The key is
-  only ever read from those two places: it is not in the project, not in
-  saved scenes, not in the log, and no game made with the engine contains
-  the chat at all. Using the chat is paid for by that key, by the amount
-  of text sent and received (`get_chat` counts the tokens).
+  with every message you send, so the editor need not be restarted for a
+  new or corrected key. The key is only ever read from those two places:
+  it is not in the project, not in saved scenes, not in the log, and no
+  game made with the engine contains the chat at all. It is sent only to
+  Claude's service (unless you set `ANTHROPIC_BASE_URL`, which points the
+  chat at another address). Using the chat is paid for by that key, by the
+  amount of text sent and received (`get_chat` counts the tokens, roughly:
+  see your usage in the Claude Console for the bill).
 - **The .NET 10 runtime**, as C# scripts do.
 
 For now the chat is its commands (the panel is the next part):
@@ -58,8 +61,8 @@ For now the chat is its commands (the panel is the next part):
 | Command | What it does |
 | --- | --- |
 | `chat_send` | Sends `text` to Claude. Returns at once; the answer and what Claude does arrive over the next seconds |
-| `get_chat` | The conversation's lines after serial `after` (at most `limit`, 1 to 256, default 64), oldest first: `kind` is `you`, `claude`, `tool` (a tool Claude called: `tool` names it, `text` is its arguments), `result` (what came back, with `ok`), `note` or `error`. Also `busy` (Claude is working), `started`, `key_found`, `model`, `input_tokens` and `output_tokens` so far, and `after` (pass it to the next call), `latest` and `oldest` (2,000 lines are kept) |
-| `stop_chat` | Stops Claude's work on the last message: no further commands run. What it already did stays (undo takes it back) |
+| `get_chat` | The conversation's lines after serial `after` (at most `limit`, 1 to 256, default 64), oldest first: `kind` is `you`, `claude`, `tool` (a tool Claude called: `tool` names it, `text` is its arguments), `result` (what came back, with `ok`), `note` or `error`. Also `busy` (Claude is working), `after` (pass it to the next call), `latest` and `oldest` (2,000 lines are kept), `started` (false until the first message is sent) and, once started, `key_found`, `model`, `input_tokens` and `output_tokens` so far |
+| `stop_chat` | Stops Claude's work on the last message: no further commands run (one running now finishes). What it already did stays (undo takes it back). The work ends a moment later: `busy` says when |
 | `clear_chat` | Forgets the conversation; the next message starts a new one |
 
 Claude does not get the several hundred commands as a list. It has three

@@ -33,6 +33,7 @@ public static unsafe class Native
     private static NativeChatApi s_api;
     private static Conversation? s_conversation;
     private static AnthropicClient? s_client;
+    private static string? s_key; // the key s_client was made for
     private static byte* s_reply; // the last Ask's answer, kept until the next
     private static long s_looked; // when a key was last looked for, for reading
     private static bool s_everLooked;
@@ -134,8 +135,9 @@ public static unsafe class Native
             case "send":
             {
                 string text = root.TryGetProperty("text", out JsonElement t) ? t.GetString() ?? "" : "";
-                string? error = s_conversation.Send(text);
-                return error == null ? (true, s_conversation.Read(long.MaxValue, 0, true)) : (false, error);
+                string? error = s_conversation.Send(text, out long serial);
+                // (`after` is the message's own line: reading on from it misses nothing.)
+                return error == null ? (true, s_conversation.Read(serial, 0, true)) : (false, error);
             }
             case "read":
             {
@@ -153,12 +155,18 @@ public static unsafe class Native
         }
     }
 
-    // The client, made when a key is first found (so a key file written
-    // while the editor runs is picked up).
+    // The client for the key there is now: looked for with every message, so
+    // a key given, or corrected, while the editor runs is the one used.
     private static AnthropicClient? Connect()
     {
-        if (s_client == null && Keys.Find() is { } key)
+        string? key = Keys.Find();
+        if (key == null)
         {
+            return s_client; // (the last key that was found, if its file has gone since)
+        }
+        if (s_client == null || key != s_key)
+        {
+            s_key = key;
             s_client = new AnthropicClient { ApiKey = key };
         }
         return s_client;

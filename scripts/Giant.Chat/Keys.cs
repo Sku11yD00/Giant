@@ -17,7 +17,7 @@ internal static class Keys
     {
         // (On Windows %APPDATA% first: it is where the person would look, and what a test can point elsewhere.)
         string? roaming = OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("APPDATA") : null;
-        string folder = string.IsNullOrEmpty(roaming) ? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) : roaming;
+        string folder = string.IsNullOrEmpty(roaming) ? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData, Environment.SpecialFolderOption.DoNotVerify) : roaming;
         return folder.Length == 0 ? "" : Path.Combine(folder, "Giant", "claude_key.txt");
     }
 

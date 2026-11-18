@@ -5,13 +5,14 @@
     <RootNamespace>Giant.Chat</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDynamicLoading>true</EnableDynamicLoading>
-    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
-    <ServerGarbageCollection>false</ServerGarbageCollection>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup>
     <!-- Listed in third_party/README.md, with what it brings along. -->
     <PackageReference Include="Anthropic" Version="[13.10.0]" />
     <InternalsVisibleTo Include="ChatTests" />
+    <!-- The SDK's licence goes wherever the SDK does (the editor download). -->
+    <None Include="licenses/Microsoft.Extensions.AI.Abstractions.LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(NuGetPackageRoot)anthropic/13.10.0/LICENSE" Link="licenses/Anthropic.LICENSE.txt" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 </Project>

@@ -19,7 +19,8 @@ pinned to an exact version and listed here before it is used.
 
 The editor's chat with Claude (`scripts/Giant.Chat`, C#; the editor only,
 never part of a game) takes these from NuGet, pinned by exact version and
-by the content hashes in `packages.lock.json`:
+by the content hashes in `packages.lock.json`. Their licence texts go
+with them (`managed/chat/licenses`):
 
 | Library | Version | Licence | Used by | Added in |
 | --- | --- | --- | --- | --- |
