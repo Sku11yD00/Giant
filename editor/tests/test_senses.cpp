@@ -173,6 +173,7 @@ GIANT_TEST("senses: thousands are gone through a share a frame and each hears on
     Json batch = Json::array();
     for (int i = 0; i < 3000; ++i) batch.push_back({{"look", "villager"}, {"position", at(10.0 + (i % 100), 0, i / 100)}});
     GIANT_CHECK(f.run("create_people", {{"people", batch}}).ok);
+    GIANT_CHECK(f.senses.settings.looked_a_frame == 512); // (the default: 4,096 cost 0.6 ms a frame)
     f.senses.settings.looked_a_frame = 500;
     f.frames();
     GIANT_CHECK(f.senses.noise({0, 0, 0}, 100.0f, PeopleSenses::Kind::blast));

@@ -325,22 +325,33 @@ GIANT_TEST("animation: an animated entity draws its own posed copy; frozen ones 
     f.frame_step(1.0 / 60.0); // the cell drawn again with it
     a = f.animation->find(arm);
     GIANT_CHECK(a != nullptr && mesh_of(arm) == a->copy && mesh_of(still) == mesh->id);
-    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 1);
+    // Its geometry went up with the import (the file's source, never drawn): the copy shares it,
+    // so the first one animated sends none in its frame.
+    GIANT_CHECK(mesh->skin_sources.size() == 1 && f.renderer->skinned(mesh->skin_sources[0]) &&
+                mesh->skin_sources[0] != a->copy);
+    GIANT_CHECK(f.renderer->mesh(a->copy) == f.renderer->mesh(mesh->skin_sources[0]));
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 2); // the source and the copy
 
     // Stopped: back to the file's mesh, the copy gone from the renderer.
     const render::MeshId copy = a->copy;
     GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", ""}}).ok);
     f.frame_step(0.0);
     GIANT_CHECK(mesh_of(arm) == mesh->id && !f.renderer->skinned(copy) && f.renderer->mesh(copy) == nullptr);
+    GIANT_CHECK(f.renderer->skinned(mesh->skin_sources[0])); // the source stays for the next
 
     // Reimported: copied again from the new file.
     GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", "bend"}}).ok);
     const std::shared_ptr<const MeshLibrary::Skinned> before = f.animation->find(arm)->skinned;
+    const geometry::ClusterMesh* old_geometry = f.renderer->mesh(mesh->skin_sources[0]);
     GIANT_CHECK(f.meshes->reload(f.arm).mesh != nullptr);
     for (int i = 0; i < 4; ++i) f.frame_step(1.0 / 60.0);
     a = f.animation->find(arm);
+    // (The old file's source went with it; the new one's is what the new copy shares.)
     GIANT_CHECK(a != nullptr && a->skinned != before && a->skinned == f.meshes->find(f.arm)->skinned &&
-                f.renderer->skinned(a->copy) && f.renderer->last_stats().skinned_meshes == 1);
+                f.renderer->skinned(a->copy) && f.renderer->last_stats().skinned_meshes == 2);
+    const MeshLibrary::Mesh* again = f.meshes->find(f.arm);
+    GIANT_CHECK(again->skin_sources.size() == 1 && f.renderer->mesh(a->copy) == f.renderer->mesh(again->skin_sources[0]) &&
+                f.renderer->mesh(a->copy) != old_geometry);
 }
 
 GIANT_TEST("animation: set_animation always takes over from a command; once backwards starts at the end") {
@@ -410,7 +421,7 @@ GIANT_TEST("animation: copies on the renderer: frozen ones draw the rest pose, e
     GIANT_CHECK(f.animation->animated() == 64 && f.animation->frozen() == 1 && f.animation->copies().size() == 64);
     GIANT_CHECK(mesh_of(ids[64]) == mesh->id); // frozen: the file's rest pose
     GIANT_CHECK(mesh_of(ids[10]) == f.animation->find(ids[10])->copy);
-    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 64);
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 65); // (and the file's source)
 
     // Held: a pose that does not change is not sent again (its shadows stay).
     GIANT_CHECK(f.run("set_animation", {{"id", ids[0]}, {"clip", "bend"}, {"loop", false}}).ok);
@@ -600,15 +611,36 @@ GIANT_TEST("animation: copies of one file share its geometry, whichever uploaded
                 f.renderer->mesh(copy_of(late)) == f.renderer->mesh(copy_of(ids[1])));
     for (int i = 0; i < 8 && !f.get(late)["drawn"].get<bool>(); ++i) f.frame_step(1.0 / 60.0);
     GIANT_CHECK(f.get(late)["drawn"].get<bool>());
-    // All stopped, then one again: uploaded afresh.
+    // All stopped: only the file's source is left; then one again, a copy of it.
     for (const world::EntityId id : {ids[1], ids[2], late}) {
         GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", ""}}).ok);
     }
     f.frame_step(0.0);
-    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 0);
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 1);
     GIANT_CHECK(f.run("set_animation", {{"id", ids[1]}, {"clip", "bend"}}).ok);
     f.frame_step(0.0);
     GIANT_CHECK(f.renderer->skinned(copy_of(ids[1])));
+
+    // A file whose source the renderer refused (none kept): the first one animated uploads its
+    // geometry itself, the next shares that, and the last to stop takes it away.
+    for (const world::EntityId id : {ids[1], ids[2], late}) {
+        GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", ""}}).ok);
+    }
+    f.frame_step(0.0);
+    MeshLibrary::Mesh* refused = const_cast<MeshLibrary::Mesh*>(f.meshes->find(f.arm));
+    for (const render::MeshId source : refused->skin_sources) f.renderer->remove_mesh(source);
+    refused->skin_sources.clear();
+    f.frame_step(0.0);
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 0);
+    GIANT_CHECK(f.run("set_animation", {{"id", ids[1]}, {"clip", "bend"}}).ok);
+    GIANT_CHECK(f.run("set_animation", {{"id", ids[2]}, {"clip", "bend"}}).ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(f.renderer->skinned(copy_of(ids[1])) && f.renderer->skinned(copy_of(ids[2])) &&
+                f.renderer->mesh(copy_of(ids[1])) == f.renderer->mesh(copy_of(ids[2])));
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 2);
+    for (const world::EntityId id : {ids[1], ids[2]}) GIANT_CHECK(f.run("set_animation", {{"id", id}, {"clip", ""}}).ok);
+    f.frame_step(0.0);
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 0);
 }
 
 GIANT_TEST("animation: LOD poses near characters every frame, far ones a few times a second, within a budget") {
@@ -1444,7 +1476,8 @@ GIANT_TEST("mesh parts: a file with two materials is drawn part by part, each wi
     if (a == nullptr || now.size() != 2) return;
     GIANT_CHECK(now[0].first == a->copy && now[0].second.base_color == Vec3(1.0f, 0.0f, 0.0f));
     GIANT_CHECK(now[1].first == a->part_copies[0] && now[1].second.base_color == Vec3(0.8f, 0.8f, 0.8f));
-    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 2);
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 4); // a source and a copy a part
+    GIANT_CHECK(f.meshes->find(f.arm)->skin_sources.size() == 2);
     GIANT_CHECK(f.animation->part_copies().count(arm) == 1);
     // Each part's copy takes the whole's morph targets (the one set of weights fits them all).
     GIANT_CHECK(f.renderer->morph_targets(a->copy) == whole.size() && f.renderer->morph_targets(a->part_copies[0]) == whole.size());
@@ -1454,7 +1487,7 @@ GIANT_TEST("mesh parts: a file with two materials is drawn part by part, each wi
     GIANT_CHECK(f.run("set_animation", {{"id", other}, {"clip", "bend"}}).ok);
     for (int i = 0; i < 8 && !f.get(other)["drawn"].get<bool>(); ++i) f.frame_step(1.0 / 60.0);
     f.frame_step(1.0 / 60.0);
-    GIANT_CHECK(drawn().size() == 4 && f.renderer->last_stats().skinned_meshes == 4);
+    GIANT_CHECK(drawn().size() == 4 && f.renderer->last_stats().skinned_meshes == 6);
     const render::MeshId first = a->copy;
     const render::MeshId second = a->part_copies[0];
     GIANT_CHECK(f.run("set_animation", {{"id", arm}, {"clip", ""}}).ok);
@@ -1495,8 +1528,9 @@ GIANT_TEST("mesh parts: a file with two materials is drawn part by part, each wi
     GIANT_CHECK(b != nullptr && now.size() == 2 && f.animation->part_copies().count(other) == 0);
     if (b == nullptr || mesh == nullptr || now.size() != 2) return;
     GIANT_CHECK(b->part_copies.empty() && now[0].first == mesh->id && now[1].first == b->copy);
-    // (Mesh ids are used again: the old copies are gone when nothing but the one new copy is skinned.)
-    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 1);
+    // (Mesh ids are used again: the old copies and sources are gone when nothing but the new
+    // file's one source and its one copy is skinned.)
+    GIANT_CHECK(f.renderer->last_stats().skinned_meshes == 2 && mesh->skin_sources.size() == 1);
     for (const render::MeshId old : {old_copy, old_part_copy}) GIANT_CHECK(old == b->copy || !f.renderer->skinned(old));
     for (const auto& [id, material] : now) GIANT_CHECK(id != old_parts[0] && id != old_parts[1]);
     // And back to two: in parts again, a copy a part.

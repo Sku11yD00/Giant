@@ -3,7 +3,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gate_common import frame_stats, hitch_limit, slow_frames  # noqa: E402
+from gate_common import frame_stats, held_by_window, hitch_limit, slow_frames, without_held  # noqa: E402
 
 
 def frame(ms, cpu, **phases):
@@ -57,6 +57,32 @@ def main():
                          slow_over_ms=20.0)
     check(pacing is not None and pacing.startswith("10 slow frames (over 20.8 ms)"), f"slow frames named: {pacing}")
     check("inside render, most over: render/voxels 10" in pacing, f"their part named: {pacing}")
+    # Hitches and uneven pacing both: each told, the slow frames without the hitches, by the leg.
+    both = [10.0] * 180 + [22.0] * 10 + [40.0, 40.0]
+    told = slow_frames(both, [dict(frame(22.0, 21.0, scatter=12.0), stop=5)] * 10 +
+                       [dict(frame(40.0, 39.0, render=38.0, render__voxels=32.0), stop=150)] * 2, typicals,
+                       slow_over_ms=20.0, leg=lambda stop: "low" if stop < 100 else "street")
+    check(told.startswith("2 hitches (over 25.0 ms)") and "\n10 slow frames (over 20.8 ms)" in told, f"both: {told}")
+    check("each: scatter 10" in told and "counted with the next): low 10" in told and
+          "the next): street 2" in told, f"blamed and by leg: {told}")
+    # A frame held in the window's own messages says so.
+    with_events = [(100, dict(typical, events=0.1), 9.0)]
+    pump = slow_frames(times, [frame(40.0, 2.0, events=38.0), frame(45.0, 44.0, render=43.0)], with_events)
+    check("events 1" in pump and "leave the window be" in pump, f"the window's messages named: {pump}")
+    check("leave the window be" not in text, "not said when no frame was held there")
+    # Held by the window being handled: the editor saw the window handled, most of a long frame in
+    # `events`. Such frames are set aside from a flight's times and its slow frames.
+    moved = dict(frame(5000.0, 800.0, events=4990.0), window=True, frame=103)
+    check(held_by_window(moved), "a moved window's long pump is held")
+    check(not held_by_window(dict(moved, window=False)), "not without the window handled")
+    check(not held_by_window(dict(frame(5000.0, 800.0, events=100.0, scene=4900.0), window=True)), "not when the work was elsewhere")
+    check(not held_by_window(dict(frame(20.0, 2.0, events=19.0), window=True)), "not a short frame")
+    check(not held_by_window(frame(5000.0, 800.0, events=4990.0)), "older editors say nothing of the window")
+    other = dict(frame(40.0, 39.0, render=38.0), window=True, frame=101)
+    flown, held, left = without_held([1.0, 2.0, 3.0, 40.0, 5.0, 5000.0, 7.0], [other, moved], 105)
+    check(flown == [1.0, 2.0, 3.0, 40.0, 5.0, 7.0] and held == [5000.0] and left == [other],
+          f"the held frame set aside: {flown} {held} {left}")
+    check(without_held([1.0, 2.0], [other], 105) == ([1.0, 2.0], [], [other]), "none held: as it was")
     # Not kept that low (a software adapter), or every frame slow: nothing to say.
     check(slow_frames(uneven, [frame(22.0, 21.0, render=20.0)] * 10, typicals) is None, "not kept: nothing")
     check(slow_frames([22.0] * 200, [frame(22.0, 21.0, render=20.0)] * 200, typicals, slow_over_ms=20.0) is None,

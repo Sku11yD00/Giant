@@ -365,7 +365,8 @@ def main() -> int:
         flown = editor.fly(path, each_stop, marks=(low_end, street_end))
         after = tool("get_world")
         times = frame_stats(flown)
-        slow = slow_frames(flown, editor.slow, editor.typicals, editor.slow_over_ms)
+        slow = slow_frames(flown, editor.slow, editor.typicals, editor.slow_over_ms,
+                           leg=lambda at: leg_of(at, STOPS))
         if slow:
             print(f"n3_gate: {slow}")
         print(f"n3_gate: frame time over the flight ({times['frames']} frames sampled): {describe(times)}")

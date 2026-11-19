@@ -59,7 +59,10 @@ public:
         float hear_loudness = 0.2f;  // the level at its ears below which nobody notices (0.01 to 100)
         float alarm_loudness = 2.0f; // the level that alarms one fully (at least hear_loudness; to 1000)
         float calm_seconds = 30.0f;  // seconds a full alarm takes to ease to nothing (1 to 3600)
-        u32 looked_a_frame = 4096;   // people looked at a frame while a noise spreads (1 to 16384)
+        u32 looked_a_frame = 512;    // people looked at a frame while a noise spreads (1 to 16384): each costs
+                                     // where it is on its trip, about 0.15 microseconds; 5,000 people are gone
+                                     // through in ten frames, and each still hears each noise once (up to two
+                                     // times through late: 65,536 people want it raised)
         bool sight = true;
         float see_distance = 60.0f;  // metres from its eyes a person sees a watched thing within (1 to 300)
         float see_angle = 120.0f;    // degrees across, about the way it faces (10 to 360)

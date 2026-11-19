@@ -270,7 +270,7 @@ GIANT_TEST("editor: frame phases name the slow frames' parts") {
         // The device: one resource made a frame; frames 288 and 289 made
         // memory, and 290 waited on the GPU.
         FrameDevice device{1, i == 288 || i == 289 ? 5u : 0u, 1, i == 290 ? 28.0f : 0.5f};
-        t.add(ms, phases, i == 290 ? 39.0f : 9.0f, device);
+        t.add(ms, phases, i == 290 ? 39.0f : 9.0f, device, i == 290 || i == 291); // (the window moved in two)
     }
     usize slot = 0;
     GIANT_CHECK(t.slot_of(299, slot) && slot == 299 % FrameTimes::k_frames);
@@ -282,7 +282,7 @@ GIANT_TEST("editor: frame phases name the slow frames' parts") {
     GIANT_CHECK(all["typical"]["scatter"] == 0.0 && all["typical_cpu_ms"] == 9.0);
     GIANT_CHECK(all["slow"].size() == 1);
     const ai::Json& slow = all["slow"][0];
-    GIANT_CHECK(slow["frame"] == 290 && slow["ms"] == 40.01 && slow["cpu_ms"] == 39.0);
+    GIANT_CHECK(slow["frame"] == 290 && slow["ms"] == 40.01 && slow["cpu_ms"] == 39.0 && slow["window"] == true);
     GIANT_CHECK(slow["phases"]["scatter"] == 30.0 && slow["phases"]["render/voxels"] == 4.0);
     GIANT_CHECK(!slow["phases"].contains("mcp") && !slow["phases"].contains("ui"));
     GIANT_CHECK(slow["device"]["wait_ms"] == 28.0 && slow["device"]["allocations"] == 0);
@@ -295,7 +295,9 @@ GIANT_TEST("editor: frame phases name the slow frames' parts") {
     const ai::Json none = frame_phases(t, 1000, 25.0f);
     GIANT_CHECK(none["frames"] == 0 && none["slow"].empty() && none["typical"]["render"] == 0.0);
     // Every frame in full when asked for all over 0 ms.
-    GIANT_CHECK(frame_phases(t, 290, 0.0f)["slow"].size() == 10);
+    const ai::Json last = frame_phases(t, 290, 0.0f);
+    GIANT_CHECK(last["slow"].size() == 10);
+    GIANT_CHECK(last["slow"][1]["window"] == true && last["slow"][2]["window"] == false);
     GIANT_CHECK(frame_phase_name(at(FramePhase::count)) == "render/cells");
     GIANT_CHECK(frame_phase_name(at(FramePhase::tail)) == "tail");
     // (The people's four, which the living-world gate sums by name.)

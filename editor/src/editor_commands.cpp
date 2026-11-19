@@ -102,7 +102,10 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
          "thread's time went in the frames since then (each phase's median, and the phases of those over "
          "phases_over_ms), for finding what makes a frame slow; with each slow frame, the GPU device's counts "
          "(device: resources created, new memory allocations, resources released, begin_frame's wait for the GPU "
-         "in ms and its freeing after (release_ms); device_before: the two frames before, counts summed), and typical_device the median frame's.",
+         "in ms and its freeing after (release_ms); device_before: the two frames before, counts summed), and typical_device the median frame's; and `window`: the window itself was handled in the frame "
+         "(moved, sized, minimised or restored, its focus come or gone, or drawn again several times at once as "
+         "Windows has it while its title bar is held): a long `events` phase is then the desktop holding the "
+         "window, not the program.",
          Json::parse(R"({"type": "object", "additionalProperties": false, "properties": {
              "phases_since": {"type": "integer", "minimum": 0,
                               "description": "The frames from this one on (frame_times.recorded counts them; those still kept, the last 240)."},

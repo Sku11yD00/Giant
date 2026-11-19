@@ -86,30 +86,48 @@ WAIT_PHASES = ("begin_frame", "end_frame", "tail")
 STALL_MS = 5.0
 
 
-def slow_frames(times, slow, typicals, slow_over_ms=25.0):
+# A frame the window's own handling held: this long, most of it in the
+# `events` phase, with the window itself moved, sized or its focus changed.
+HELD_OVER_MS = 25.0
+
+
+def held_by_window(frame):
+    """Whether a slow frame (get_engine_info's phases.slow) was held by the
+    desktop handling the window: Windows runs a window's messages itself
+    while its title bar is held or it is moved or sized, and the editor's
+    loop stands still until it lets go. The editor says the window was
+    handled in the frame (`window`), and the `events` phase took most of it."""
+    return bool(frame.get("window") and frame["ms"] > HELD_OVER_MS and
+                frame["phases"].get("events", 0.0) >= 0.5 * frame["ms"])
+
+
+def without_held(times, slow, recorded):
+    """A flight's frame times so far (`times`, the last of them frame
+    `recorded` - 1 as the editor counts them) and a sample's slow frames,
+    with those the window's handling held set aside: (the times without
+    them, the held frames' times, the slow frames left)."""
+    held = [frame for frame in slow if held_by_window(frame)]
+    gone = {len(times) - (recorded - frame["frame"]) for frame in held}
+    return ([t for i, t in enumerate(times) if i not in gone], [frame["ms"] for frame in held],
+            [frame for frame in slow if not held_by_window(frame)])
+
+
+def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
     """Where the main thread's time went in a flight's hitches: `times` as
     Editor.fly gives them, `slow` its slow frames' phases and `typicals` each
     sample's typical frame (Editor.fly's self.slow, self.typicals). Lines
     naming the phase most over its typical time in each hitch, and how much
     of a hitch the thread spent neither working nor waiting on the GPU
-    (preempted, or blocked on a lock or the disk). With no hitches but the
-    99th percentile over its limit (uneven pacing), the same of the frames
-    over that limit, when `slow` holds every frame over it (`slow_over_ms`,
-    Editor.fly's self.slow_over_ms) and the typical frame is under it (else
-    every frame is slow: nothing stands out). None when there is neither."""
+    (preempted, or blocked on a lock or the disk). With the 99th percentile
+    over its limit (uneven pacing), the same of the frames over that limit
+    that are no hitches, when `slow` holds every frame over it
+    (`slow_over_ms`, Editor.fly's self.slow_over_ms) and the typical frame is
+    under it (else every frame is slow: nothing stands out). `leg`: a stop's
+    part of the flight by name (the frames are counted by it too). None when
+    there is neither."""
     if not times or not typicals:
         return None
-    limit = hitch_limit(times)
-    hitches = [f for f in slow if f["ms"] > limit]
-    what = "hitches"
-    stats = frame_stats(times)
-    if (not hitches and stats["p99_ms"] > P99_LIMIT_MS and slow_over_ms <= P99_LIMIT_MS and
-            _median(times) < P99_LIMIT_MS):
-        limit = P99_LIMIT_MS
-        hitches = [f for f in slow if f["ms"] > limit]
-        what = "slow frames"
-    if not hitches:
-        return None
+    hitch_over = hitch_limit(times)
     names = set()
     for _, typical, _ in typicals:
         names.update(typical)
@@ -125,40 +143,62 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0):
 
     top = sorted(n for n in typical if "/" not in n)
     inner = sorted(n for n in typical if "/" in n)
-    blamed, inner_blamed, excess, stalled = {}, {}, {n: [] for n in typical}, []
-    for frame in hitches:
-        p = phases_of(frame)
-        for n in typical:
-            excess[n].append(p.get(n, 0.0) - typical[n])
-        worst = max(top, key=lambda n: p.get(n, 0.0) - typical[n])
-        blamed[worst] = blamed.get(worst, 0) + 1
-        if worst == "render" and inner:
-            part = max(inner, key=lambda n: p.get(n, 0.0) - typical[n])
-            if p.get(part, 0.0) - typical[part] >= 1.0:
-                inner_blamed[part] = inner_blamed.get(part, 0) + 1
-        waits = sum(p.get(n, 0.0) for n in WAIT_PHASES)
-        stalled.append(max(0.0, frame["ms"] - frame["cpu_ms"] - waits))
 
     def counts(table):
         return ", ".join(f"{n} {c}" for n, c in sorted(table.items(), key=lambda x: -x[1]))
 
-    over = sorted(((n, _median(v)) for n, v in excess.items() if "/" not in n), key=lambda x: -x[1])
-    lines = [f"{len(hitches)} {what} (over {limit:.1f} ms); the phase most over its typical time in each: "
-             f"{counts(blamed)}",
-             "  median ms over typical: " + ", ".join(f"{n} +{e:.1f}" for n, e in over if e >= 0.5)]
-    if inner_blamed:
-        lines.append(f"  inside render, most over: {counts(inner_blamed)}")
-    stalls = sum(1 for t in stalled if t > STALL_MS)
-    lines.append(f"  the main thread neither working nor waiting on the GPU (preempted, or blocked on a lock or "
-                 f"the disk) over {STALL_MS:.0f} ms in {stalls} of the {len(hitches)}, worst {max(stalled):.1f} ms; "
-                 f"a typical frame's CPU time {typical_cpu:.1f} ms")
-    if any(blamed.get(n) for n in ("begin_frame", "end_frame")):
-        lines.append("  (begin_frame or end_frame: waiting on the GPU, the driver or the display, "
-                     "not the CPU's own work)")
-    device = device_line(hitches)
-    if device:
-        lines.append(device)
-    return "\n".join(lines)
+    def told(frames, what, limit):
+        blamed, inner_blamed, excess, stalled, legs = {}, {}, {n: [] for n in typical}, [], {}
+        for frame in frames:
+            p = phases_of(frame)
+            for n in typical:
+                excess[n].append(p.get(n, 0.0) - typical[n])
+            worst = max(top, key=lambda n: p.get(n, 0.0) - typical[n])
+            blamed[worst] = blamed.get(worst, 0) + 1
+            if worst == "render" and inner:
+                part = max(inner, key=lambda n: p.get(n, 0.0) - typical[n])
+                if p.get(part, 0.0) - typical[part] >= 1.0:
+                    inner_blamed[part] = inner_blamed.get(part, 0) + 1
+            waits = sum(p.get(n, 0.0) for n in WAIT_PHASES)
+            stalled.append(max(0.0, frame["ms"] - frame["cpu_ms"] - waits))
+            if leg is not None:
+                name = leg(frame["stop"])
+                legs[name] = legs.get(name, 0) + 1
+        over = sorted(((n, _median(v)) for n, v in excess.items() if "/" not in n), key=lambda x: -x[1])
+        lines = [f"{len(frames)} {what} (over {limit:.1f} ms); the phase most over its typical time in each: "
+                 f"{counts(blamed)}",
+                 "  median ms over typical: " + ", ".join(f"{n} +{e:.1f}" for n, e in over if e >= 0.5)]
+        if legs:
+            lines.append(f"  by the flight's leg (by the stop the frames were read at: the frame of a leg's last "
+                         f"read is counted with the next): {counts(legs)}")
+        if inner_blamed:
+            lines.append(f"  inside render, most over: {counts(inner_blamed)}")
+        stalls = sum(1 for t in stalled if t > STALL_MS)
+        lines.append(f"  the main thread neither working nor waiting on the GPU (preempted, or blocked on a lock or "
+                     f"the disk) over {STALL_MS:.0f} ms in {stalls} of the {len(frames)}, worst {max(stalled):.1f} ms; "
+                     f"a typical frame's CPU time {typical_cpu:.1f} ms")
+        if any(blamed.get(n) for n in ("begin_frame", "end_frame")):
+            lines.append("  (begin_frame or end_frame: waiting on the GPU, the driver or the display, "
+                         "not the CPU's own work)")
+        if blamed.get("events"):
+            lines.append("  (events: the window's own messages. Windows holds them, and the frame with them, "
+                         "while the window's title bar is held or it is moved or sized: leave the window be "
+                         "for the run)")
+        device = device_line(frames)
+        if device:
+            lines.append(device)
+        return lines
+
+    lines = []
+    hitches = [f for f in slow if f["ms"] > hitch_over]
+    if hitches:
+        lines += told(hitches, "hitches", hitch_over)
+    if (frame_stats(times)["p99_ms"] > P99_LIMIT_MS and slow_over_ms <= P99_LIMIT_MS and
+            _median(times) < P99_LIMIT_MS):
+        uneven = [f for f in slow if P99_LIMIT_MS < f["ms"] <= hitch_over]
+        if uneven:
+            lines += told(uneven, "slow frames", P99_LIMIT_MS)
+    return "\n".join(lines) if lines else None
 
 
 def device_line(hitches):
@@ -203,6 +243,7 @@ class Editor:
         self.timer = threading.Timer(timeout, self.process.kill)
         self.timer.daemon = True  # (never what keeps the script alive)
         self.timer.start()
+        self.name = name
         self.next_id = 0
         try:
             self.call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -247,7 +288,8 @@ class Editor:
     def fly(self, path, each_stop, marks=()):
         """Flies the camera along `path` ((position, look_at) per stop), calling
         each_stop(stop, last_frame) after each; returns the frame times (ms) of
-        the whole flight. The editor keeps its last 240: they are read every 100
+        the whole flight (but for frames the desktop held by handling the window:
+        self.held). The editor keeps its last 240: they are read every 100
         stops (two commands a stop, a frame each, plus the read; room for a few
         more each_stop makes). Also read at each stop in `marks`: then
         self.marked[stop] is how many of the times came before it ended."""
@@ -256,6 +298,7 @@ class Editor:
         # each sample's typical frame: (frames, phase medians, CPU ms).
         self.slow = []
         self.typicals = []
+        self.held = []  # the times (ms) of frames the window's handling held: not among those returned
         # Hover first so the 240 recorded frame times hold none of what
         # came before (a scene build is one long frame).
         self.tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
@@ -279,16 +322,23 @@ class Editor:
                     times += now["recent_ms"][-new:]
                 phases = now.get("phases")
                 if phases and phases["frames"] > 0:
-                    self.slow += [dict(frame, stop=stop, typical_device=phases.get("typical_device"))
-                                  for frame in phases["slow"]]
+                    # Frames the desktop held by handling the window are no frames of the flight's:
+                    # set aside (self.held), neither timed nor told among the slow.
+                    times, held, slow = without_held(times, phases["slow"], now["recorded"])
+                    self.held += held
+                    self.slow += [dict(frame, stop=stop, typical_device=phases.get("typical_device")) for frame in slow]
                     self.typicals.append((phases["frames"], phases["typical"], phases["typical_cpu_ms"]))
                 if stop in marks:
                     self.marked[stop] = len(times)
+        if self.held:
+            print(f"{self.name}: {len(self.held)} frames were held by the window being handled (moved, sized, its "
+                  f"title bar held or its focus changed, or the desktop's own doing: {sum(self.held) / 1000.0:.1f} s in all, the longest "
+                  f"{max(self.held):.0f} ms): not the program's, not counted. Leave the window be for the run")
         dump = os.environ.get("GIANT_GATE_FRAMES")
         if dump:  # each frame's time and phases, for a closer look
             with open(dump, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"times": times, "marked": self.marked, "slow": self.slow,
-                                    "typicals": self.typicals}) + "\n")
+                                    "typicals": self.typicals, "held": self.held}) + "\n")
         return times
 
     def gpu_passes(self, frames):

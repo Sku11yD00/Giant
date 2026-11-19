@@ -3,15 +3,16 @@
 // An entity whose mesh is a skinned file (MeshLibrary::Mesh::skinned) and
 // that has a clip to play (its saved Entity::animation, or one played by
 // command) is animated: it gets its own copy of the character in the
-// renderer (render::Renderer::add_skinned_mesh), posed as time moves it, which
+// renderer (render::Renderer::add_skinned_copy), posed as time moves it, which
 // it draws instead of the file's shared rest-pose mesh once the copy is
-// loaded. Copies of one file share its geometry in the renderer (the
-// first uploads it, the rest are Renderer::add_skinned_copy). At most
+// loaded. Copies of one file share its geometry in the renderer: what the
+// library sent with the import (MeshLibrary::Mesh::skin_sources; where the
+// renderer refused that, the first copy uploads it and the rest share it). At most
 // max_animated (k_max_animated) are animated at once: those animating
 // keep their place, and a free one goes to the lowest id waiting; the rest
 // stand frozen in the rest pose (as do skinned entities with nothing to
 // play, or whose saved clip the file does not have). Copies are made a few
-// a frame (making one uploads it), so loading a scene full of characters
+// a frame (each has buffers of its own to make), so loading a scene full of characters
 // never stalls one frame.
 //
 // View state, as the physics' play button: what plays by command
@@ -352,12 +353,12 @@ private:
     std::set<world::EntityId> m_held;      // posed from outside (kept wanted)
     std::map<world::EntityId, std::unique_ptr<Animated>> m_animated;
     std::unordered_map<world::EntityId, render::MeshId> m_copies;
-    // Per skinned file (as copied), its live copies in the renderer: a new
-    // one shares their geometry (Renderer::add_skinned_copy).
+    // Per skinned file (as copied), its live copies in the renderer: without
+    // the library's source, a new one shares their geometry.
     std::unordered_map<const geometry::SkinnedClusterMesh*, std::vector<render::MeshId>> m_copies_of;
     std::unordered_map<world::EntityId, std::vector<render::MeshId>> m_part_copies;
     // A copy of `clusters` in the renderer (k_no_mesh: refused), and one let go.
-    render::MeshId make_copy(const geometry::SkinnedClusterMesh& clusters, u32 joints);
+    render::MeshId make_copy(const geometry::SkinnedClusterMesh& clusters, u32 joints, render::MeshId source);
     void drop_copy(const geometry::SkinnedClusterMesh& clusters, render::MeshId copy);
     void drop_copies(Animated& a);
     std::vector<world::EntityId> m_redraw;

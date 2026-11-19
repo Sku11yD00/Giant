@@ -89,6 +89,7 @@ MeshLibrary::~MeshLibrary() {
         for (const auto& mesh : m_meshes) {
             m_renderer->remove_mesh(mesh->id);
             for (const Part& part : mesh->parts) m_renderer->remove_mesh(part.id);
+            for (const render::MeshId source : mesh->skin_sources) m_renderer->remove_mesh(source);
         }
     }
 }
@@ -309,6 +310,22 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
                 return {nullptr, path + ": could not upload the mesh's parts to the GPU"};
             }
         }
+        if (mesh->skinned != nullptr) {
+            // What its animated copies are made from: all of it, or none (the animation's own way then).
+            const MeshLibrary::Skinned& skin = *mesh->skinned;
+            const u32 joints = static_cast<u32>(skin.skeleton.size());
+            const usize count = skin.parts.empty() ? 1 : skin.parts.size();
+            for (usize p = 0; p < count; ++p) {
+                const render::MeshId source =
+                    m_renderer->add_skinned_mesh(skin.parts.empty() ? skin.clusters : skin.parts[p], joints);
+                if (source == render::k_no_mesh) {
+                    for (const render::MeshId made : mesh->skin_sources) m_renderer->remove_mesh(made);
+                    mesh->skin_sources.clear();
+                    break;
+                }
+                mesh->skin_sources.push_back(source);
+            }
+        }
     }
     mesh->import_seconds =
         std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
@@ -328,6 +345,8 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
         if (m_renderer != nullptr) {
             m_renderer->remove_mesh(replace->id);
             for (const Part& part : replace->parts) m_renderer->remove_mesh(part.id);
+            // (Copies made from them stay: they share the geometry, not the mesh.)
+            for (const render::MeshId source : replace->skin_sources) m_renderer->remove_mesh(source);
         }
         *replace = std::move(*mesh);
         ++m_version;

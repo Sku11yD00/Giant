@@ -839,6 +839,7 @@ int run(const Options& options) {
     last_frame = phase_mark;
     while (window->poll_events() && !state.quit_requested) {
         mark(editor::FramePhase::events);
+        const bool window_handled = window->take_handled();
         if (mcp_reader != nullptr) {
             if (!pump_mcp(*mcp_reader, *mcp_server, state.quit_requested) ||
                 mcp_reader->finished()) {
@@ -880,7 +881,8 @@ int run(const Options& options) {
                                                    static_cast<u32>(counts.allocations - device_mark.allocations),
                                                    static_cast<u32>(counts.released - device_mark.released),
                                                    frame_wait_ms, frame_release_ms};
-            state.frame_times.add(frame_info.frame_ms, phase_ms, static_cast<float>(cpu_now - cpu_mark), frame_device);
+            state.frame_times.add(frame_info.frame_ms, phase_ms, static_cast<float>(cpu_now - cpu_mark), frame_device,
+                                  window_handled);
             device_mark = counts;
             frame_wait_ms = 0.0f;
             frame_release_ms = 0.0f;

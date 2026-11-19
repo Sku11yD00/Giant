@@ -93,6 +93,15 @@ public:
         // the other parts' uvs).
         std::optional<world::Material> whole_material;
         std::shared_ptr<const Skinned> skinned; // null: not skinned
+        // A skinned file's geometry in the renderer, sent with the import
+        // (Renderer::add_skinned_mesh of `skinned->clusters`, or of each of
+        // its parts in their order): never drawn itself, it is what each
+        // animated entity's copy is made from (add_skinned_copy), so that
+        // the first of a character to be animated costs its frame no upload
+        // (43,760 triangles in three parts took 12 ms of one). Empty: not
+        // skinned, no renderer, or the renderer refused it (the animation
+        // then sends it itself, the first time it is wanted).
+        std::vector<render::MeshId> skin_sources;
         // The file's hair curves (its line primitives; geometry::ImportResult::curves:
         // the file's space, at rest), shared with what grows hair from them. Null: none.
         std::shared_ptr<const std::vector<std::vector<Vec3>>> curves;

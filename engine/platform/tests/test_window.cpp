@@ -59,10 +59,25 @@ GIANT_TEST("platform: a size change is reported once") {
     if (window == nullptr) {
         return;
     }
+    (void)window->poll_events();
+    (void)window->take_handled(); // (whatever its making sent)
+    GIANT_CHECK(window->poll_events() && !window->take_handled()); // nothing happened to it
     window->request_size(400, 300);
     GIANT_CHECK(window->poll_events());
     GIANT_CHECK(window->take_resized());
     GIANT_CHECK(!window->take_resized());
+    // The window itself was handled: said once, and kept over polls that saw nothing more.
+    GIANT_CHECK(window->poll_events());
+    GIANT_CHECK(window->take_handled() && !window->take_handled());
+    push_window_event(*window, SDL_EVENT_WINDOW_MOVED);
+    GIANT_CHECK(window->poll_events() && window->take_handled());
+    // Asked to be drawn again once: nothing of note; several times in one poll: it was held.
+    push_window_event(*window, SDL_EVENT_WINDOW_EXPOSED);
+    GIANT_CHECK(window->poll_events() && !window->take_handled());
+    for (int i = 0; i < 3; ++i) push_window_event(*window, SDL_EVENT_WINDOW_EXPOSED);
+    GIANT_CHECK(window->poll_events() && window->take_handled());
+    push_window_event(*window, SDL_EVENT_WINDOW_FOCUS_LOST);
+    GIANT_CHECK(window->poll_events() && window->take_handled() && !window->take_handled());
     GIANT_CHECK(window->pixel_width() == 400);
     GIANT_CHECK(window->pixel_height() == 300);
     // The dummy driver has no high-DPI scaling, so points equal pixels.
@@ -110,6 +125,9 @@ GIANT_TEST("platform: events for another window are ignored") {
     b->request_size(500, 400);
     GIANT_CHECK(a->poll_events());
     GIANT_CHECK(!a->take_resized());
+    (void)a->take_handled();
+    push_window_event(*b, SDL_EVENT_WINDOW_MOVED);
+    GIANT_CHECK(a->poll_events() && !a->take_handled());
     GIANT_CHECK(!a->minimized());
     GIANT_CHECK(a->pixel_width() == 320);
 }
