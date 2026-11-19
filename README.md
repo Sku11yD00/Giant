@@ -460,6 +460,10 @@ Open-world systems:
   runs a world as a game: a main menu (Continue, New game, Load,
   Settings, Quit) instead of the editor's panels, play from it, and the
   pause menu's Quit leads back to it.
+- N7 part 2: a game's settings last. UI scale, field of view, mouse
+  speed, fullscreen, vsync and the window's size are kept as text
+  (`game_settings.json` in the person's settings folder) and are there
+  the next time the game runs.
 - Crowds part 1: baked poses. A character held in one pose becomes a
   small plain mesh (`bake_pose`, `get_baked_poses`), cut down from the
   file and baked on a worker: what distant people will be drawn with.

@@ -21,6 +21,7 @@ struct WindowDesc {
     u32 height = 900;
     bool resizable = true;
     bool hidden = false; // for tests and headless runs
+    bool fullscreen = false; // borderless, over the whole of its screen at the desktop's own resolution
 };
 
 // The native handle a graphics backend needs to create a swap chain.
@@ -93,6 +94,14 @@ public:
     // Asks the OS to resize (in points) or minimise the window. The change arrives as an
     // event in the next poll_events (used by tests and the editor's layouts).
     void request_size(u32 width, u32 height);
+    // Asks for the window borderless over the whole of its screen (at the desktop's resolution: no
+    // display mode is changed), or back as a window of the size it had. The new size arrives as a
+    // resize in a later poll_events. False (and logged): the OS would not.
+    bool request_fullscreen(bool on);
+    // As the OS has it now: over its whole screen; made as large as its screen's work area. (Its
+    // size then is not the size it has as a plain window.)
+    bool fullscreen() const;
+    bool maximized() const;
     void request_minimize();
     void request_restore();
 

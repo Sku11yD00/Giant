@@ -44,6 +44,9 @@ std::unique_ptr<Window> Window::create(const WindowDesc& desc) {
     if (desc.hidden) {
         flags |= SDL_WINDOW_HIDDEN;
     }
+    if (desc.fullscreen) {
+        flags |= SDL_WINDOW_FULLSCREEN;
+    }
 
     auto impl = std::make_unique<Impl>();
     impl->window = SDL_CreateWindow(desc.title.c_str(), static_cast<int>(desc.width),
@@ -79,6 +82,18 @@ Window::~Window() {
         SDL_Quit(); // last user gone: release SDL's global state too
     }
 }
+
+bool Window::request_fullscreen(bool on) {
+    if (!SDL_SetWindowFullscreen(m_impl->window, on)) {
+        log_error("platform", std::string("could not change the window's mode: ") + SDL_GetError());
+        return false;
+    }
+    return true;
+}
+
+bool Window::fullscreen() const { return (SDL_GetWindowFlags(m_impl->window) & SDL_WINDOW_FULLSCREEN) != 0; }
+
+bool Window::maximized() const { return (SDL_GetWindowFlags(m_impl->window) & SDL_WINDOW_MAXIMIZED) != 0; }
 
 void Window::request_size(u32 width, u32 height) {
     SDL_SetWindowSize(m_impl->window, static_cast<int>(width), static_cast<int>(height));

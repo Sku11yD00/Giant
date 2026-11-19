@@ -8,6 +8,7 @@
 #include "game_ui.h"
 
 #include "giant/core/assert.h"
+#include "giant/platform/window.h"
 
 #include <string>
 #include <vector>
@@ -487,7 +488,16 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
                     {"slots", slots},
                     {"message", m.message()},
                     {"notice", m.notice()},
-                    {"settings", {{"ui_scale", s.ui_scale}, {"fov", s.fov_degrees}, {"look_sensitivity", s.look_sensitivity}}}};
+                    {"settings",
+                     {{"ui_scale", s.ui_scale},
+                      {"fov", s.fov_degrees},
+                      {"look_sensitivity", s.look_sensitivity},
+                      {"fullscreen", s.fullscreen},
+                      {"vsync", s.vsync},
+                      {"fullscreen_now", state.window != nullptr && state.window->fullscreen()},
+                      {"vsync_now", state.vsync_now},
+                      {"window", {s.window_width, s.window_height}},
+                      {"kept_in", m.kept_in()}}}};
     };
 
     add(registry,
@@ -500,9 +510,12 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
          "back to it; no editor panels are drawn; `notice` is what the main menu says went wrong, as when a game "
          "could not be loaded), `saving` (the saves menu saves, else loads), `paused` (a menu over play: the game stands still), the "
          "saves menu's `slots` (newest first: `name`, `info` date and play time, `of_this_world`) and "
-         "`message`, and `settings` (`ui_scale`, `fov`, `look_sensitivity`). Its buttons are on the screens "
+         "`message`, and `settings` (`ui_scale`, `fov`, `look_sensitivity`, `fullscreen`, `vsync`, the `window`'s "
+         "[width, height] in points as last seen while a plain window, `kept_in` the file a game keeps them in, "
+         "empty in the editor, and what the program has now: `fullscreen_now` its window's, `vsync_now` as it "
+         "started). Its buttons are on the screens "
          "menu.pause (resume, save, load, settings, quit), menu.saves (slot.0 to slot.7, new, back) and "
-         "menu.settings (ui_scale.down/up, fov.down/up, look.down/up, back): press them with ui_click.",
+         "menu.settings (ui_scale.down/up, fov.down/up, look.down/up, fullscreen.toggle, vsync.toggle, back): press them with ui_click.",
          Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
          true,
          [&state, menu_json](const Json&, CommandContext&) {
@@ -535,15 +548,20 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
 
     add(registry,
         {"set_game_settings",
-         "The player's settings (as the settings menu sets them; they last while the program runs): `ui_scale` "
+         "The player's settings (as the settings menu sets them; they last while the program runs, and a "
+         "game keeps them between runs as text: get_menu's `settings.kept_in`): `ui_scale` "
          "(0.5 to 2, times the window's), `fov` (vertical degrees while playing, 40 to 110), "
-         "`look_sensitivity` (mouse look speed, 0.25 to 4). Returns get_menu.",
+         "(`fullscreen` and `vsync` are a game's: the editor shows them and leaves its own window and frames as they are) "
+         "`look_sensitivity` (mouse look speed, 0.25 to 4), `fullscreen` (the window borderless over its "
+         "whole screen, at once) and `vsync` (taken up when the program next starts). Returns get_menu.",
          Json{{"type", "object"},
               {"additionalProperties", false},
               {"properties",
                {{"ui_scale", {{"type", "number"}, {"minimum", 0.5}, {"maximum", 2}}},
                 {"fov", {{"type", "number"}, {"minimum", 40}, {"maximum", 110}}},
-                {"look_sensitivity", {{"type", "number"}, {"minimum", 0.25}, {"maximum", 4}}}}}},
+                {"look_sensitivity", {{"type", "number"}, {"minimum", 0.25}, {"maximum", 4}}},
+                {"fullscreen", {{"type", "boolean"}}},
+                {"vsync", {{"type", "boolean"}}}}}},
          false,
          [&state, menu_json](const Json& args, CommandContext&) {
              if (state.menus == nullptr) return CommandResult::failure("the game's menus are not available");
@@ -551,6 +569,8 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
              s.ui_scale = args.value("ui_scale", s.ui_scale);
              s.fov_degrees = args.value("fov", s.fov_degrees);
              s.look_sensitivity = args.value("look_sensitivity", s.look_sensitivity);
+             s.fullscreen = args.value("fullscreen", s.fullscreen);
+             s.vsync = args.value("vsync", s.vsync);
              state.menus->set_settings(s);
              return CommandResult::success(menu_json());
          }});

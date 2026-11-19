@@ -9,6 +9,8 @@
 #include "giant/ai/json.h"
 #include "giant/core/log.h"
 #include "giant/core/text.h"
+#include "giant/core/text_files.h"
+#include "giant/platform/window.h"
 #include "giant/save/slot.h"
 
 #include <algorithm>
@@ -16,6 +18,7 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <system_error>
 
 namespace giant::editor {
 
@@ -128,12 +131,26 @@ Json setting_row(const std::string& id, const std::string& label, const std::str
               button(id + ".up", "+", 64.0f)}}};
 }
 
+// A setting that is on or off: its name, which it is, and a button that changes it.
+Json toggle_row(const std::string& id, const std::string& label, const std::string& value) {
+    return {{"type", "panel"},
+            {"layout", "row"},
+            {"gap", 12},
+            {"anchor", {0.5, 0}},
+            {"children",
+             {{{"type", "text"}, {"text", label}, {"size", {260, 54}}, {"font_size", 26}},
+              {{"type", "text"}, {"text", value}, {"size", {128, 54}}, {"font_size", 26}, {"align", "center"}},
+              button(id + ".toggle", "Change", 152.0f)}}};
+}
+
 Json settings_screen() {
     return menu_screen("menu.settings", {title("Settings"),
                                          {{"type", "panel"}, {"size", {0, 12}}},
                                          setting_row("ui_scale", "UI scale", "{settings.ui_scale:2}"),
                                          setting_row("fov", "Field of view", "{settings.fov:0}"),
                                          setting_row("look", "Mouse speed", "{settings.look:2}"),
+                                         toggle_row("fullscreen", "Fullscreen", "{settings.fullscreen}"),
+                                         toggle_row("vsync", "Vsync (next start)", "{settings.vsync}"),
                                          {{"type", "panel"}, {"size", {0, 8}}},
                                          button("back", "Back")});
 }
@@ -212,15 +229,148 @@ void GameMenus::load_screens() {
     show_values();
 }
 
-void GameMenus::set_settings(const Settings& s) {
+GameMenus::Settings GameMenus::clamped(const Settings& s) {
     const auto pick = [](float v, float lo, float hi, float otherwise) { return std::isfinite(v) ? std::clamp(v, lo, hi) : otherwise; };
-    m_settings.ui_scale = pick(s.ui_scale, 0.5f, 2.0f, 1.0f);
-    m_settings.fov_degrees = pick(s.fov_degrees, 40.0f, 110.0f, 70.0f);
-    m_settings.look_sensitivity = pick(s.look_sensitivity, 0.25f, 4.0f, 1.0f);
+    Settings out = s;
+    out.ui_scale = pick(s.ui_scale, 0.5f, 2.0f, 1.0f);
+    out.fov_degrees = pick(s.fov_degrees, 40.0f, 110.0f, 70.0f);
+    out.look_sensitivity = pick(s.look_sensitivity, 0.25f, 4.0f, 1.0f);
+    if (s.window_width == 0 || s.window_height == 0) { // (none kept: as the program makes it)
+        out.window_width = 0;
+        out.window_height = 0;
+    } else {
+        out.window_width = std::clamp<u32>(s.window_width, 320, 7680);
+        out.window_height = std::clamp<u32>(s.window_height, 240, 4320);
+    }
+    return out;
+}
+
+void GameMenus::set_settings(const Settings& s) {
+    const bool was_fullscreen = m_settings.fullscreen;
+    m_settings = clamped(s);
+    // (A game's window: the editor's own is left as it is, the setting only shown there.)
+    if (m_settings.fullscreen != was_fullscreen && m_state.game_mode && m_state.window != nullptr &&
+        !m_state.window->request_fullscreen(m_settings.fullscreen))
+        m_settings.fullscreen = was_fullscreen; // (the OS would not: the setting says what the window is)
     if (m_state.game_ui != nullptr) m_state.game_ui->ui_scale = m_settings.ui_scale;
     if (m_state.play != nullptr) m_state.play->look_sensitivity = m_settings.look_sensitivity;
     if (m_state.play != nullptr && m_state.play->playing()) m_state.camera.vertical_fov_degrees = m_settings.fov_degrees;
     show_values();
+    if (!(m_settings == m_written)) write_later();
+}
+
+void GameMenus::keep_in(std::string file) {
+    m_jobs.wait(m_group); // (nothing still on its way to the last file)
+    m_file = std::move(file);
+    m_written = m_settings;
+    const std::lock_guard lock(m_keeper->mutex);
+    m_keeper->text.reset();
+    m_keeper->failed = false;
+}
+
+void GameMenus::note_window(u32 width, u32 height) {
+    if (m_settings.fullscreen || width == 0 || height == 0) return;
+    m_settings.window_width = std::clamp<u32>(width, 320, 7680);
+    m_settings.window_height = std::clamp<u32>(height, 240, 4320);
+}
+
+namespace {
+
+bool write_settings(const std::string& file, const std::string& text) {
+    std::error_code ec;
+    const std::filesystem::path path = path_from_utf8(file);
+    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec); // (the first run: no folder yet)
+    if (write_text_file(path, text)) return true;
+    log_warning("game", "the settings could not be written to " + file);
+    return false;
+}
+
+} // namespace
+
+void GameMenus::write_later() {
+    if (m_file.empty()) return;
+    // (A window dragged to another size is no change of the person's to write for: `store` writes it.)
+    Settings but_window = m_settings;
+    but_window.window_width = m_written.window_width;
+    but_window.window_height = m_written.window_height;
+    if (but_window == m_written) return;
+    m_written = m_settings;
+    // On a job (no wait on the disk on the frame). Each job writes the newest text asked for, under
+    // the keeper's lock: a thread waiting on the group runs jobs too, beside the jobs' own thread.
+    {
+        const std::lock_guard lock(m_keeper->mutex);
+        m_keeper->text = settings_text(m_settings);
+    }
+    m_jobs.submit(m_group, [file = m_file, keeper = m_keeper] {
+        const std::lock_guard lock(keeper->mutex);
+        if (!keeper->text) return; // (a job before this one wrote it)
+        const std::string text = std::move(*keeper->text);
+        keeper->text.reset();
+        keeper->failed = !write_settings(file, text);
+    });
+}
+
+bool GameMenus::store() {
+    m_jobs.wait(m_group);
+    take_read();
+    if (m_file.empty()) return true;
+    const std::lock_guard lock(m_keeper->mutex); // (no job is left: the lock is for the rule, not a wait)
+    if (m_settings == m_written && !m_keeper->failed) return true;
+    m_written = m_settings;
+    m_keeper->failed = !write_settings(m_file, settings_text(m_settings));
+    return !m_keeper->failed;
+}
+
+std::string settings_text(const GameMenus::Settings& s) {
+    // By hand: a key a line in this order, numbers as a person would write them (1.1, not the float's 1.100000023841858).
+    const auto number = [](float v) { return Json(std::round(static_cast<double>(v) * 1000.0) / 1000.0).dump(); };
+    const auto flag = [](bool v) { return std::string(v ? "true" : "false"); };
+    return "{\n  \"ui_scale\": " + number(s.ui_scale) + ",\n  \"fov\": " + number(s.fov_degrees) + ",\n  \"look_sensitivity\": " +
+           number(s.look_sensitivity) + ",\n  \"fullscreen\": " + flag(s.fullscreen) + ",\n  \"vsync\": " + flag(s.vsync) +
+           ",\n  \"window\": [" + std::to_string(s.window_width) + ", " + std::to_string(s.window_height) + "]\n}\n";
+}
+
+GameMenus::Settings settings_from_text(std::string_view text, std::vector<std::string>& problems) {
+    GameMenus::Settings s;
+    const Json json = Json::parse(text, nullptr, false);
+    if (!json.is_object()) {
+        problems.emplace_back("not a JSON object");
+        return s;
+    }
+    const auto number = [&](const char* key, float& out) {
+        const auto found = json.find(key);
+        if (found == json.end()) return;
+        if (found->is_number()) {
+            // (Beyond what a float holds: its nearest end, not a number that is none.)
+            out = static_cast<float>(std::clamp(found->get<double>(), -1.0e9, 1.0e9));
+        } else {
+            problems.emplace_back(std::string(key) + " is not a number");
+        }
+    };
+    const auto boolean = [&](const char* key, bool& out) {
+        const auto found = json.find(key);
+        if (found == json.end()) return;
+        if (found->is_boolean()) {
+            out = found->get<bool>();
+        } else {
+            problems.emplace_back(std::string(key) + " is not true or false");
+        }
+    };
+    number("ui_scale", s.ui_scale);
+    number("fov", s.fov_degrees);
+    number("look_sensitivity", s.look_sensitivity);
+    boolean("fullscreen", s.fullscreen);
+    boolean("vsync", s.vsync);
+    if (const auto window = json.find("window"); window != json.end()) {
+        const auto whole = [](const Json& v) { return v.is_number_unsigned() && v.get<u64>() <= 100000; };
+        if (window->is_array() && window->size() == 2 && whole((*window)[0]) && whole((*window)[1])) {
+            s.window_width = (*window)[0].get<u32>();
+            s.window_height = (*window)[1].get<u32>();
+        } else {
+            problems.emplace_back("window is not [width, height]");
+        }
+    }
+    return GameMenus::clamped(s);
 }
 
 bool GameMenus::paused() const { return m_menu != Menu::none && m_state.play != nullptr && m_state.play->playing(); }
@@ -336,6 +486,8 @@ void GameMenus::show_values() {
     v.set("settings.ui_scale", static_cast<double>(m_settings.ui_scale));
     v.set("settings.fov", static_cast<double>(m_settings.fov_degrees));
     v.set("settings.look", static_cast<double>(m_settings.look_sensitivity));
+    v.set("settings.fullscreen", std::string(m_settings.fullscreen ? "On" : "Off"));
+    v.set("settings.vsync", std::string(m_settings.vsync ? "On" : "Off"));
 }
 
 GameMenus::Menu GameMenus::before() const {
@@ -447,6 +599,8 @@ void GameMenus::press(const std::string& screen, const std::string& id) {
         if (id == "fov.up") s.fov_degrees += 5.0f;
         if (id == "look.down") s.look_sensitivity -= 0.25f;
         if (id == "look.up") s.look_sensitivity += 0.25f;
+        if (id == "fullscreen.toggle") s.fullscreen = !s.fullscreen;
+        if (id == "vsync.toggle") s.vsync = !s.vsync;
         s.ui_scale = std::round(s.ui_scale * 20.0f) / 20.0f;
         set_settings(s);
     }

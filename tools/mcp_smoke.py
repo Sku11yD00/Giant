@@ -887,6 +887,10 @@ def player_gate(tool, call, check):
     check(menu["menu"] == "settings" and menu["paused"], f"the settings menu opens over play and pauses it, got {menu}")
     menu = tool("set_game_settings", {"fov": 80})
     check(menu["settings"]["fov"] == 80, f"a setting is set, got {menu['settings']}")
+    menu = tool("set_game_settings", {"fullscreen": True})
+    check(menu["settings"]["fullscreen"] is True and menu["settings"]["fullscreen_now"] is False and menu["settings"]["kept_in"] == "",
+          f"fullscreen is a game's: the editor shows it and leaves its own window alone, got {menu['settings']}")
+    tool("set_game_settings", {"fullscreen": False})
     tool("set_game_settings", {"fov": 70})  # (back to the default for the play below)
     check(tool("open_menu", {"menu": "none"})["menu"] == "none", "the menu closes")
     tool("set_player_input", {"forward": 1, "yaw": 0})  # down -z, onto the step

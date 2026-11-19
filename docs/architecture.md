@@ -5622,7 +5622,11 @@ and load, settings), which also route the real mouse and keys to screens.
   fails on its job, after the menu closed, is a toast. Screens named
   `menu.*` are the menus': MCP cannot load or remove them, clearing all
   screens keeps them, and `get_ui_events` leaves their presses. Settings (UI scale 0.5 to 2, vertical FOV 40 to 110, look
-  speed 0.25 to 4) apply at once and last while the editor runs. Only
+  speed 0.25 to 4, fullscreen, vsync) last while the editor runs (a
+  game keeps them: below) and apply at once, but fullscreen and vsync,
+  which are a game's: a game takes fullscreen at once and vsync when it
+  next starts (the swap chain is made with it), the editor only shows
+  them and leaves its own window and frames alone. Only
   the menus' own screens' events are taken; the game's stay queued for
   `get_ui_events`. MCP: `get_menu`, `open_menu`, `set_game_settings`, and
   `ui_click` on the menu screens.
@@ -5650,11 +5654,40 @@ and load, settings), which also route the real mouse and keys to screens.
   the menus). Nobody can be asked a question in a game (the editor's
   question windows are its panels'), so script files and mods' scripts are
   treated as with no window at all: not loaded unless allowed on the
-  command line. Not yet: a player start in the world, settings that last
-  between runs, a loading screen, a packaged folder; the game's own
+  command line. Not yet: a player start in the world, a loading screen,
+  a packaged folder; the game's own
   screens show behind the main menu, and scripts run there too. Tested by
   `editor/tests/test_game_menus.cpp` and end to end by
   `tools/game_smoke.py` (ctest `editor_game`).
+- **A game's settings last (N7 part 2).** A game keeps the settings
+  menu's values between runs as text (`settings_text`: JSON, a key a
+  line, numbers to three places: `ui_scale`, `fov`, `look_sensitivity`, `fullscreen`, `vsync`,
+  `window` [width, height] in points), in `game_settings.json` in the
+  person's settings folder (%APPDATA%\Giant, or the XDG config folder),
+  or the file `--player-settings` names (tests: never the machine's
+  own). `main` reads it before the window is made, since the window's
+  mode and size and the swap chain's vsync are taken there, and hands
+  it to the menus (`GameMenus::keep_in`). A key left out or of the
+  wrong kind keeps its default (the wrong ones are logged), values are
+  clamped, and a file that is no JSON gives the defaults: a broken file
+  never stops the game. A file with anything wrong in it is copied to
+  `game_settings.json.bad` before the game writes over it, so what a
+  person wrote by hand is not lost; keys the game does not know are not
+  written back. A setting changed is written on the menus' job
+  (`write_text_file`: beside, then renamed over; no wait on the disk on
+  the frame): one write at a time, each the newest text asked for
+  (`GameMenus::Keeper`, since a thread waiting on the jobs runs them
+  too). As the program ends what is not written yet is, a write that
+  failed is tried again, and the window's size goes with it (noted each
+  frame while it is a plain window, not fullscreen or maximised, never
+  a reason to write by itself; that it was maximised is not kept).
+  `--no-vsync` wins for its run without changing the setting:
+  `get_menu`'s `vsync_now` and `fullscreen_now` say what the program
+  has. Fullscreen is borderless over the
+  window's screen at the desktop's resolution
+  (`platform::Window::request_fullscreen`): no display mode is changed,
+  so there is no resolution to choose. The editor itself keeps none of
+  this (`kept_in` empty): its menus' settings last while it runs.
 
 Known limits: one font, no scripts beyond Latin (no CJK, Arabic or
 Cyrillic yet: the atlas would grow, or glyphs be made on demand on a
