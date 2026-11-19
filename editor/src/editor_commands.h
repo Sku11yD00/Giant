@@ -66,6 +66,7 @@ class WeatherEffects;
 class NavState;
 class WalkerState;
 class PeopleState;
+class PeopleFigures;
 class PeopleRoutines;
 class PeopleSenses;
 class PeopleTravel;
@@ -280,6 +281,9 @@ struct EditorState {
     // The people near the camera, given entities (people_state.h); set by
     // main (and tests). Null: people stay records.
     PeopleState* people = nullptr;
+    // Those farther off, drawn as figures (people_figures.h); set by main
+    // (and tests). Null: only those with entities are drawn.
+    PeopleFigures* figures = nullptr;
     // Where the people are while the world runs, and their trips along
     // the roads (people_travel.h); set by main (and tests). Null: nobody travels.
     PeopleTravel* travel = nullptr;

@@ -74,6 +74,7 @@ void PoseBakes::clear() {
     m_poses.clear();
     m_slots.clear();
     m_figures.clear(); // (a bake still running keeps its own)
+    ++m_clears;
 }
 
 void PoseBakes::make(Figure& figure) {

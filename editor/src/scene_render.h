@@ -24,6 +24,24 @@ class FarGround;
 class ScatterPlacer;
 class TextureLibrary;
 
+// People drawn far off with no entity (crowds plan; people_figures.h): each
+// a baked pose's meshes (pose_bakes.h) where the person is, with its look.
+// They keep their slots from frame to frame, and the slots go to the
+// renderer in chunks of k_figure_chunk, each a cell of its own: one coming,
+// going or moving re-sends its chunk alone.
+inline constexpr u32 k_figure_chunk = 64;
+struct FigureDraw {
+    world::Transform at;
+    const world::PersonLook* look = nullptr;             // null: an empty slot, nothing drawn
+    const std::vector<render::MeshId>* meshes = nullptr; // its pose's, a part each (PoseBakes::Pose::meshes)
+};
+struct FigureDraws {
+    // (Every slot's pointers good for the call: a chunk is read whole when any of it changed.)
+    std::span<const FigureDraw> slots;
+    // One for each k_figure_chunk slots: changes (to a number never had) when any of them does. Never 0.
+    std::span<const u64> versions;
+};
+
 // What the renderer draws of a scene, kept from frame to frame by world
 // cell (world::k_cell_size): a frame rebuilds only the cells whose
 // entities changed (world::Scene::take_changes), and those of a kit that
@@ -188,6 +206,22 @@ struct SceneFrame {
         bool placed = false;
     };
     std::unordered_map<world::CellCoord, Cell, world::CellCoordHash> grid;
+    // The figures (FigureDraws): a cell for each chunk of their slots, in
+    // no place of the world, each as many instances a slot as the most
+    // parts any figure in it has (holes where one draws fewer, or nothing).
+    // A chunk nobody is drawn in has no instances.
+    std::vector<Cell> figure_cells;
+    std::vector<u64> figure_versions; // each chunk's, as last built
+    std::vector<u32> figure_rebuilt;  // scratch: the chunks built this call
+    // Scratch: what a look's figure draws (its instances as emit makes
+    // them, in figure_made), made once a call for each look met.
+    struct FigureLook {
+        u32 first = 0;
+        u32 count = 0;
+    };
+    std::unordered_map<const world::PersonLook*, FigureLook> figure_looks;
+    Cell figure_made;
+    std::vector<render::MeshId> figure_rest; // scratch: a figure's meshes after its first
     std::unordered_map<world::EntityId, world::CellCoord> where; // entity -> its cell
     std::vector<world::CellCoord> order;                          // cells by z, then x (decals go so)
     // Holes in `instances` no cell has (first -> size), joined, to find
@@ -248,7 +282,9 @@ struct SceneFrame {
 // are loose kit pieces moving (sim::PiecePose::moving); still again, they
 // are drawn into the voxel world. With `ragdolls`, a character gone limp
 // (RagdollState) is drawn there (before a walker's or a swing's pose),
-// marked moving for as long as it is one.
+// marked moving for as long as it is one. With `figures`, those are drawn
+// too (render::Instance::moves: they come, go and are put elsewhere), in cells of their
+// own; without, none are.
 void scene_frame(world::Scene& scene, const render::Renderer& renderer, const MeshLibrary& meshes,
                  SceneFrame& out, TerrainMeshes* terrain = nullptr, FarGround* far = nullptr,
                  ScatterPlacer* scatter = nullptr,
@@ -263,7 +299,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, world::Transform>* walkers = nullptr,
                  const std::unordered_set<world::EntityId>* moving = nullptr,
                  const std::unordered_map<world::EntityId, world::Transform>* ragdolls = nullptr,
-                 const std::unordered_map<world::EntityId, std::vector<render::MeshId>>* skinned_parts = nullptr);
+                 const std::unordered_map<world::EntityId, std::vector<render::MeshId>>* skinned_parts = nullptr,
+                 const FigureDraws* figures = nullptr);
 
 // A kit piece placed by a kit entity: the piece's transform inside the
 // entity's (exact for uniform scales; a non-uniform entity scale stretches

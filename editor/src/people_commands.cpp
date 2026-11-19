@@ -6,6 +6,7 @@
 #include "editor_commands.h"
 
 #include "audio_state.h"
+#include "people_figures.h"
 #include "people_list.h"
 #include "people_routines.h"
 #include "people_senses.h"
@@ -13,6 +14,7 @@
 #include "people_travel.h"
 #include "physics_state.h"
 #include "play_state.h"
+#include "pose_bakes.h"
 
 #include "giant/core/assert.h"
 #include "giant/world/people.h"
@@ -1229,6 +1231,70 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              }
              state.people->settings = s;
              return CommandResult::success(people_state_json(*state.people));
+         }});
+    add(registry,
+        {"set_figure_settings",
+         "How the people farther from the camera than those with entities are drawn (crowds): as figures, "
+         "each the instances of one baked pose of its look's character (bake_pose) put where the person "
+         "is, with no entity, skeleton or physics, so a town seen from afar shows its people. A look's "
+         "pose is asked for when someone of it is first within `distance`. `on` "
+         "(default false: until a figure and its entity change places unseen, one may be seen to); "
+         "`distance` (metres from the camera a person is drawn out to, default 400, at most 4000) and "
+         "`keep` (metres farther one drawn stays, default 40); `most` at once (default 4096, at most "
+         "16384); `made_a_frame` (default 64) and `scanned_a_frame` (people looked at a frame, default "
+         "1024); `triangles` each look's pose is cut to (default 1500) and `clip`, the clip of the look's "
+         "file whose start its people stand in (default \"idle\"; a file without it: its rest pose). "
+         "Changing either of the last two has every look's pose asked for again, one a frame (one "
+         "kept from before is taken, the rest are baked; nobody is a figure until its look's is there; "
+         "the old ones stay until clear_baked_poses). Fields left out stay; with none it only reports. Returns the settings with "
+         "`figures` (kept now: each drawn while its look's pose is there) and `slots` (kept for them), "
+         "`waiting` (wanted but over `most`), `made` and `removed` since the scene was taken up, and "
+         "`looks_ready`, `looks_baking` and `looks_without` (the scene's looks by their pose: baked, "
+         "being baked, and none: nobody of the look has been within `distance`, or it is not to be had: "
+         "the file not loaded or not skinned, the bake failed, or as many poses are kept as can be, "
+         "256 with bake_pose's). The counts are the last frame's. A person given an entity is a figure "
+         "no longer; one near with no entity (over set_people_settings' `most`, or waiting to be out of "
+         "sight) is a figure too; figures stand on the ground (one travelling is put on along its way "
+         "every so often). View state: not saved, not undone.",
+         object_schema(Json::array(),
+                       {{"on", {{"type", "boolean"}}},
+                        {"distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 4000}}},
+                        {"keep", {{"type", "number"}, {"minimum", 0}, {"maximum", 1000}}},
+                        {"most", {{"type", "integer"}, {"minimum", 0}, {"maximum", PeopleFigures::k_max_figures}}},
+                        {"made_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1024}}},
+                        {"scanned_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65536}}},
+                        {"triangles",
+                         {{"type", "integer"}, {"minimum", PoseBakes::k_min_triangles}, {"maximum", PoseBakes::k_max_triangles}}},
+                        {"clip", {{"type", "string"}, {"maxLength", world::k_max_name_bytes}}}}),
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.figures == nullptr) return CommandResult::failure("people are not drawn as figures here");
+             PeopleFigures::Settings& s = state.figures->settings;
+             s.on = args.value("on", s.on);
+             s.distance = args.value("distance", s.distance);
+             s.keep = args.value("keep", s.keep);
+             s.most = args.value("most", s.most);
+             s.made_a_frame = args.value("made_a_frame", s.made_a_frame);
+             s.scanned_a_frame = args.value("scanned_a_frame", s.scanned_a_frame);
+             s.triangles = args.value("triangles", s.triangles);
+             s.clip = args.value("clip", s.clip);
+             const PeopleFigures::Stats& t = state.figures->stats();
+             return CommandResult::success({{"on", s.on},
+                                            {"distance", s.distance},
+                                            {"keep", s.keep},
+                                            {"most", s.most},
+                                            {"made_a_frame", s.made_a_frame},
+                                            {"scanned_a_frame", s.scanned_a_frame},
+                                            {"triangles", s.triangles},
+                                            {"clip", s.clip},
+                                            {"figures", t.figures},
+                                            {"slots", t.slots},
+                                            {"waiting", t.waiting},
+                                            {"made", t.made},
+                                            {"removed", t.removed},
+                                            {"looks_ready", t.looks_ready},
+                                            {"looks_baking", t.looks_baking},
+                                            {"looks_without", t.looks_without}});
          }});
     add(registry,
         {"make_noise",

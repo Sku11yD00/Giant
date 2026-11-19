@@ -907,6 +907,8 @@ void start_over(const world::Scene& scene, const TerrainMeshes* terrain, const F
     out.instances.clear(); // laid out afresh
     out.free.clear();
     out.pieces.clear();
+    out.figure_cells.clear(); // (built again by whoever started over)
+    out.figure_versions.clear();
     for (const world::Entity& e : scene.entities()) {
         const world::CellCoord c = world::cell_of(e.transform.position);
         out.grid[c].ids.push_back(e.id);
@@ -1005,6 +1007,119 @@ void place(SceneFrame& out, SceneFrame::Cell& cell) {
     std::fill_n(out.instances.begin() + cell.first + need, cell.capacity - need, k_hole);
 }
 
+// The figures' cells brought up to `draws` (null: none are drawn): each
+// chunk of slots whose version is not the one it was built from is built
+// again whole (64 slots: a look's instances are made once a call and
+// copied to each of its figures, so a chunk costs a few copies), and chunks
+// past the slots there are go. `lost`: a material lost its last user.
+// False: nothing changed. The chunks built are left in out.figure_rebuilt,
+// their places to be found.
+bool follow_figures(const FigureDraws* draws, const render::Renderer& renderer, const MeshLibrary& meshes,
+                    SceneFrame& out, bool& lost) {
+    static const FigureDraws none;
+    const FigureDraws& d = draws != nullptr ? *draws : none;
+    const usize chunks = std::min((d.slots.size() + k_figure_chunk - 1) / k_figure_chunk, d.versions.size());
+    out.figure_rebuilt.clear();
+    out.figure_looks.clear();
+    out.figure_made.instances.clear();
+    std::vector<u32>& before = out.scratch; // the materials that lost a user here
+    before.clear();
+    const auto forget = [&](SceneFrame::Cell& cell) {
+        for (const render::Instance& i : cell.instances) {
+            if (i.mesh == render::k_no_mesh || i.material >= out.users.size()) continue;
+            --out.users[i.material];
+            before.push_back(i.material);
+        }
+        cell.instances.clear();
+    };
+    bool changed = false;
+    while (out.figure_cells.size() > chunks) {
+        SceneFrame::Cell& cell = out.figure_cells.back();
+        forget(cell);
+        if (cell.placed) release(out, cell.first, cell.capacity);
+        out.figure_cells.pop_back();
+        out.figure_versions.pop_back();
+        changed = true;
+    }
+    out.figure_cells.resize(chunks);
+    out.figure_versions.resize(chunks, 0);
+    static const world::DecalSettings no_decal;
+    const auto drawn = [](const FigureDraw& f) {
+        // (One whose first part came to nothing is not drawn: emit would draw its file, unposed.)
+        return f.look != nullptr && f.meshes != nullptr && !f.meshes->empty() && f.meshes->front() != render::k_no_mesh;
+    };
+    // What a look's figure draws: made once, each part with its look.
+    const auto made = [&](const FigureDraw& f) {
+        const auto it = out.figure_looks.find(f.look);
+        if (it != out.figure_looks.end()) return it->second;
+        out.figure_rest.assign(f.meshes->begin() + 1, f.meshes->end());
+        const u32 first = static_cast<u32>(out.figure_made.instances.size());
+        // (A pose with a mesh for each part of the file as it is now: with another number emit would
+        // draw the file's own parts, unposed. Such a one draws nothing.)
+        const MeshLibrary::Mesh* file = meshes.find_normalized(f.look->mesh);
+        const bool fits = file != nullptr && std::max<usize>(file->parts.size(), 1) == f.meshes->size();
+        if (fits) {
+            emit(world::Shape::mesh, f.look->mesh, f.at, f.look->material, no_decal, renderer, meshes, out, out.figure_made,
+                 f.meshes->front(), true, &out.figure_rest, &f.look->parts);
+        }
+        const SceneFrame::FigureLook look{first, static_cast<u32>(out.figure_made.instances.size()) - first};
+        out.figure_looks.emplace(f.look, look);
+        return look;
+    };
+    for (usize c = 0; c < chunks; ++c) {
+        if (out.figure_versions[c] == d.versions[c]) continue;
+        SceneFrame::Cell& cell = out.figure_cells[c];
+        forget(cell);
+        const usize first = c * k_figure_chunk, end = std::min(d.slots.size(), first + k_figure_chunk);
+        u32 parts = 0;
+        // Holes stand where its first figure does: a cell's instances are kept as floats about its first.
+        render::Instance hole = k_hole;
+        for (usize s = first; s < end; ++s) {
+            if (!drawn(d.slots[s])) continue;
+            if (parts == 0) hole.position = d.slots[s].at.position;
+            parts = std::max(parts, made(d.slots[s]).count);
+        }
+        cell.instances.assign((end - first) * parts, hole);
+        for (usize s = first; s < end && parts > 0; ++s) {
+            const FigureDraw& f = d.slots[s];
+            if (!drawn(f)) continue;
+            const SceneFrame::FigureLook look = made(f);
+            for (u32 k = 0; k < look.count; ++k) {
+                render::Instance i = out.figure_made.instances[look.first + k];
+                i.position = f.at.position;
+                i.rotation = f.at.rotation;
+                i.scale = f.at.scale;
+                ++out.users[i.material];
+                cell.instances[(s - first) * parts + k] = i;
+            }
+        }
+        cell.prev_version = 0;
+        cell.version = new_version();
+        out.figure_versions[c] = d.versions[c];
+        out.figure_rebuilt.push_back(static_cast<u32>(c));
+        changed = true;
+    }
+    // (What the looks' own instances counted: they are not drawn.)
+    for (const render::Instance& i : out.figure_made.instances) {
+        --out.users[i.material];
+        before.push_back(i.material);
+    }
+    for (const u32 m : before) lost = lost || out.users[m] == 0;
+    if (changed) ++out.cells_rebuilt; // (the frame's cells gathered again)
+    return changed;
+}
+
+// A figures' chunk built again finds its place (one with nothing to draw has none).
+void place_figures(SceneFrame& out, SceneFrame::Cell& cell) {
+    if (!cell.instances.empty()) {
+        place(out, cell);
+        return;
+    }
+    if (cell.placed) release(out, cell.first, cell.capacity);
+    cell.placed = false;
+    cell.capacity = 0;
+}
+
 bool same_kit(const world::Kit& a, const world::Kit& b) {
     if (a.name != b.name || a.pieces.size() != b.pieces.size()) {
         return false;
@@ -1088,7 +1203,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
                  const std::unordered_map<world::EntityId, world::Transform>* walkers,
                  const std::unordered_set<world::EntityId>* moving,
                  const std::unordered_map<world::EntityId, world::Transform>* ragdolls,
-                 const std::unordered_map<world::EntityId, std::vector<render::MeshId>>* skinned_parts) {
+                 const std::unordered_map<world::EntityId, std::vector<render::MeshId>>* skinned_parts,
+                 const FigureDraws* figures) {
     out.cells_rebuilt = 0;
     out.maps_seen.clear(); // the scene may have changed since: its materials' addresses with it
     out.skin_seen.clear();
@@ -1263,6 +1379,10 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             ++it;
         }
     }
+    // The figures, in their own cells.
+    bool figures_lost = false;
+    bool figures_changed = follow_figures(figures, renderer, meshes, out, figures_lost);
+    compact = compact || figures_lost;
     // Unused entries linger (a cell streaming out must not rebuild every
     // cell): the table is made again once they outnumber the used ones and
     // compact_unused_over.
@@ -1307,6 +1427,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             }
         }
         layout = true;
+        figures_changed = follow_figures(figures, renderer, meshes, out, figures_lost) || figures_changed;
     }
     if (layout) {
         out.order.clear();
@@ -1331,7 +1452,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     const bool layer_textures = terrain_layers(scene, out);
     // The textures drawn materials use, when that may have changed: the
     // rest leave the GPU after a while.
-    if (out.textures != nullptr && (!rebuilt.empty() || compact || layer_textures)) {
+    if (out.textures != nullptr && (!rebuilt.empty() || compact || layer_textures || figures_changed)) {
         std::vector<u32>& used = out.scratch;
         used.clear();
         for (usize i = 0; i < out.materials.size(); ++i) {
@@ -1386,6 +1507,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             const auto it = out.grid.find(coord);
             if (it != out.grid.end()) place(out, it->second);
         }
+        for (const u32 c : out.figure_rebuilt) place_figures(out, out.figure_cells[c]);
         // Too much of the list is holes no cell has: laid out afresh, end
         // to end (each cell's own room to grow is not counted: it is at
         // most a quarter of it, and four).
@@ -1405,8 +1527,16 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             cell.placed = false;
             place(out, cell);
         }
+        for (SceneFrame::Cell& cell : out.figure_cells) {
+            cell.placed = false;
+            cell.capacity = 0;
+            place_figures(out, cell);
+        }
     }
     out.cells.clear();
+    for (const SceneFrame::Cell& f : out.figure_cells) {
+        if (f.capacity > 0) out.cells.push_back({f.first, f.capacity, f.version});
+    }
     for (const auto& [coord, cell] : out.grid) {
         render::CellRange range{cell.first, cell.capacity, cell.version}; // empty ones too (decals only)
         if (cell.prev_version != 0) {

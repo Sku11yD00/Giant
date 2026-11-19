@@ -142,6 +142,11 @@ public:
     // The entity standing for a person in `scene` now, or 0.
     world::EntityId entity_of(const world::Scene& scene, world::PersonId id) const;
     const Stats& stats() const { return m_stats; }
+    // Whether a person has an entity now, and all who do (added to `out`).
+    bool holds(world::PersonId id) const { return m_held.contains(id); }
+    void held(std::vector<world::PersonId>& out) const {
+        for (const auto& [id, h] : m_held) out.push_back(id);
+    }
 
     // The entity made for `person` of `look`, standing at `at` (not added to a scene).
     static world::Entity entity_for(const world::Person& person, const world::PersonLook& look,
