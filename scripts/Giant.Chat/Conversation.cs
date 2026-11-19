@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Anthropic;
 using Anthropic.Exceptions;
+using Anthropic.Helpers;
 using Anthropic.Models.Beta.Messages;
 
 namespace Giant.Chat;
@@ -100,6 +101,9 @@ internal sealed class Conversation
         // Claude's replies that hold its thinking (by their place in Messages): each as it is without.
         public readonly Dictionary<int, List<BetaContentBlockParam>> Unthought = [];
         public readonly Queue<Waiting> Tools = new();
+        // The words of the reply now arriving, until they are a line (a cleared talk's go nowhere), and which reply.
+        public readonly StringBuilder Writing = new();
+        public long WritingID;
         public CancellationTokenSource? Stop;
         public bool Busy;
         public bool Stopping; // the person stopped the work on the last message (until it has ended)
@@ -113,6 +117,8 @@ internal sealed class Conversation
     private Talk _talk = new();
     private Waiting? _held; // the tool the editor holds until the person has answered (of this talk, or one cleared since)
     private long _serial;
+    private long _changes; // lines added and words written, together (the stamp)
+    private long _written; // replies whose words began to arrive (names the one being written)
     private long _inputTokens;
     private long _outputTokens;
     private int _working; // messages being worked on, a cleared conversation's last included
@@ -170,8 +176,9 @@ internal sealed class Conversation
     }
 
     /// <summary>
-    /// A number that changes whenever the conversation does (a line added, work begun or
-    /// ended): its lowest bit is whether Claude is working, the rest the newest line's serial.
+    /// A number that changes whenever the conversation does (a line added, words of a reply
+    /// arriving, work begun or ended): its lowest bit is whether Claude is working, the rest
+    /// counts the changes.
     /// </summary>
     public int Stamp
     {
@@ -179,7 +186,7 @@ internal sealed class Conversation
         {
             lock (_lock)
             {
-                return (int)((_serial & 0x3fffffff) << 1) | (_talk.Busy ? 1 : 0);
+                return (int)((_changes & 0x3fffffff) << 1) | (_talk.Busy ? 1 : 0);
             }
         }
     }
@@ -399,9 +406,11 @@ internal sealed class Conversation
 
     /// <summary>
     /// The lines after serial <paramref name="after"/>, oldest first, at most
-    /// <paramref name="limit"/>, as JSON, with where to read from next.
+    /// <paramref name="limit"/>, as JSON, with where to read from next. Of the reply being written
+    /// it gives the words from <paramref name="writingFrom"/> on when the reader holds the ones before
+    /// (it names the reply with <paramref name="writingID"/>, as an earlier read gave it), else all.
     /// </summary>
-    public string Read(long after, int limit, bool keyFound)
+    public string Read(long after, int limit, bool keyFound, long writingID = 0, long writingFrom = 0)
     {
         using MemoryStream stream = new();
         using (Utf8JsonWriter json = new(stream))
@@ -443,6 +452,16 @@ internal sealed class Conversation
                 json.WriteNumber("latest", _serial);
                 json.WriteNumber("oldest", _entries.Count > 0 ? _entries[0].Serial : _serial + 1);
                 json.WriteBoolean("busy", _talk.Busy);
+                // (Only what the reader lacks: a long answer is not written out whole with every word that comes.)
+                StringBuilder writing = _talk.Writing;
+                int from = writing.Length > 0 && writingID == _talk.WritingID && writingFrom > 0 && writingFrom <= writing.Length &&
+                           !(writingFrom < writing.Length && char.IsLowSurrogate(writing[(int)writingFrom]))
+                    ? (int)writingFrom
+                    : 0;
+                json.WriteString("writing", writing.ToString(from, writing.Length - from));
+                json.WriteNumber("writing_id", writing.Length > 0 ? _talk.WritingID : 0);
+                json.WriteNumber("writing_from", from);
+                json.WriteNumber("writing_end", writing.Length);
                 json.WriteBoolean("key_found", keyFound);
                 json.WriteString("model", Model);
                 json.WriteNumber("input_tokens", _inputTokens);
@@ -467,7 +486,22 @@ internal sealed class Conversation
                     Note(talk, "note", "Claude stopped after " + MostSteps + " steps. Say \"go on\" to let it continue.");
                     break;
                 }
-                BetaMessage reply = await client.Beta.Messages.Create(Request(talk), stop).ConfigureAwait(false);
+                // The reply is read as it is written, so that its words show while they come.
+                BetaMessageContentAggregator all = new();
+                await foreach (BetaRawMessageStreamEvent part in client.Beta.Messages.CreateStreaming(Request(talk), stop).CollectAsync(all).ConfigureAwait(false))
+                {
+                    if (part.TryPickContentBlockDelta(out BetaRawContentBlockDeltaEvent? delta) &&
+                        delta.Delta.TryPickText(out BetaTextDelta? written))
+                    {
+                        Write(talk, written.Text);
+                    }
+                }
+                BetaMessage reply = all.Message();
+                if (reply.StopReason == null)
+                {
+                    // (The stream ended before the reply did: what came of it is no reply to keep.)
+                    throw new IOException("the answer broke off before its end");
+                }
                 lock (_lock)
                 {
                     if (!ReferenceEquals(talk, _talk))
@@ -481,6 +515,7 @@ internal sealed class Conversation
                 // (Before anything of the reply is used: a declined reply's content is not to be kept.)
                 if (reply.StopReason == BetaStopReason.Refusal)
                 {
+                    Unwrite(talk); // (what showed of it while it came is withdrawn too)
                     if (step == 0)
                     {
                         // The message that was declined is taken back, or it would go out again,
@@ -553,9 +588,14 @@ internal sealed class Conversation
                         asked.Add(use);
                     }
                 }
-                if (words.Length > 0)
+                // (What showed while it came becomes the line, in one step: nothing shows twice, or not at all.)
+                lock (_lock)
                 {
-                    Note(talk, "claude", words.ToString());
+                    Unwritten(talk);
+                    if (words.Length > 0)
+                    {
+                        Add(talk, "claude", words.ToString());
+                    }
                 }
                 bool whole = reply.StopReason == BetaStopReason.ToolUse;
                 if (asked.Count > 0 && !whole)
@@ -679,20 +719,20 @@ internal sealed class Conversation
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested)
         {
-            Note(talk, "note", "Stopped.");
+            Ended(talk, "note", "Stopped.");
         }
         catch (OperationCanceledException)
         {
-            Note(talk, "error", "Claude's service took too long to answer. Try again.");
+            Ended(talk, "error", "Claude's service took too long to answer. Try again.");
         }
         catch (AnthropicUnauthorizedException)
         {
-            Note(talk, "error", "Claude's service did not accept the key. Check " + Keys.Variable + " (or " + Keys.FilePath() +
+            Ended(talk, "error", "Claude's service did not accept the key. Check " + Keys.Variable + " (or " + Keys.FilePath() +
                                 "); a corrected key file is read with the next message.");
         }
         catch (AnthropicRateLimitException)
         {
-            Note(talk, "error", "Claude's service says this key has reached its rate limit for now. Try again in a little while.");
+            Ended(talk, "error", "Claude's service says this key has reached its rate limit for now. Try again in a little while.");
         }
         catch (AnthropicApiException e)
         {
@@ -704,15 +744,16 @@ internal sealed class Conversation
                 taken = talk.Pictured.Count > 0;
                 LetPicturesGo(talk, 0, 0, 0);
             }
-            Note(talk, "error", "Claude's service answered with an error: " + e.Message +
+            Ended(talk, "error", "Claude's service answered with an error: " + e.Message +
                                 (taken ? " The pictures were taken out of the conversation, in case one of them was why." : ""));
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
-            Note(talk, "error", "Claude could not be reached: " + e.Message);
+            Ended(talk, "error", "Claude could not be reached: " + e.Message);
         }
         finally
         {
+            Unwrite(talk); // (nothing of it is left showing, however the work ended)
             lock (_lock)
             {
                 talk.Busy = false;
@@ -894,6 +935,62 @@ internal sealed class Conversation
     private static ReadOnlySpan<char> Start(string text, int most) =>
         text.AsSpan(0, char.IsHighSurrogate(text[most - 1]) ? most - 1 : most);
 
+    /// <summary>What stands after an answer that did not come whole.</summary>
+    public const string Unfinished = " (Claude will not remember the answer it had begun.)";
+
+    // A word or a few of the reply now arriving.
+    private void Write(Talk talk, string text)
+    {
+        lock (_lock)
+        {
+            if (text.Length > 0)
+            {
+                if (talk.Writing.Length == 0)
+                {
+                    talk.WritingID = ++_written;
+                }
+                talk.Writing.Append(text);
+                ++_changes;
+            }
+        }
+    }
+
+    // (Locked by the caller.) What showed of a reply while it came shows no longer.
+    private void Unwritten(Talk talk)
+    {
+        if (talk.Writing.Length > 0)
+        {
+            talk.Writing.Clear();
+            ++_changes;
+        }
+    }
+
+    // What showed of a reply while it came is withdrawn.
+    private void Unwrite(Talk talk)
+    {
+        lock (_lock)
+        {
+            Unwritten(talk);
+        }
+    }
+
+    // The work ended other than by Claude finishing: what it had begun to say stays to be read
+    // (it is no part of what Claude is sent again, and the note says so), then why it ended.
+    private void Ended(Talk talk, string kind, string text)
+    {
+        lock (_lock)
+        {
+            string begun = talk.Writing.ToString();
+            Unwritten(talk);
+            if (!string.IsNullOrWhiteSpace(begun))
+            {
+                Add(talk, "claude", begun + " …");
+                text += Unfinished;
+            }
+            Add(talk, kind, text);
+        }
+    }
+
     private void Note(Talk talk, string kind, string text, string? tool = null, bool ok = true)
     {
         lock (_lock)
@@ -910,6 +1007,7 @@ internal sealed class Conversation
             return;
         }
         _entries.Add(new Entry(++_serial, kind, text, tool, ok));
+        ++_changes;
         if (_entries.Count > MostEntries)
         {
             _entries.RemoveRange(0, _entries.Count - MostEntries);

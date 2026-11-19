@@ -4190,6 +4190,27 @@ say that a picture came, never its bytes. A screenshot's PNG is packed
 (`giant/core/png.h`: a filter chosen per row, one deflate block of fixed
 codes), which keeps a window-sized one well under the bounds.
 
+#### Replies as they are written (LW6b part 5)
+
+A request asks for the reply as a stream (`CreateStreaming`); the SDK's
+own aggregator (`BetaMessageContentAggregator`) makes the whole message of
+it, which is handled as before (one without a stop reason, a stream that
+ended early, is thrown as broken). Meanwhile each text delta is appended
+to the talk's `Writing`, which `get_chat` gives as `writing` and the Chat
+panel draws under the lines; a delta moves the stamp, so the panel reads
+again only in frames in which words came, and it asks only for the words
+it does not hold yet (`writing_id` names the answer, `writing_from` is
+how much of it the reader has: a long answer is not written out whole
+with every word). The words become the `claude`
+line in one step with `writing` being emptied, so nothing shows twice or
+is missing for a frame. A declined reply's words are withdrawn (nothing
+of it is kept). When the work ends otherwise before the reply is whole (a
+stop, a broken connection, an error), what had come stays as a line
+ending in " …" and the note after it says Claude will not remember it:
+it was never part of what Claude is sent. The panel follows what Claude
+adds (the growing reply, and its lines) down only while its view is at
+the end; the person's own message always scrolls there.
+
 The key (`Keys`) is read from `ANTHROPIC_API_KEY`, else the first line of
 `claude_key.txt` in the person's own settings folder, with every message
 sent (so a corrected key is used at once). It is handed to the client
@@ -4214,8 +4235,8 @@ them reaches Claude's real service.
 The Chat panel (`EditorPanels::draw_chat`, LW6b part 2) keeps its own
 copy of the lines (`ChatView`) and reads `get_chat` only when
 `EditorState::chat_stamp` moved: the bridge bumps it when the C# side's
-stamp (the newest line's serial and whether Claude is working, returned by
-its per-frame update) changes, and on every send, stop and clear, refused
+stamp (a count of the lines added and the words arrived, and whether
+Claude is working, returned by its per-frame update) changes, and on every send, stop and clear, refused
 or not (`ChatStamp`; never on a read, or the panel would read every frame).
 A frame
 in which nothing happened costs the panel one comparison. New lines are

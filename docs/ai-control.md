@@ -87,9 +87,14 @@ The panel is these commands, which the AI over MCP can use too:
 | Command | What it does |
 | --- | --- |
 | `chat_send` | Sends `text` to Claude. Returns at once; the answer and what Claude does arrive over the next seconds |
-| `get_chat` | The conversation's lines after serial `after` (at most `limit`, 1 to 256, default 64), oldest first: `kind` is `you`, `claude`, `tool` (a tool Claude called: `tool` names it, `text` is its arguments), `result` (what came back, with `ok`), `note` or `error`. Also `busy` (Claude is working), `after` (pass it to the next call), `latest` and `oldest` (2,000 lines are kept), `started` (false until the first message is sent) and, once started, `key_found`, `model`, `input_tokens` and `output_tokens` so far. `asking` is the command of Claude's the person is being asked about in the editor's window (`command`, `args` as text, `args_hidden`: bytes of it too long to show), or null |
+| `get_chat` | The conversation's lines after serial `after` (at most `limit`, 1 to 256, default 64), oldest first: `kind` is `you`, `claude`, `tool` (a tool Claude called: `tool` names it, `text` is its arguments), `result` (what came back, with `ok`), `note` or `error`. Also `busy` (Claude is working), `writing` (the words of Claude's answer as far as they have come, "" when none is on its way: they become a `claude` line once the answer is whole; to be given only the new words, pass the last reply's `writing_id` and its `writing_end` as `writing_from`, and `writing` starts at the reply's `writing_from`, which is 0 again for another answer), `after` (pass it to the next call), `latest` and `oldest` (2,000 lines are kept), `started` (false until the first message is sent) and, once started, `key_found`, `model`, `input_tokens` and `output_tokens` so far. `asking` is the command of Claude's the person is being asked about in the editor's window (`command`, `args` as text, `args_hidden`: bytes of it too long to show), or null |
 | `stop_chat` | Stops Claude's work on the last message: no further commands run (one running now finishes). What it already did stays (undo takes it back). The work ends a moment later: `busy` says when |
 | `clear_chat` | Forgets the conversation; the next message starts a new one |
+
+Claude's answer shows in the Chat panel while it is being written. If you
+stop it part way, or the connection breaks, what had come stays to be
+read, marked with " …", and the note under it says that Claude will not
+remember that unfinished answer.
 
 Claude can look at the editor: when it runs `capture_screenshot`, the
 picture goes to it with the command's result (up to four pictures a

@@ -1411,6 +1411,15 @@ void EditorPanels::draw_people() {
     ImGui::End();
 }
 
+namespace {
+// Claude's words: a line of the conversation, or the answer as far as it has come.
+void claude_says(const std::string& text) {
+    ImGui::Spacing();
+    ImGui::TextColored({0.95f, 0.7f, 0.45f, 1.0f}, "Claude");
+    ImGui::TextUnformatted(text.c_str(), text.c_str() + text.size());
+}
+} // namespace
+
 // The Chat panel: the conversation with Claude (chat.h). Sending, stopping
 // and clearing are the chat's commands; the lines are read (get_chat) only
 // when the conversation changed.
@@ -1421,9 +1430,8 @@ void EditorPanels::draw_chat() {
         return;
     }
     static constexpr const char* k_still_working = "Claude is still working on your last message. Wait for it to finish, or press Stop.";
-    if (m_chat.update(m_commands, m_state)) {
-        m_chat_to_end = true;
-    }
+    const usize writing_before = m_chat.writing().size();
+    m_chat_grew = m_chat.update(m_commands, m_state) || m_chat.writing().size() != writing_before || m_chat_grew;
     const bool busy = m_state.chat_busy;
     if (!busy && m_chat_error == k_still_working) {
         m_chat_error.clear(); // (no longer so)
@@ -1500,9 +1508,7 @@ void EditorPanels::draw_chat() {
                 ImGui::TextColored({0.55f, 0.8f, 1.0f, 1.0f}, "You");
                 ImGui::TextUnformatted(text, end);
             } else if (line.kind == "claude") {
-                ImGui::Spacing();
-                ImGui::TextColored({0.95f, 0.7f, 0.45f, 1.0f}, "Claude");
-                ImGui::TextUnformatted(text, end);
+                claude_says(line.text);
             } else if (line.kind == "tool") {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
                 if (m_chat_details) {
@@ -1536,11 +1542,17 @@ void EditorPanels::draw_chat() {
                 ImGui::PopStyleColor();
             }
         }
+        if (const std::string& writing = m_chat.writing(); !writing.empty()) {
+            // The reply as far as it has come: a line once it is whole.
+            claude_says(writing);
+        }
         ImGui::PopTextWrapPos();
-        if (m_chat_to_end) {
+        // (What Claude adds is followed down only by who is at the end: reading further up is left alone.)
+        if (m_chat_to_end || (m_chat_grew && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f)) {
             m_chat_to_end = false;
             ImGui::SetScrollHereY(1.0f);
         }
+        m_chat_grew = false;
     }
     ImGui::EndChild();
 

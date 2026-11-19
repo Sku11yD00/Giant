@@ -115,7 +115,8 @@ public static unsafe class Native
     /// <summary>
     /// Runs one tool Claude is waiting for, if any (one a frame: a command
     /// may take a while). Returns the conversation's stamp: odd while Claude
-    /// is working, and another number whenever a line was added.
+    /// is working, and another number whenever a line was added or words of
+    /// a reply came.
     /// </summary>
     [UnmanagedCallersOnly]
     public static int Update()
@@ -157,7 +158,9 @@ public static unsafe class Native
             {
                 long after = root.TryGetProperty("after", out JsonElement a) ? a.GetInt64() : 0;
                 int limit = root.TryGetProperty("limit", out JsonElement l) ? l.GetInt32() : 64;
-                return (true, s_conversation.Read(after, limit, KeyFound()));
+                long writingID = root.TryGetProperty("writing_id", out JsonElement w) ? w.GetInt64() : 0;
+                long writingFrom = root.TryGetProperty("writing_from", out JsonElement f) ? f.GetInt64() : 0;
+                return (true, s_conversation.Read(after, limit, KeyFound(), writingID, writingFrom));
             }
             case "stop":
                 return (true, s_conversation.Stop() ? "{\"stopped\":true}" : "{\"stopped\":false}");

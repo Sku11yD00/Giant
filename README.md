@@ -432,6 +432,8 @@ Open-world systems:
   script file. Only the buttons in the editor's window answer.
 - LW6b part 4: Claude in the chat can look at the editor: a
   screenshot it takes comes back to it as a picture.
+- LW6b part 5: Claude's answers in the chat appear as they are written,
+  word by word, instead of all at once at the end.
 - LW7 part 1: mods as folders beside a world, each with a manifest (id,
   version, the mods it needs), a load order that is the same every time,
   and every problem said (`list_mods`, `enable_mod`; `docs/mods.md`).

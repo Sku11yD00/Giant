@@ -224,6 +224,9 @@ struct LinesLink final : ChatLink {
     int fail_read = 0;   // the read (counted from 1) that fails; 0: none
     bool mistyped = false; // every field of the reply of another type than it should be
     bool stuck = false;    // the reply's `after` does not move on (a chat gone wrong)
+    std::string writing;   // the words of a reply now arriving
+    u64 writing_id = 0;    // which reply they are of
+    usize writing_given = 0; // bytes of them the last read was given
     ai::CommandResult ask(std::string_view what, const Json& args) override {
         if (what != "read") {
             return ai::CommandResult::success();
@@ -253,7 +256,14 @@ struct LinesLink final : ChatLink {
             cursor = serial;
         }
         Json reply = {{"entries", std::move(entries)}, {"after", stuck ? after : std::min(cursor, latest)}, {"latest", latest},
-                      {"oldest", oldest},              {"busy", false},                     {"started", started}};
+                      {"oldest", oldest},              {"busy", false},                     {"started", started},
+                      {"writing_id", writing.empty() ? 0 : writing_id}, {"writing_end", writing.size()}};
+        // (As the chat does: only what the reader does not hold of this reply.)
+        const u64 held = args.value("writing_from", u64{0});
+        const usize from = !writing.empty() && args.value("writing_id", u64{0}) == writing_id && held <= writing.size() ? static_cast<usize>(held) : 0;
+        reply["writing"] = writing.substr(from);
+        reply["writing_from"] = from;
+        writing_given = writing.size() - from;
         if (started) {
             reply.update({{"key_found", true}, {"model", "claude-opus-5-5"}, {"input_tokens", 120}, {"output_tokens", 30}});
         }
@@ -346,6 +356,44 @@ GIANT_TEST("chat view: reads the conversation only when it changed, and follows 
     link.latest += 1;
     f.state.chat_stamp = 11;
     GIANT_CHECK(view.update(f.commands, f.state) && view.lines().back().serial == link.latest && view.started());
+}
+
+GIANT_TEST("chat view: the words of a reply being written are shown as they are, and are no line") {
+    Fixture f;
+    LinesLink link;
+    f.state.chat = &link;
+    ChatView view;
+    link.latest = 1;
+    GIANT_CHECK(view.update(f.commands, f.state) && view.lines().size() == 1 && view.writing().empty());
+    // Words arrive: the stamp moves, the view has them, and no line was added (nothing to scroll for).
+    link.writing = "Hello the";
+    link.writing_id = 7;
+    f.state.chat_stamp = 1;
+    GIANT_CHECK(!view.update(f.commands, f.state) && view.writing() == "Hello the" && view.lines().size() == 1);
+    link.writing = "Hello there, fri";
+    GIANT_CHECK(!view.update(f.commands, f.state) && view.writing() == "Hello the"); // (not read again until the stamp moves)
+    f.state.chat_stamp = 2;
+    GIANT_CHECK(!view.update(f.commands, f.state) && view.writing() == "Hello there, fri");
+    GIANT_CHECK(link.writing_given == 7); // only the new words were asked for ("re, fri"): a long answer is not read whole each time
+    // Another answer in its place, longer than what was held: taken from its start, not added on.
+    link.writing = "Something else entirely, and longer";
+    link.writing_id = 8;
+    f.state.chat_stamp = 20;
+    GIANT_CHECK(!view.update(f.commands, f.state) && view.writing() == "Something else entirely, and longer");
+    link.writing = "Hello there, fri";
+    link.writing_id = 9;
+    f.state.chat_stamp = 21;
+    GIANT_CHECK(!view.update(f.commands, f.state) && view.writing() == "Hello there, fri");
+    // The reply is whole: a line, and nothing being written.
+    link.writing.clear();
+    link.latest = 2;
+    f.state.chat_stamp = 30;
+    GIANT_CHECK(view.update(f.commands, f.state) && view.lines().size() == 2 && view.writing().empty());
+    // A reply that has no `writing` at all (or one of another type) reads as none.
+    link.mistyped = true;
+    f.state.chat_stamp = 40;
+    view.update(f.commands, f.state);
+    GIANT_CHECK(view.writing().empty());
 }
 
 GIANT_TEST("chat view: a full page is followed by one more read, and a chat that does not move on is not read in a loop") {
