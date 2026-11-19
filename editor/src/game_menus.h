@@ -15,12 +15,22 @@
 // runs. Menus take the window's input only over play (outside play they
 // are MCP's), and only while the game UI is shown: with it hidden, Esc
 // stops play as it did before the menus.
+//
+// Run as a game (EditorState::game_mode), the menus lead: outside play the
+// main menu stands (Continue: the newest save of this world that can be
+// loaded; New game: the game as the world is authored, play starting at
+// the view the program opened with, since a world names no player start
+// yet; Load; Settings; Quit: the program ends) and takes the input, the
+// pause menu's Quit goes back to it, and a game loaded from a menu is
+// played once it is in (one that could not be loaded leads back to the
+// main menu, which says why). Nothing leads to the editor.
 #pragma once
 
 #include "giant/core/jobs.h"
 #include "giant/core/types.h"
 #include "giant/platform/input.h"
 
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -28,11 +38,12 @@
 
 namespace giant::editor {
 
+struct EditorCamera;
 struct EditorState;
 
 class GameMenus {
 public:
-    enum class Menu : u8 { none, pause, saves, settings };
+    enum class Menu : u8 { none, pause, saves, settings, main };
     static const char* to_string(Menu menu);
 
     // Its screens loaded on `state.game_ui` (none: nothing shown).
@@ -75,6 +86,8 @@ public:
     };
     const std::vector<Slot>& slots() const { return m_slots; }
     const std::string& message() const { return m_message; }
+    // What the main menu says went wrong (a game that could not be loaded or begun); empty: nothing.
+    const std::string& notice() const { return m_notice; }
     // The slot list still being read; wait() blocks until it is in (tests).
     bool reading() const { return m_reading; }
     void wait();
@@ -89,6 +102,14 @@ private:
     void read_slots();
     void take_read();
     void press(const std::string& screen, const std::string& id);
+    // Where Back and Esc lead from the saves and the settings.
+    Menu before() const;
+    // Starts loading `slot` (not `force`d); false with `m_message` saying why not.
+    bool load(const std::string& slot);
+    // A game: the main menu, saying `notice`.
+    void lead(std::string notice);
+    // A game: play begun from the menus (a new game, or the loaded one). False: the main menu, saying why not.
+    bool begin_play();
 
     EditorState& m_state;
     Menu m_menu = Menu::none;
@@ -97,11 +118,18 @@ private:
     std::vector<Slot> m_slots;
     std::string m_message;
     bool m_was_playing = false;
+    // A load begun from the menus, until it is in or has failed (a game then plays it, or says why not).
+    bool m_loading = false;
+    u64 m_failures_before = 0; // GameSaves::Status::failures when it began
+    std::string m_notice;
+    std::string m_newest;   // the slot Continue loads (the newest of this world that can be read); empty: none
+    std::unique_ptr<EditorCamera> m_start; // a game: the view it opened with (a new game starts there)
 
     struct Read {
         u64 id = 0;
         std::vector<Slot> slots;
         std::vector<std::string> names; // every slot's, for "New save"
+        std::string newest;             // the newest of this world that can be read (of all, not only the rows)
         std::string message;
     };
     std::vector<std::string> m_names;

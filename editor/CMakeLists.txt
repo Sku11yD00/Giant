@@ -113,6 +113,11 @@ if(GIANT_BUILD_TESTS)
         "ASAN_OPTIONS=handle_segv=0:allow_user_segv_handler=1:detect_leaks=0:use_sigaltstack=0")
     endif()
     set_tests_properties(editor_mcp PROPERTIES TIMEOUT 3060 ENVIRONMENT "${mcp_env}")
+    # The program run as a game (--game <world>): its main menu, play, back to the menu, out.
+    add_test(NAME editor_game
+      COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/game_smoke.py
+              $<TARGET_FILE:giant_editor> --hidden ${mcp_backend})
+    set_tests_properties(editor_game PROPERTIES TIMEOUT 900 ENVIRONMENT "${mcp_env}")
     # The chat with Claude, end to end against a stand-in for its service (no key, no network).
     if(GIANT_DOTNET AND NOT GIANT_SANITIZE_THREAD)
       add_test(NAME editor_chat

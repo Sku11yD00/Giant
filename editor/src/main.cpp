@@ -119,6 +119,7 @@ struct Options {
     bool allow_mods_scripts_by_command = false; // automated runs: enable_mod allows a mod's scripts without asking the person
     bool allow_scripts_by_command = false;      // automated runs: load_scripts loads a file without asking the person
     bool chat_asks = false;                     // Claude's changes from the chat wait for the person even with --hidden
+    std::string game; // a world folder to run as a game (its menus lead, no editor panels); empty: the editor
 };
 
 // The command line as UTF-8. On Windows, main's argv is in the ANSI code
@@ -187,6 +188,12 @@ bool parse_options(const std::vector<std::string>& argv, Options& out) {
             out.chat_asks = true;
         } else if (arg == "--scripts" && i + 1 < argc) {
             out.scripts = argv[++i];
+        } else if (arg == "--game" && i + 1 < argc) {
+            out.game = argv[++i];
+            if (out.game.empty()) {
+                log_error("editor", "--game needs a world folder");
+                return false;
+            }
         } else {
             log_error("editor", "unknown option: " + std::string(arg));
             return false;
@@ -391,7 +398,7 @@ int run(const Options& options) {
     const LogHistory log_history;
 
     platform::WindowDesc window_desc;
-    window_desc.title = "Giant Editor";
+    window_desc.title = options.game.empty() ? "Giant Editor" : "Giant";
     window_desc.hidden = options.hidden;
     auto window = platform::Window::create(window_desc);
     if (window == nullptr) {
@@ -543,7 +550,9 @@ int run(const Options& options) {
     // The chat with Claude: its C# side starts with the first message.
     // (Claude asks before it changes anything, until the person says otherwise in the Chat panel; where
     // there is no window no one could answer, and whoever drives the editor has every command anyway.)
-    state.chat_gate.asks = !options.hidden || options.chat_asks;
+    // (A game draws no window of the editor's to ask in: as with none at all.)
+    const bool nobody_to_ask = options.hidden || !options.game.empty();
+    state.chat_gate.asks = !nobody_to_ask || options.chat_asks;
     editor::ChatBridge chat(commands, state.chat_gate, [&scripts] { return scripts.host(); }, find_managed_dir());
     state.chat = &chat;
     // (Gone from the state before it is destroyed: scripts' OnStop, which runs after, may ask for it.)
@@ -553,7 +562,7 @@ int run(const Options& options) {
     } chat_gone{state};
     state.scripts_to_load = options.scripts;
     state.scripts_consent = options.allow_scripts_by_command ? editor::ScriptsConsent::by_command
-                            : options.hidden                 ? editor::ScriptsConsent::none
+                            : nobody_to_ask                  ? editor::ScriptsConsent::none
                                                              : editor::ScriptsConsent::ask;
     if (!options.scripts.empty()) {
         // (The person's own choice, on the command line: theirs to load again without being asked.)
@@ -562,7 +571,7 @@ int run(const Options& options) {
         }
     }
     state.mods_scripts_consent = options.allow_mods_scripts_by_command ? editor::ScriptsConsent::by_command
-                                 : options.hidden                          ? editor::ScriptsConsent::none
+                                 : nobody_to_ask                           ? editor::ScriptsConsent::none
                                                                            : editor::ScriptsConsent::ask;
     if (const std::filesystem::path settings = settings_folder(); !settings.empty()) {
         try {
@@ -799,6 +808,20 @@ int run(const Options& options) {
     editor::FrameInfo frame_info;
     auto last_frame = std::chrono::steady_clock::now();
 
+    // Run as a game: the world it is of is opened now, and the game's menus lead from the first frame.
+    if (!options.game.empty()) {
+        if (game_ui.font() == nullptr) {
+            log_error("game", "the game's menus cannot be drawn (no font): a game has no other way in or out");
+            return 1;
+        }
+        state.game_mode = true;
+        const ai::CommandResult opened = commands.execute("open_world", {{"folder", options.game}}, {});
+        if (!opened.ok) {
+            log_error("game", "the game's world could not be opened (" + options.game + "): " + opened.error);
+            return 1;
+        }
+    }
+
     // The null backend has no display to wait for, so pace it like vsync
     // instead of spinning a CPU core.
     const bool pace_null = device->backend() == rhi::Backend::null && options.vsync;
@@ -891,13 +914,13 @@ int run(const Options& options) {
         if (play.playing()) {
             // The player's keys and mouse, not the editor camera's.
             if (!menu_took) play.handle_input(input, ui->wants_keyboard());
-        } else {
+        } else if (!state.game_mode) { // (a game has no editor camera, brush or panels: its menus only)
             viewport_camera.handle_input(input, ui->wants_mouse());
             terrain_brush.update(input, ui->wants_mouse(), static_cast<float>(window->point_width()),
                                  static_cast<float>(window->point_height()), delta, state, commands);
             viewport_camera.update(state.camera, delta);
         }
-        panels.draw(frame_info);
+        if (!state.game_mode) panels.draw(frame_info);
         ui->end_frame();
         mark(editor::FramePhase::ui);
         saves.update(state, game_delta); // a save or load's result, a load's cells a share a frame (before play)

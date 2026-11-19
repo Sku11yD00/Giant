@@ -310,6 +310,9 @@ struct EditorState {
     float water_swell = 0.0f;   // the most the sea's swell rises now (world::swell_most, before a sea's waves)
     FrameTimes frame_times; // updated by the main loop
     bool quit_requested = false;
+    // The program runs as a game (--game <world>): the game's menus lead (game_menus.h), its UI
+    // always shows, and no editor panel is drawn. Set by main (and tests).
+    bool game_mode = false;
     // Renders the editor as it looks now (viewport and panels) and returns
     // RGBA8 pixels at the window's pixel size; empty on failure. Set by main.
     std::function<std::vector<u8>()> render_screenshot;

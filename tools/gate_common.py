@@ -201,10 +201,16 @@ class Editor:
                                         stdout=subprocess.PIPE, stderr=None, text=True, encoding="utf-8",
                                         bufsize=1)
         self.timer = threading.Timer(timeout, self.process.kill)
+        self.timer.daemon = True  # (never what keeps the script alive)
         self.timer.start()
         self.next_id = 0
-        self.call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
-                                 "clientInfo": {"name": name, "version": "1"}})
+        try:
+            self.call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                     "clientInfo": {"name": name, "version": "1"}})
+        except Exception:
+            self.timer.cancel()
+            self.process.kill()
+            raise
 
     def call(self, method, params=None):
         self.next_id += 1
