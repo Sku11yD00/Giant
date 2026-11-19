@@ -5262,6 +5262,35 @@ and load, settings), which also route the real mouse and keys to screens.
   the menus' own screens' events are taken; the game's stay queued for
   `get_ui_events`. MCP: `get_menu`, `open_menu`, `set_game_settings`, and
   `ui_click` on the menu screens.
+- **Run as a game (N7 part 1).** `giant_editor --game <world folder>` is
+  the same program with `EditorState::game_mode` set: the world is opened
+  before the first frame (the program ends with an error if it cannot
+  be, or if the game UI has no font to draw its menus with), no editor
+  panel, camera or brush runs, the game's UI always shows, and the menus
+  lead. Outside play the main menu stands (`Menu::main`, screen
+  `menu.main`, titled with the world folder's name) and takes the input:
+  Continue (the newest save a load would take: of this version of the
+  world and of this folder's name, looked for among all the slots when
+  the menu opens, on the job; shown when there is one), New game (the
+  game closed, `GameSaves::close`, so the world is as authored, and play
+  started from the view the program opened with: a world names no player
+  start yet), Load, Settings, Quit (`quit_requested`). The pause menu's
+  Quit reads "Quit to menu" and leads there, as does play stopped any
+  other way; Back and Esc from the saves and the settings lead to the
+  main menu (to the pause menu in play), and Esc does nothing on it. A
+  game loaded from a menu is watched until it is in (`m_loading`): one
+  saved in play goes on by itself, one saved outside play is started,
+  and one that fails on its job leads back to the main menu, which says
+  why (`notice`, `menu.message`; in play the game goes on and the saves'
+  toast says it). The editor has no main menu (asking for it there closes
+  the menus). Nobody can be asked a question in a game (the editor's
+  question windows are its panels'), so script files and mods' scripts are
+  treated as with no window at all: not loaded unless allowed on the
+  command line. Not yet: a player start in the world, settings that last
+  between runs, a loading screen, a packaged folder; the game's own
+  screens show behind the main menu, and scripts run there too. Tested by
+  `editor/tests/test_game_menus.cpp` and end to end by
+  `tools/game_smoke.py` (ctest `editor_game`).
 
 Known limits: one font, no scripts beyond Latin (no CJK, Arabic or
 Cyrillic yet: the atlas would grow, or glyphs be made on demand on a

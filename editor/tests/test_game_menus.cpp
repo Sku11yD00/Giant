@@ -20,8 +20,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <ios>
+#include <memory>
 #include <string>
+#include <system_error>
+#include <vector>
 
 using namespace giant;
 using namespace giant::editor;
@@ -47,64 +53,90 @@ platform::InputEvent key(platform::Key k, bool down = true) {
     return e;
 }
 
-} // namespace
+// A world with a floor to stand on, and everything the menus work with.
+struct Stage {
+    std::unique_ptr<rhi::Device> device;
+    PhysicsState physics;
+    PlayState play{physics};
+    WeatherState weather;
+    WorldStreaming streaming;
+    GameSaves saves;
+    std::unique_ptr<GameUi> game_ui;
+    EditorState state;
+    std::unique_ptr<GameMenus> menus;
+    ai::CommandRegistry commands;
+    std::vector<platform::InputEvent> input;
 
-GIANT_TEST("game menus: Esc pauses play; buttons by mouse, keys and MCP; saves made and loaded; settings; quit") {
-    const std::filesystem::path folder = fresh_folder();
-    rhi::DeviceDesc desc;
-    desc.backend = rhi::Backend::null;
-    const std::unique_ptr<rhi::Device> device = rhi::create_device(desc);
-    GIANT_CHECK(device != nullptr);
-    if (device == nullptr) return;
-    {
-        PhysicsState physics;
-        PlayState play{physics};
+    Stage(const std::filesystem::path& folder, bool game_mode) {
+        rhi::DeviceDesc desc;
+        desc.backend = rhi::Backend::null;
+        device = rhi::create_device(desc);
+        if (device == nullptr) return;
         play.escape_stops = false;
-        WeatherState weather;
-        WorldStreaming streaming;
-        GameSaves saves;
-        GameUi game_ui(device.get());
-        EditorState state;
+        game_ui = std::make_unique<GameUi>(device.get());
         state.physics = &physics;
         state.play = &play;
         state.weather = &weather;
         state.world = &streaming;
         state.saves = &saves;
-        state.game_ui = &game_ui;
-        GameMenus menus(state);
-        state.menus = &menus;
-        ai::CommandRegistry commands;
+        state.game_ui = game_ui.get();
+        state.game_mode = game_mode;
+        menus = std::make_unique<GameMenus>(state);
+        state.menus = menus.get();
         register_scene_commands(commands, state);
         register_physics_commands(commands, state);
         register_save_commands(commands, state);
         register_game_ui_commands(commands, state);
-        const auto run = [&](const char* name, const Json& args = Json::object()) {
-            return commands.execute(name, args, {});
-        };
-        // The menus' screens are there, hidden.
-        GIANT_CHECK(game_ui.screen("menu.pause") != nullptr && game_ui.screen("menu.saves") != nullptr &&
-                    game_ui.screen("menu.settings") != nullptr);
         world::Entity floor;
         floor.shape = world::Shape::plane;
         floor.transform.scale = {40.0f, 1.0f, 40.0f};
         state.scene.add(floor);
         GIANT_CHECK(streaming.create(folder, state.scene, state.scene_generation, {}).error.empty());
         state.camera.position = {0.0, 2.0, 0.0};
+    }
+    ~Stage() {
+        state.menus = nullptr;
+        menus.reset(); // (before the UI its screens are on)
+    }
+
+    ai::CommandResult run(const char* name, const Json& args = Json::object()) { return commands.execute(name, args, {}); }
+
+    // One frame as the program runs it. True: a menu took its input.
+    bool frame(float pixels_per_point = 1.0f) {
+        const bool took = menus->update(input, pixels_per_point);
+        if (!took) play.handle_input(input, false);
+        input.clear();
+        const double dt = menus->game_seconds(1.0 / 60.0);
+        play.before_step(state.scene, state.camera, state.scene_generation, dt);
+        physics.update(state.scene, state.scene.take_changes(), dt);
+        if (play.playing()) play.after_step(state.camera, dt);
+        saves.update(state, dt);
+        game_ui->update(state, 1.0 / 60.0, 1920.0f, 1080.0f);
+        return took;
+    }
+};
+
+} // namespace
+
+GIANT_TEST("game menus: Esc pauses play; buttons by mouse, keys and MCP; saves made and loaded; settings; quit") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        Stage stage(folder, false);
+        GIANT_CHECK(stage.device != nullptr);
+        if (stage.device == nullptr) return;
+        PlayState& play = stage.play;
+        GameSaves& saves = stage.saves;
+        GameUi& game_ui = *stage.game_ui;
+        EditorState& state = stage.state;
+        GameMenus& menus = *stage.menus;
+        std::vector<platform::InputEvent>& input = stage.input;
+        const auto run = [&](const char* name, const Json& args = Json::object()) { return stage.run(name, args); };
+        const auto frame = [&](float ppp = 1.0f) { return stage.frame(ppp); };
+        // The menus' screens are there, hidden.
+        GIANT_CHECK(game_ui.screen("menu.pause") != nullptr && game_ui.screen("menu.saves") != nullptr &&
+                    game_ui.screen("menu.settings") != nullptr);
         GIANT_CHECK(run("play", {{"on", true}}).ok && play.playing());
 
-        std::vector<platform::InputEvent> input;
-        const auto frame = [&](float ppp = 1.0f) {
-            const bool took = menus.update(input, ppp);
-            if (!took) play.handle_input(input, false);
-            input.clear();
-            const double dt = menus.game_seconds(1.0 / 60.0);
-            play.before_step(state.scene, state.camera, state.scene_generation, dt);
-            physics.update(state.scene, state.scene.take_changes(), dt);
-            if (play.playing()) play.after_step(state.camera, dt);
-            saves.update(state, dt);
-            game_ui.update(state, 1.0 / 60.0, 1920.0f, 1080.0f);
-            return took;
-        };
         for (int i = 0; i < 30; ++i) frame(); // standing
         GIANT_CHECK(!menus.paused() && state.camera.vertical_fov_degrees == menus.settings().fov_degrees);
         // Esc: paused, the pause menu shown; Esc again goes back to play.
@@ -286,4 +318,170 @@ GIANT_TEST("game menus: Esc pauses play; buttons by mouse, keys and MCP; saves m
     }
     std::error_code ec;
     std::filesystem::remove_all(folder, ec);
+}
+
+GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to menu, continue, load, and out only by Quit") {
+    const std::filesystem::path folder = fresh_folder();
+    const std::filesystem::path other = fresh_folder();
+    {
+        Stage stage(folder, true);
+        GIANT_CHECK(stage.device != nullptr);
+        if (stage.device == nullptr) return;
+        GameMenus& menus = *stage.menus;
+        GameUi& ui = *stage.game_ui;
+        PlayState& play = stage.play;
+        const auto settle = [&] {
+            menus.wait();
+            stage.frame();
+        };
+        // From the first frame the main menu stands, named for the world, and its input is the menu's.
+        GIANT_CHECK(stage.frame() && menus.menu() == GameMenus::Menu::main && !play.playing() && !menus.paused());
+        settle();
+        GIANT_CHECK(ui.values.truthy("menu.main") && ui.showing(stage.state) && ui.screen("menu.main")->shown("new"));
+        GIANT_CHECK(ui.values.text("menu.title") == folder.filename().string());
+        GIANT_CHECK(!ui.values.truthy("menu.continue") && !ui.values.truthy("menu.message")); // no game saved yet; nothing wrong
+        // Esc does not leave it; the keys move through it.
+        stage.input.push_back(key(platform::Key::escape));
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::main && !stage.state.quit_requested);
+        // Settings and back; the saves and back (Esc): to the main menu, not out of the menus.
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "settings"}}).ok);
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::settings);
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.settings"}, {"id", "back"}}).ok);
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::main);
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "load"}}).ok);
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::saves && !menus.saving());
+        stage.input.push_back(key(platform::Key::escape));
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::main);
+        settle();
+        // New game by the keys: Down to it (Continue is not shown), Enter.
+        stage.input.push_back(key(platform::Key::down));
+        stage.frame();
+        GIANT_CHECK(ui.screen("menu.main")->focused() == "new");
+        stage.input.push_back(key(platform::Key::enter));
+        stage.frame();
+        stage.frame();
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none);
+        for (int i = 0; i < 30; ++i) stage.frame();
+        // Esc pauses; the pause menu's Quit says where it leads, and leads there: play over, the main menu again.
+        stage.input.push_back(key(platform::Key::escape));
+        stage.frame();
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::pause && ui.values.text("menu.quit") == "Quit to menu");
+        // A game saved first (from the pause menu).
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.pause"}, {"id", "save"}}).ok);
+        stage.frame();
+        settle();
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.saves"}, {"id", "new"}}).ok);
+        stage.frame();
+        stage.saves.wait();
+        stage.frame();
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none);
+        stage.input.push_back(key(platform::Key::escape));
+        stage.frame();
+        stage.frame();
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.pause"}, {"id", "quit"}}).ok);
+        stage.frame();
+        stage.frame();
+        GIANT_CHECK(!play.playing() && menus.menu() == GameMenus::Menu::main && !stage.state.quit_requested);
+        // Continue is there now, and plays the saved game.
+        settle();
+        GIANT_CHECK(ui.values.truthy("menu.continue") && ui.screen("menu.main")->shown("continue"));
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "continue"}}).ok);
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::none); // (no menu over the game being loaded)
+        stage.saves.wait();
+        for (int i = 0; i < 8 && !play.playing(); ++i) stage.frame();
+        stage.frame();
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none);
+        // Play stopped by anything else (a command) leads to the main menu too, never to nothing.
+        GIANT_CHECK(stage.run("play", {{"on", false}}).ok);
+        stage.saves.wait();
+        for (int i = 0; i < 64 && menus.menu() != GameMenus::Menu::main; ++i) stage.frame(); // (once the loaded game is all in)
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::main);
+        // A new game is the world as authored: nothing of the game played before is in it.
+        settle();
+        GIANT_CHECK(!stage.saves.status().base_slot.empty()); // (the loaded game's)
+        stage.state.camera.position = {9.0, 2.0, 9.0};        // (wherever the last game left the view)
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
+        stage.frame();
+        stage.frame();
+        GIANT_CHECK(play.playing() && stage.saves.status().base_slot.empty());
+        GIANT_CHECK(play.player() && std::abs(play.player()->position.x) < 0.5); // from where the program opened, not from there
+        const auto to_the_menu = [&] {
+            GIANT_CHECK(stage.run("open_menu", {{"menu", "pause"}}).ok);
+            stage.frame();
+            GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.pause"}, {"id", "quit"}}).ok);
+            stage.frame();
+            stage.frame();
+            GIANT_CHECK(!play.playing() && menus.menu() == GameMenus::Menu::main);
+            settle();
+        };
+        to_the_menu();
+        // A game saved outside play (as the editor saves one), loaded from the pause menu's saves, is played:
+        // the load stops the play it was begun in, and the menus start the loaded game.
+        GIANT_CHECK(stage.run("save_game", {{"slot", "outside"}, {"wait", true}}).ok);
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
+        stage.frame();
+        stage.frame();
+        GIANT_CHECK(play.playing());
+        GIANT_CHECK(stage.run("open_menu", {{"menu", "pause"}}).ok);
+        stage.frame();
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.pause"}, {"id", "load"}}).ok);
+        stage.frame();
+        settle();
+        GIANT_CHECK(!menus.slots().empty() && menus.slots()[0].name == "outside");
+        // Back from the saves in play leads to the pause menu, as in the editor.
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.saves"}, {"id", "back"}}).ok);
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::pause && play.playing());
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.pause"}, {"id", "load"}}).ok);
+        stage.frame();
+        settle();
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.saves"}, {"id", "slot.0"}}).ok);
+        stage.frame();
+        stage.frame(); // (play still goes on: the load is on its job)
+        stage.saves.wait();
+        for (int i = 0; i < 64 && (stage.saves.busy() || !play.playing()); ++i) stage.frame();
+        stage.frame();
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none && menus.notice().empty());
+        to_the_menu();
+        // A save that cannot be loaded after all (its files damaged): no game is begun in its place; the
+        // main menu stands and says why, and goes on saying it once the saves are read.
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(GameSaves::root(stage.state) / "outside")) {
+            if (!entry.is_regular_file() || entry.path().filename().string().starts_with("save")) continue;
+            std::ofstream(entry.path(), std::ios::binary | std::ios::trunc) << "not what was saved";
+        }
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "continue"}}).ok); // (the newest: that one)
+        stage.frame();
+        stage.saves.wait();
+        for (int i = 0; i < 64 && (stage.saves.busy() || menus.menu() != GameMenus::Menu::main); ++i) stage.frame();
+        GIANT_CHECK(!play.playing() && menus.menu() == GameMenus::Menu::main);
+        GIANT_CHECK(menus.notice().starts_with("That game could not be loaded") && ui.values.truthy("menu.message"));
+        settle();
+        GIANT_CHECK(!menus.notice().empty() && ui.values.truthy("menu.message"));
+        // Quit ends the program.
+        settle();
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "quit"}}).ok);
+        stage.frame();
+        GIANT_CHECK(stage.state.quit_requested);
+    }
+    {
+        // The editor has no main menu: it cannot be opened there, and its pause menu says where its Quit leads.
+        Stage stage(other, false);
+        GIANT_CHECK(stage.device != nullptr);
+        if (stage.device != nullptr) {
+            stage.frame();
+            GIANT_CHECK(stage.menus->menu() == GameMenus::Menu::none);
+            stage.menus->open(GameMenus::Menu::main);
+            GIANT_CHECK(stage.menus->menu() == GameMenus::Menu::none && stage.game_ui->values.text("menu.quit") == "Quit to editor");
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
+    std::filesystem::remove_all(other, ec);
 }

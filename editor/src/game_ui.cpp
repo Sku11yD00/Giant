@@ -250,7 +250,8 @@ void GameUi::fade_to(u32 color, float alpha, double seconds) {
 
 bool GameUi::showing(const EditorState& state) const {
     const bool playing = state.play != nullptr && state.play->playing();
-    return m_font != nullptr && (show == Show::always || (show == Show::playing && playing));
+    // (A game's UI is never hidden: its menus are the only way in and out.)
+    return m_font != nullptr && (state.game_mode || show == Show::always || (show == Show::playing && playing));
 }
 
 void GameUi::update(const EditorState& state, double seconds, float width, float height) {

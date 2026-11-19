@@ -8,6 +8,7 @@
 
 #include "giant/ai/json.h"
 #include "giant/core/log.h"
+#include "giant/core/text.h"
 #include "giant/save/slot.h"
 
 #include <algorithm>
@@ -51,20 +52,42 @@ Json pause_screen() {
                                       button("save", "Save game"),
                                       button("load", "Load game"),
                                       button("settings", "Settings"),
-                                      button("quit", "Quit to editor")});
+                                      button("quit", "{menu.quit}")});
+}
+
+// What a menu says when something asked of it could not be done.
+Json message(const std::string& value) {
+    return {{"type", "text"},  {"text", "{" + value + "}"}, {"visible", value},      {"anchor", {0.5, 0}}, {"color", "#ffd27a"},
+            {"font_size", 22}, {"wrap", true},              {"size", {720, 0}},      {"align", "center"}};
+}
+
+Json main_screen() {
+    Json again = button("continue", "Continue");
+    again["visible"] = "menu.continue";
+    return menu_screen("menu.main", {title("{menu.title}"),
+                                     message("menu.message"),
+                                     {{"type", "panel"}, {"size", {0, 12}}},
+                                     std::move(again),
+                                     button("new", "New game"),
+                                     button("load", "Load game"),
+                                     button("settings", "Settings"),
+                                     button("quit", "Quit")});
+}
+
+const char* screen_of(GameMenus::Menu menu) {
+    switch (menu) {
+    case GameMenus::Menu::pause: return "menu.pause";
+    case GameMenus::Menu::saves: return "menu.saves";
+    case GameMenus::Menu::settings: return "menu.settings";
+    case GameMenus::Menu::main: return "menu.main";
+    case GameMenus::Menu::none: break;
+    }
+    return "";
 }
 
 Json saves_screen() {
     Json column = {title("{saves.title}"),
-                   {{"type", "text"},
-                    {"text", "{saves.message}"},
-                    {"visible", "saves.message"},
-                    {"anchor", {0.5, 0}},
-                    {"color", "#ffd27a"},
-                    {"font_size", 22},
-                    {"wrap", true},
-                    {"size", {720, 0}},
-                    {"align", "center"}},
+                   message("saves.message"),
                    {{"type", "text"},
                     {"text", "No saves yet"},
                     {"visible", "saves.empty"},
@@ -161,6 +184,7 @@ const char* GameMenus::to_string(Menu menu) {
     case Menu::pause: return "pause";
     case Menu::saves: return "saves";
     case Menu::settings: return "settings";
+    case Menu::main: return "main";
     }
     return "none";
 }
@@ -180,7 +204,7 @@ void GameMenus::wait() {
 void GameMenus::load_screens() {
     if (m_state.game_ui == nullptr) return;
     for (const auto& [name, screen] : {std::pair{"menu.pause", pause_screen()}, std::pair{"menu.saves", saves_screen()},
-                                       std::pair{"menu.settings", settings_screen()}}) {
+                                       std::pair{"menu.settings", settings_screen()}, std::pair{"menu.main", main_screen()}}) {
         std::string error;
         if (!m_state.game_ui->load_screen(name, screen.dump(), k_layer, error))
             log_error("editor", std::string("the game's menu ") + name + ": " + error);
@@ -202,22 +226,24 @@ void GameMenus::set_settings(const Settings& s) {
 bool GameMenus::paused() const { return m_menu != Menu::none && m_state.play != nullptr && m_state.play->playing(); }
 
 void GameMenus::open(Menu menu, bool saving) {
+    if (menu == Menu::main && !m_state.game_mode) menu = Menu::none; // (the editor has none: its Quit would end the program)
     if (menu != Menu::none && m_menu == Menu::none && m_state.play != nullptr) m_state.play->release_keys();
     m_menu = menu;
     m_saving = saving;
     m_message.clear();
+    m_notice.clear();
     m_reading = false;
     ++m_read_id; // (a read still under way for an earlier opening is dropped)
     // No focus kept from the last time (Enter must not press what was left focused).
-    if (m_state.game_ui != nullptr && menu != Menu::none)
-        m_state.game_ui->focus(menu == Menu::pause ? "menu.pause" : menu == Menu::saves ? "menu.saves" : "menu.settings", {});
-    if (menu == Menu::saves) read_slots();
+    if (m_state.game_ui != nullptr && menu != Menu::none) m_state.game_ui->focus(screen_of(menu), {});
+    if (menu == Menu::saves || menu == Menu::main) read_slots(); // (the main menu's Continue is the newest of them)
     show_values(); // (shown from the next layout: Down or Tab then focuses its first button)
 }
 
 void GameMenus::read_slots() {
     m_slots.clear();
     m_names.clear();
+    m_newest.clear();
     if (m_state.saves == nullptr || m_state.world == nullptr) {
         m_message = "No world open: games are saved beside an open world.";
         return;
@@ -228,10 +254,11 @@ void GameMenus::read_slots() {
         return;
     }
     const u64 hash = GameSaves::world_identity(*m_state.world);
+    const std::string world_name = m_state.world->folder().filename().string(); // (as a save names its world)
     m_reading = true;
     m_message = "Reading saves...";
     // On a job: every slot's manifest opened (no wait on the disk on the frame).
-    m_jobs.submit(m_group, [this, root, hash, saving = m_saving, id = m_read_id] {
+    m_jobs.submit(m_group, [this, root, hash, world_name, saving = m_saving, id = m_read_id] {
         struct Row {
             Slot slot;
             i64 saved = 0;
@@ -250,15 +277,15 @@ void GameMenus::read_slots() {
             } else {
                 const save::Manifest& m = l.opened.manifest;
                 r.saved = m.saved_unix;
-                r.slot.of_this_world = m.world_hash == hash;
+                r.slot.of_this_world = m.world_hash == hash && m.world_name == world_name; // (what a load asks of it)
                 r.slot.info = when(m.saved_unix) + "   " + played(m.play_seconds) + (r.slot.of_this_world ? "" : "   (older world)");
             }
             rows.push_back(std::move(r));
         }
         std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.saved > b.saved; });
         for (Row& r : rows) {
-            if (read.slots.size() >= k_rows) break;
-            read.slots.push_back(std::move(r.slot));
+            if (read.newest.empty() && r.slot.readable && r.slot.of_this_world) read.newest = r.slot.name;
+            if (read.slots.size() < k_rows) read.slots.push_back(std::move(r.slot));
         }
         const std::lock_guard lock(m_read_mutex);
         if (!m_read || m_read->id <= read.id) m_read = std::move(read); // (the newest opening's kept)
@@ -275,6 +302,7 @@ void GameMenus::take_read() {
     m_reading = false;
     m_slots = std::move(read->slots);
     m_names = std::move(read->names);
+    m_newest = std::move(read->newest);
     m_message = std::move(read->message);
     show_values();
 }
@@ -285,6 +313,14 @@ void GameMenus::show_values() {
     v.set("menu.pause", m_menu == Menu::pause);
     v.set("menu.saves", m_menu == Menu::saves);
     v.set("menu.settings", m_menu == Menu::settings);
+    v.set("menu.main", m_menu == Menu::main);
+    // The main menu: the world's name over it, Continue when a game of this world can be loaded, and
+    // what went wrong (not the saves' own "Reading saves...").
+    const std::string world = m_state.world != nullptr ? path_to_utf8(m_state.world->folder().filename()) : std::string();
+    v.set("menu.title", world.empty() ? std::string("Giant") : world);
+    v.set("menu.continue", !m_reading && !m_newest.empty());
+    v.set("menu.message", m_notice);
+    v.set("menu.quit", std::string(m_state.game_mode ? "Quit to menu" : "Quit to editor"));
     v.set("menu.open", m_menu != Menu::none);
     v.set("saves.title", std::string(m_saving ? "Save game" : "Load game"));
     v.set("saves.message", m_message);
@@ -302,10 +338,58 @@ void GameMenus::show_values() {
     v.set("settings.look", static_cast<double>(m_settings.look_sensitivity));
 }
 
+GameMenus::Menu GameMenus::before() const {
+    if (m_state.play != nullptr && m_state.play->playing()) return Menu::pause;
+    return m_state.game_mode ? Menu::main : Menu::none;
+}
+
+bool GameMenus::load(const std::string& slot) {
+    const std::string error = m_state.saves->begin_load(m_state, slot, false);
+    if (!error.empty()) {
+        m_message = error;
+        show_values();
+        return false;
+    }
+    m_loading = true;
+    m_failures_before = m_state.saves->status().failures;
+    close(); // the game it was
+    return true;
+}
+
+void GameMenus::lead(std::string notice) {
+    open(Menu::main);
+    m_notice = std::move(notice);
+    show_values();
+}
+
+bool GameMenus::begin_play() {
+    m_state.follow.person = 0; // the camera is the player's eyes from here
+    if (m_state.play != nullptr && m_state.play->start(m_state.scene, m_state.camera, m_state.scene_generation)) {
+        close();
+        return true;
+    }
+    lead("The game could not start here: there is no ground to stand on.");
+    return false;
+}
+
 void GameMenus::press(const std::string& screen, const std::string& id) {
     PlayState* play = m_state.play;
     const bool playing = play != nullptr && play->playing();
-    if (screen == "menu.pause") {
+    if (screen == "menu.main") {
+        if (id == "continue") {
+            if (m_state.saves == nullptr || m_reading || m_newest.empty()) return;
+            if (!load(std::string(m_newest))) lead(m_message);
+        } else if (id == "new") {
+            if (m_state.saves != nullptr) {
+                if (m_state.saves->busy()) return; // (a game still being saved or loaded: once it is done)
+                m_state.saves->close(m_state); // the world as it is authored: nothing of a game played before
+            }
+            if (m_start != nullptr) m_state.camera = *m_start;
+            begin_play();
+        } else if (id == "load") open(Menu::saves, false);
+        else if (id == "settings") open(Menu::settings);
+        else if (id == "quit") m_state.quit_requested = true;
+    } else if (screen == "menu.pause") {
         if (id == "resume") close();
         else if (id == "save") open(Menu::saves, true);
         else if (id == "load") open(Menu::saves, false);
@@ -316,7 +400,7 @@ void GameMenus::press(const std::string& screen, const std::string& id) {
         }
     } else if (screen == "menu.saves") {
         if (id == "back") {
-            open(playing ? Menu::pause : Menu::none);
+            open(before());
             return;
         }
         if (m_state.saves == nullptr || m_reading) return;
@@ -340,18 +424,21 @@ void GameMenus::press(const std::string& screen, const std::string& id) {
         } else {
             return;
         }
-        const std::string error = m_saving ? m_state.saves->begin_save(m_state, slot) : m_state.saves->begin_load(m_state, slot, false);
+        if (!m_saving) {
+            load(slot);
+            return;
+        }
+        const std::string error = m_state.saves->begin_save(m_state, slot);
         if (!error.empty()) {
             m_message = error;
             show_values();
             return;
         }
-        // Saving: back to the game ("Saved" shows when it is written); loading: the game it was.
-        close();
+        close(); // back to the game ("Saved" shows when it is written)
     } else if (screen == "menu.settings") {
         Settings s = m_settings;
         if (id == "back") {
-            open(playing ? Menu::pause : Menu::none);
+            open(before());
             return;
         }
         if (id == "ui_scale.down") s.ui_scale -= 0.1f;
@@ -373,6 +460,7 @@ bool GameMenus::update(const std::vector<platform::InputEvent>& events, float pi
     // Play stopped (Quit, a load, a new scene, MCP) or started: a menu open goes.
     if (m_was_playing != playing && m_menu != Menu::none) close();
     m_was_playing = playing;
+    if (m_state.game_mode && m_start == nullptr) m_start = std::make_unique<EditorCamera>(m_state.camera);
     if (playing) m_state.camera.vertical_fov_degrees = m_settings.fov_degrees;
     // Only drawn menus pause the game and take the input (the game UI hidden: Esc stops play).
     const bool can_show = ui != nullptr && ui->showing(m_state);
@@ -382,11 +470,25 @@ bool GameMenus::update(const std::vector<platform::InputEvent>& events, float pi
         if (can_show) open(Menu::pause);
         else play->stop(m_state.camera);
     }
-    const bool took = playing && m_menu != Menu::none;
+    // A load begun from the menus is in, or has failed. A game plays it (one saved in play goes on
+    // by itself), or leads back to the main menu saying why not (in play the game goes on, and the
+    // saves' own toast says it).
+    const bool busy = m_state.saves != nullptr && m_state.saves->busy();
+    if (m_loading && !busy) {
+        m_loading = false;
+        const bool failed = m_state.saves == nullptr || m_state.saves->status().failures != m_failures_before;
+        if (m_state.game_mode && !(play != nullptr && play->playing())) {
+            if (failed) lead("That game could not be loaded: " + (m_state.saves != nullptr ? m_state.saves->status().error : std::string()));
+            else begin_play();
+        }
+    }
+    // A game, outside play (and not while a game is being loaded): the main menu stands.
+    if (m_state.game_mode && !(play != nullptr && play->playing()) && m_menu == Menu::none && can_show && !busy) open(Menu::main);
+    const bool took = (playing || m_state.game_mode) && m_menu != Menu::none;
 
     if (took) {
         if (!std::isfinite(pixels_per_point) || pixels_per_point <= 0.0f) pixels_per_point = 1.0f;
-        const char* screen = m_menu == Menu::pause ? "menu.pause" : m_menu == Menu::saves ? "menu.saves" : "menu.settings";
+        const char* screen = screen_of(m_menu);
         for (const platform::InputEvent& e : events) {
             const ui::Vec2 at{e.x * pixels_per_point, e.y * pixels_per_point};
             switch (e.type) {
@@ -410,12 +512,12 @@ bool GameMenus::update(const std::vector<platform::InputEvent>& events, float pi
                 case platform::Key::space: ui->activate(screen); break;
                 case platform::Key::escape:
                     if (m_menu == Menu::pause) close();
-                    else open(Menu::pause);
+                    else if (m_menu != Menu::main) open(before()); // (the main menu is left by its buttons only)
                     break;
                 default: break;
                 }
                 if (m_menu == Menu::none) break; // (closed: the rest is play's, next frame)
-                screen = m_menu == Menu::pause ? "menu.pause" : m_menu == Menu::saves ? "menu.saves" : "menu.settings";
+                screen = screen_of(m_menu);
                 break;
             }
             default: break;

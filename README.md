@@ -456,6 +456,10 @@ Open-world systems:
   phases time the people's share (`travel`, `senses`, `routines`,
   `people`); `set_people_settings` counts anyone appearing or going
   close by in view.
+- N7 part 1 (standalone game build): `giant_editor --game <world folder>`
+  runs a world as a game: a main menu (Continue, New game, Load,
+  Settings, Quit) instead of the editor's panels, play from it, and the
+  pause menu's Quit leads back to it.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

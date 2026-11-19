@@ -481,17 +481,24 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
             slots.push_back({{"name", slot.name}, {"info", slot.info}, {"of_this_world", slot.of_this_world}});
         const GameMenus::Settings& s = m.settings();
         return Json{{"menu", GameMenus::to_string(m.menu())},
+                    {"game", state.game_mode},
                     {"saving", m.saving()},
                     {"paused", m.paused()},
                     {"slots", slots},
                     {"message", m.message()},
+                    {"notice", m.notice()},
                     {"settings", {{"ui_scale", s.ui_scale}, {"fov", s.fov_degrees}, {"look_sensitivity", s.look_sensitivity}}}};
     };
 
     add(registry,
         {"get_menu",
-         "The game's menus over play: `menu` open (none, pause, saves, settings; Esc in play opens pause), "
-         "`saving` (the saves menu saves, else loads), `paused` (a menu over play: the game stands still), the "
+         "The game's menus over play: `menu` open (none, pause, saves, settings, main; Esc in play opens pause), "
+         "`game` (the program runs as a game, started with --game <world folder>: outside play its main menu "
+         "stands, `menu` main, with the buttons continue (the newest save of this world that can be loaded, shown "
+         "when there is one), new (the world as authored, played from the view the program opened with), load, "
+         "settings and quit, which ends the program, on the screen menu.main; the pause menu's quit leads "
+         "back to it; no editor panels are drawn; `notice` is what the main menu says went wrong, as when a game "
+         "could not be loaded), `saving` (the saves menu saves, else loads), `paused` (a menu over play: the game stands still), the "
          "saves menu's `slots` (newest first: `name`, `info` date and play time, `of_this_world`) and "
          "`message`, and `settings` (`ui_scale`, `fov`, `look_sensitivity`). Its buttons are on the screens "
          "menu.pause (resume, save, load, settings, quit), menu.saves (slot.0 to slot.7, new, back) and "
@@ -528,7 +535,7 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
 
     add(registry,
         {"set_game_settings",
-         "The player's settings (as the settings menu sets them; they last while the editor runs): `ui_scale` "
+         "The player's settings (as the settings menu sets them; they last while the program runs): `ui_scale` "
          "(0.5 to 2, times the window's), `fov` (vertical degrees while playing, 40 to 110), "
          "`look_sensitivity` (mouse look speed, 0.25 to 4). Returns get_menu.",
          Json{{"type", "object"},
