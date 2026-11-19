@@ -34,6 +34,7 @@
 #include "animation_state.h"
 #include "cloth_state.h"
 #include "hair_state.h"
+#include "pose_bakes.h"
 #include "people_list.h"
 #include "people_routines.h"
 #include "people_senses.h"
@@ -467,6 +468,8 @@ int run(const Options& options) {
     state.cloth = &cloth;
     editor::HairState hair(renderer.get(), &meshes); // likewise: its grooms leave first
     state.hair = &hair;
+    editor::PoseBakes pose_bakes(renderer.get(), &meshes); // its meshes leave the renderer before it goes
+    state.poses = &pose_bakes;
     editor::SwingState swing(renderer.get(), &meshes);
     state.swing = &swing;
     editor::EffectsState effects; // entities' effects and spawned ones, born as particles
@@ -676,6 +679,7 @@ int run(const Options& options) {
         moved.insert(moved.end(), fallen_ids.begin(), fallen_ids.end());
         const std::vector<world::CellCoord> tree_redraw = physics.take_tree_redraw();
         textures.update(); // cooked since last frame: uploaded, a budget's worth
+        pose_bakes.update(); // poses baked since: handed to the renderer, a few meshes a frame
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw,
                             &animation.copies(), &cloth.meshes(), moved, &swing.poses(), &walkers.poses(),

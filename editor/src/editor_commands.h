@@ -59,6 +59,7 @@ class PlayState;
 class AnimationState;
 class ClothState;
 class HairState;
+class PoseBakes;
 class SwingState;
 class EffectsState;
 class WeatherEffects;
@@ -260,6 +261,8 @@ struct EditorState {
     // Hair on entities, grown and simulated; set by main (and tests).
     // Null: hair is not available.
     HairState* hair = nullptr;
+    // Null: poses cannot be baked.
+    PoseBakes* poses = nullptr;
     // Swinging entities (lanterns, signs) in the wind; set by main (and
     // tests). Null: nothing swings.
     SwingState* swing = nullptr;
@@ -400,6 +403,8 @@ void register_animation_commands(ai::CommandRegistry& registry, EditorState& sta
 void register_cloth_commands(ai::CommandRegistry& registry, EditorState& state);
 // The hair commands (hair_commands.cpp).
 void register_hair_commands(ai::CommandRegistry& registry, EditorState& state);
+// The baked poses' commands (pose_commands.cpp).
+void register_pose_commands(ai::CommandRegistry& registry, EditorState& state);
 // The swing commands (swing_commands.cpp).
 void register_swing_commands(ai::CommandRegistry& registry, EditorState& state);
 // The navigation commands (nav_commands.cpp).
