@@ -3,7 +3,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gate_common import frame_stats, held_by_window, hitch_limit, slow_frames, without_held  # noqa: E402
+from gate_common import frame_stats, held_by_window, hitch_limit, leg_slow_frames, slow_frames, without_held  # noqa: E402
 
 
 def frame(ms, cpu, **phases):
@@ -57,6 +57,13 @@ def main():
                          slow_over_ms=20.0)
     check(pacing is not None and pacing.startswith("10 slow frames (over 20.8 ms)"), f"slow frames named: {pacing}")
     check("inside render, most over: render/voxels 10" in pacing, f"their part named: {pacing}")
+    # A leg uneven by itself is told of by its own frames; one that passes, not at all.
+    leg = leg_slow_frames(uneven, [dict(frame(22.0, 21.0, scatter=12.0), stop=5)] * 10 +
+                          [dict(frame(22.0, 21.0, render=20.0), stop=150)] * 10, typicals, 20.0, lambda stop: stop < 100)
+    check(leg is not None and leg.startswith("10 slow frames") and "each: scatter 10" in leg, f"a leg's own: {leg}")
+    check(leg_slow_frames([10.0] * 200, [dict(frame(22.0, 21.0, scatter=12.0), stop=5)], typicals, 20.0,
+                          lambda stop: True) is None, "a leg that passes: nothing")
+    check(leg_slow_frames([], [], typicals, 20.0, lambda stop: True) is None, "no frames: nothing")
     # Hitches and uneven pacing both: each told, the slow frames without the hitches, by the leg.
     both = [10.0] * 180 + [22.0] * 10 + [40.0, 40.0]
     told = slow_frames(both, [dict(frame(22.0, 21.0, scatter=12.0), stop=5)] * 10 +

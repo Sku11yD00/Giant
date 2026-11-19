@@ -24,7 +24,13 @@
 //
 // Nothing here is unbounded a frame: `scanned_a_frame` people are looked
 // at (the list is gone through over frames), `made_a_frame` entities made,
-// at most `most` held. View state: not undone, not saved.
+// at most `most` held. One found far beyond where an entity would be made
+// is passed over, its place not asked for, until it or the camera could
+// have covered half of the gap beyond where an entity is made (a person
+// travels no faster than anyone was yet sent, PeopleTravel::fastest; the
+// camera as far as it has moved, a jump counted like any move): in a wide
+// world most of a pass costs a compare a person.
+// View state: not undone, not saved.
 #pragma once
 
 #include "people_travel.h"
@@ -124,6 +130,7 @@ public:
         u32 waiting = 0;    // wanting one last time through the list (near, or far where the camera looks), not made: `most` reached
         u32 acting = 0;     // of those held: playing their activity's clip now
         u32 unseen = 0;     // near and in view last time through the list, not made: waiting to be out of sight
+        u32 passed_over = 0; // of those looked at last frame: known to be far off still, their place not asked for
         u64 swapped = 0;    // entities far off given up for someone near (`most` held)
         // While the world runs: entities made, and taken away, close by in the camera's view (nearer
         // than k_seen_made_within of embody_distance, where one is otherwise made only while unseen).
@@ -212,6 +219,22 @@ private:
     std::vector<world::EntityId> m_entities; // scratch: entities to take from the scene
     std::vector<world::PersonId> m_let_go;   // those released in the last update
     std::vector<DVec3> m_path;               // scratch: a walker's path
+    // One found farther than k_far_slack beyond where an entity is made: not looked at again before the
+    // travel's clock reaches `until` or the camera has moved `camera_until` in all (m_camera_gone), while
+    // it is the same person where the scene has it. By the person's place in the scene's list.
+    struct Far {
+        world::PersonId id = 0; // 0: none
+        DVec3 was{};            // Person::position then (an edit moves one at a stroke)
+        double until = 0.0;
+        double camera_until = 0.0;
+    };
+    static constexpr double k_far_slack = 16.0; // metres
+    std::vector<Far> m_far;
+    double m_camera_gone = 0.0; // metres the camera has moved, frame to frame, in all
+    double m_reach_seen = 0.0;  // how far off an entity is made, last frame
+    double m_fastest_seen = 0.0; // the travel's, last frame
+    u64 m_puts_seen = 0;        // the travel's, last frame
+    const PeopleTravel* m_travel_seen = nullptr;
     Stats m_stats;
 };
 

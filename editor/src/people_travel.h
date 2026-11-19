@@ -140,6 +140,14 @@ public:
     // Counts the times everyone was put back (another run or scene): one
     // made an entity before is not where that entity stands.
     u64 resets() const { return m_resets; }
+    // Counts the times someone's place changed other than by travelling: put somewhere (`put`: a
+    // loaded game's people), or forgotten with its person gone (an undo brings it back where the
+    // scene has it). Between two of these and of `resets`, nobody is anywhere it did not travel
+    // to, at `fastest` at most.
+    u64 puts() const { return m_puts; }
+    // The highest speed (m/s) anyone was sent at since everyone was last put back: 0, nobody was.
+    double fastest() const { return m_fastest; }
+    static constexpr float k_max_speed = 100.0f; // m/s a trip may be sent at
     // Counts the times the graph was built (the roads changed: one with no road near may have one now).
     u64 builds() const { return m_builds; }
     Stats stats() const;
@@ -168,6 +176,8 @@ private:
     u64 m_scene = 0;
     u64 m_run = 0;
     u64 m_resets = 0;
+    u64 m_puts = 0;
+    double m_fastest = 0.0;
     u64 m_serial = 0;
     u64 m_builds = 0;
     double m_seconds = 0.0;

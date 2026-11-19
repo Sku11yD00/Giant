@@ -750,3 +750,145 @@ GIANT_TEST("travel: one standing in the road is walked round, not stopped behind
     GIANT_CHECK(from_end < 2.0 && from_end > 0.4 && least > 0.4 && least < 2.5);
     GIANT_CHECK(std::fabs(f.where(w.id).x - feet.x) < 0.1 && std::fabs(f.where(w.id).z - feet.z) < 0.1);
 }
+
+GIANT_TEST("travel: those far from the camera are passed over until they or it could have come near, and are never late") {
+    Fixture f;
+    PeopleState people;
+    people.travel = &f.travel;
+    f.state.people = &people;
+    world::Scene& scene = f.state.scene;
+    GIANT_CHECK(f.run("create_route", {{"points", {at(3000, 0, 0), at(100, 0, 0)}}, {"kind", "road"}}).ok);
+    // (As many made a frame as there are: one near without its entity was not looked at in time.)
+    GIANT_CHECK(f.run("set_people_settings", {{"embody_distance", 25.0}, {"release_distance", 35.0}, {"made_a_frame", 64}}).ok);
+    const world::PersonId by = f.person(0, -10);
+    std::vector<world::PersonId> away;
+    for (int i = 0; i < 20; ++i) away.push_back(f.person(3000.0, 2.0 * i));
+    DVec3 camera{0.0, 0.0, 0.0};
+    double clock = 0.0;
+    const auto frame = [&] {
+        f.travel.update(scene, 1, clock);
+        people.update(scene, camera, nullptr);
+    };
+    const auto off = [&](world::PersonId id) {
+        const DVec3 p = f.where(id);
+        return std::sqrt((p.x - camera.x) * (p.x - camera.x) + (p.y - camera.y) * (p.y - camera.y) + (p.z - camera.z) * (p.z - camera.z));
+    };
+    // Looked at once, the twenty far off are passed over from then on; the one near has its entity.
+    frame();
+    GIANT_CHECK(people.stats().passed_over == 0 && people.entity_of(scene, by) != 0);
+    frame();
+    GIANT_CHECK(people.stats().passed_over == 20 && people.stats().embodied == 1);
+    GIANT_CHECK(f.run("set_people_settings", nlohmann::json::object()).value["passed_over"] == 20);
+    // One of them sent to the camera as fast as anyone may go (faster than anyone was sent: everyone is
+    // looked at afresh): whenever it is near, it has its entity (it is looked at again well before),
+    // while the rest are still passed over.
+    GIANT_CHECK(f.run("send_person", {{"id", away[0]}, {"to", at(0, 0, 0)}, {"speed", 100.0}}).ok);
+    frame();
+    GIANT_CHECK(people.stats().passed_over == 0);
+    bool late = false, passed = false;
+    for (int i = 0; i < 140; ++i) {
+        clock += 0.25;
+        frame();
+        late = late || (off(away[0]) <= 25.0 && people.entity_of(scene, away[0]) == 0);
+        passed = passed || people.stats().passed_over == 20;
+        GIANT_CHECK(people.stats().passed_over >= 19 || off(away[0]) < 2000.0);
+    }
+    // (Given its entity as it came within reach, it stands there: nothing walks it here.)
+    GIANT_CHECK(!late && passed && off(away[0]) <= 25.0 && people.entity_of(scene, away[0]) != 0);
+    GIANT_CHECK(people.stats().passed_over == 19);
+    // One moved by an edit, and one put somewhere (a loaded game's), are looked at at once.
+    GIANT_CHECK(f.run("set_person", {{"id", away[1]}, {"position", at(5, 0, 5)}}).ok);
+    frame();
+    GIANT_CHECK(people.entity_of(scene, away[1]) != 0);
+    frame();
+    GIANT_CHECK(people.stats().passed_over == 18);
+    GIANT_CHECK(f.travel.put(scene, away[2], {{3.0, 0.0, 3.0}, 0.0f}));
+    frame();
+    GIANT_CHECK(people.entity_of(scene, away[2]) != 0);
+    frame();
+    GIANT_CHECK(people.stats().passed_over == 17);
+    // One taken from the middle of the list: those after it are others' now, and looked at afresh. So
+    // when it is brought back, and when one more is made.
+    GIANT_CHECK(f.run("remove_people", {{"ids", {away[10]}}}).ok);
+    frame();
+    GIANT_CHECK(people.stats().passed_over == 7);
+    frame();
+    GIANT_CHECK(people.stats().passed_over == 16);
+    GIANT_CHECK(f.run("undo").ok);
+    frame();
+    frame();
+    frame(); // (what the travel kept of the one gone is dropped a frame on: all are looked at once more)
+    GIANT_CHECK(people.stats().passed_over == 17);
+    f.person(3000.0, 60.0);
+    frame();
+    frame();
+    GIANT_CHECK(people.stats().passed_over == 18);
+    // The camera flown to the rest, 10 m a frame, while one of them comes to meet it as fast (the two
+    // close at once): whenever anyone is near, it has its entity.
+    GIANT_CHECK(f.run("send_person", {{"id", away[4]}, {"to", at(100, 0, 0)}, {"speed", 100.0}}).ok);
+    late = false;
+    bool met = false;
+    for (int i = 0; i < 300; ++i) {
+        camera.x += 10.0;
+        clock += 0.1;
+        frame();
+        for (usize k = 3; k < away.size(); ++k) late = late || (off(away[k]) <= 25.0 && people.entity_of(scene, away[k]) == 0);
+        met = met || (camera.x > 1000.0 && camera.x < 2000.0 && people.entity_of(scene, away[4]) != 0);
+        if (i % 20 == 0) GIANT_CHECK(people.stats().passed_over > 0 || camera.x > 2000.0);
+    }
+    GIANT_CHECK(!late && met && people.stats().embodied >= 9 && people.entity_of(scene, away[3]) != 0);
+    // Another run, the camera where it was: everyone is where the scene has them, and looked at afresh.
+    f.travel.update(scene, 2, 0.0);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(people.stats().passed_over == 0);
+    people.update(scene, camera, nullptr);
+    GIANT_CHECK(people.entity_of(scene, away[0]) != 0 && people.entity_of(scene, away[4]) != 0);
+    GIANT_CHECK(people.entity_of(scene, by) == 0 && people.stats().passed_over == 3); // (the two by where it began, the one 60 m aside)
+}
+
+GIANT_TEST("travel: one far off removed and brought back by an undo is looked at afresh; so is everyone when what is near changes") {
+    Fixture f;
+    PeopleState people;
+    people.travel = &f.travel;
+    f.state.people = &people;
+    world::Scene& scene = f.state.scene;
+    GIANT_CHECK(f.run("create_route", {{"points", {at(3000, 0, 0), at(100, 0, 0)}}, {"kind", "road"}}).ok);
+    GIANT_CHECK(f.run("set_people_settings", {{"embody_distance", 25.0}, {"release_distance", 35.0}, {"scanned_a_frame", 4}}).ok);
+    // One whose home is by the camera, on its way far off (2 km gone); forty who stand far off. Four are looked at a frame.
+    const world::PersonId walker = f.person(2, 2);
+    for (int i = 0; i < 40; ++i) f.person(3000.0, 2.0 * i);
+    const DVec3 camera{0.0, 0.0, 0.0};
+    f.travel.update(scene, 1, 0.0);
+    GIANT_CHECK(f.run("send_person", {{"id", walker}, {"to", at(3000, 0, 0)}, {"speed", 50.0}}).ok);
+    f.to(0.0); // (its way found: it sets off)
+    double clock = 40.0;
+    const auto frames = [&](int count) {
+        for (int i = 0; i < count; ++i) {
+            clock += 0.01;
+            f.travel.update(scene, 1, clock);
+            people.update(scene, camera, nullptr);
+        }
+    };
+    frames(12); // (a pass of eleven frames, and the first four again: passed over)
+    GIANT_CHECK(people.stats().passed_over == 4 && people.stats().embodied == 0 && f.where(walker).x > 1500.0);
+    // Removed (its trip forgotten), then brought back: it stands at home, and has its entity when the list comes round.
+    GIANT_CHECK(f.run("remove_people", {{"ids", {walker}}}).ok);
+    frames(1);
+    GIANT_CHECK(f.run("undo").ok && f.near(walker, 2, 0, 2));
+    frames(14);
+    GIANT_CHECK(people.entity_of(scene, walker) != 0);
+    frames(11);
+    GIANT_CHECK(people.stats().passed_over == 4);
+    // The people turned off and on, or entities made at another distance: nobody is passed over until looked at again.
+    GIANT_CHECK(f.run("set_people_settings", {{"on", false}}).ok);
+    frames(1);
+    GIANT_CHECK(people.stats().passed_over == 0 && people.stats().embodied == 0);
+    GIANT_CHECK(f.run("set_people_settings", {{"on", true}}).ok);
+    frames(1);
+    GIANT_CHECK(people.stats().passed_over == 0);
+    frames(22);
+    GIANT_CHECK(people.stats().passed_over >= 3 && people.entity_of(scene, walker) != 0);
+    GIANT_CHECK(f.run("set_people_settings", {{"embody_distance", 30.0}}).ok);
+    frames(1);
+    GIANT_CHECK(people.stats().passed_over == 0);
+}
