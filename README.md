@@ -463,6 +463,10 @@ Open-world systems:
 - Crowds part 1: baked poses. A character held in one pose becomes a
   small plain mesh (`bake_pose`, `get_baked_poses`), cut down from the
   file and baked on a worker: what distant people will be drawn with.
+- Crowds part 2: figures. People with no entity (those farther off than
+  the ones near the camera) are drawn as instances of their look's baked
+  pose, out to 400 m, with no skeleton (`set_figure_settings`; off by
+  default until they walk and change places with their entities unseen).
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

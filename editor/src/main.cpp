@@ -38,6 +38,7 @@
 #include "people_list.h"
 #include "people_routines.h"
 #include "people_senses.h"
+#include "people_figures.h"
 #include "people_state.h"
 #include "people_travel.h"
 #include "swing_state.h"
@@ -493,6 +494,12 @@ int run(const Options& options) {
     people.animation = &animation;
     people.meshes = &meshes;
     state.people = &people;
+    editor::PeopleFigures figures; // those farther off, drawn as baked poses
+    figures.travel = &travel;
+    figures.bodies = &people;
+    figures.poses = &pose_bakes;
+    figures.meshes = &meshes;
+    state.figures = &figures;
     editor::connect_walkers(state);
     editor::RagdollState ragdolls(physics, animation, &walkers); // after them: its ragdolls leave the physics first
     state.ragdolls = &ragdolls;
@@ -642,6 +649,11 @@ int run(const Options& options) {
                                        : 1.0f);
         people.update(state.scene, state.camera.position,
                       world_streaming.active(state.scene_generation) ? &world_streaming : nullptr);
+        // Those farther off are figures (a share of the people a frame), drawn with the poses baked
+        // (those done since are handed to the renderer first, a few meshes a frame).
+        pose_bakes.update();
+        figures.hold = people.hold;
+        figures.update(state.scene, state.camera.position);
         mark(editor::FramePhase::people);
         terrain_meshes.update(state.scene.terrain);
         terrain_paint.update(state.scene.terrain, *renderer);
@@ -679,11 +691,10 @@ int run(const Options& options) {
         moved.insert(moved.end(), fallen_ids.begin(), fallen_ids.end());
         const std::vector<world::CellCoord> tree_redraw = physics.take_tree_redraw();
         textures.update(); // cooked since last frame: uploaded, a budget's worth
-        pose_bakes.update(); // poses baked since: handed to the renderer, a few meshes a frame
         editor::scene_frame(state.scene, *renderer, meshes, scene_frame, &terrain_meshes, &far_ground, &scatter,
                             &physics.poses(), redraw, &physics.piece_poses(), &physics.fallen_trees(), tree_redraw,
                             &animation.copies(), &cloth.meshes(), moved, &swing.poses(), &walkers.poses(),
-                            &physics.moving(), &ragdolls.poses(), &animation.part_copies());
+                            &physics.moving(), &ragdolls.poses(), &animation.part_copies(), &figures.draws());
         mark(editor::FramePhase::scene);
         render::FrameInput input;
         input.view = editor::to_view(state.camera);

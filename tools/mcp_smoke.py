@@ -1019,6 +1019,45 @@ def crowd_gate(tool, call, check):
         tool("get_engine_info")
         check(tool("clear_baked_poses")["cleared"] == 2 and tool("get_baked_poses")["poses"] == [], "cleared")
 
+        # Crowds part 2: people far from the camera are drawn as figures, instances of their look's pose.
+        tool("new_scene")
+        model = tool("create_entity", {"shape": "mesh", "mesh": path, "position": [0, 0, -500]})["id"]
+        tool("set_person_look", {"name": "villager", "entity": model})
+        tool("delete_entities", {"ids": [model]})
+        tool("create_people", {"people": [{"look": "villager", "position": [300 + 2 * (i % 20), 0, 2 * (i // 20)]}
+                                          for i in range(200)]})
+        # (Beyond where one looked towards is given an entity: 200 m.)
+        tool("set_camera", {"position": [0, 2, 0], "look_at": [300, 1, 20]})
+        culling = tool("get_render_settings")["gpu_culling"]
+        tool("set_render_settings", {"gpu_culling": False})  # (exact counts on the frame itself)
+        off = tool("set_figure_settings")
+        check(off["on"] is False and off["figures"] == 0, f"figures are off until asked for, got {off}")
+        before = tool("get_engine_info")["last_frame"]["scene_instances"]
+        tool("set_figure_settings", {"on": True})
+        drawn = off
+        for _ in range(400):
+            drawn = tool("set_figure_settings")
+            if drawn["figures"] == 200:
+                break
+        parts = len(person["materials"])
+        check(drawn["figures"] == 200 and drawn["looks_ready"] == 1 and drawn["slots"] == 256,
+              f"everyone far off is a figure once the look's pose is baked, got {drawn}")
+        check(tool("set_people_settings")["embodied"] == 0, "nobody that far has an entity")
+        for _ in range(3):
+            call("ping")  # (a frame with all of them)
+        after = tool("get_engine_info")["last_frame"]["scene_instances"]
+        check(after == before + 200 * parts, f"each figure draws its pose's parts: {before} instances, then {after}")
+        pose = tool("get_baked_poses")["poses"][0]
+        check(pose["clip"] == "idle" and pose["triangles"] == 1500 and pose["state"] == "ready",
+              f"the look's people stand in its idle clip, got {pose}")
+        gone = tool("set_figure_settings", {"on": False})
+        for _ in range(3):
+            call("ping")
+        check(gone["on"] is False and tool("set_figure_settings")["figures"] == 0
+              and tool("get_engine_info")["last_frame"]["scene_instances"] == before, "off, nobody is drawn so")
+        tool("clear_baked_poses")
+        tool("set_render_settings", {"gpu_culling": culling})
+
 
 def n1_gate(tool, call, check):
     """N1 part 6, the N1 gate scene (tools/n1_gate.py measures its speed on a real GPU): a
@@ -1232,7 +1271,7 @@ def main() -> int:
                          "set_autosave", "get_game_ui", "set_game_ui", "show_toast", "ui_load_screen",
                          "ui_remove_screen", "ui_set_values", "ui_click", "ui_key", "get_ui_events",
                          "get_ui_screen", "ui_set_marker", "ui_remove_marker", "get_ui_markers", "ui_fade", "get_menu", "open_menu",
-                         "set_game_settings", "bake_pose", "get_baked_poses", "clear_baked_poses"):
+                         "set_game_settings", "bake_pose", "get_baked_poses", "clear_baked_poses", "set_figure_settings"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")

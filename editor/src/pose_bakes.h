@@ -99,6 +99,7 @@ public:
     const std::vector<Pose>& poses() const { return m_poses; }
     usize baking() const;
     u64 baked() const { return m_baked; } // bakes finished (failed ones too), ever
+    u64 clears() const { return m_clears; } // times every pose was forgotten: an index kept from before is another pose's
     u64 cuts() const { return m_cuts; }   // figures cut down, ever (as seen when a pose of theirs was done)
 
 private:
@@ -148,6 +149,7 @@ private:
     std::vector<std::shared_ptr<Figure>> m_figures;
     u64 m_baked = 0;
     u64 m_cuts = 0;
+    u64 m_clears = 0;
     WaitGroup m_group;
     JobSystem m_jobs{2}; // last: destroyed (finishing its jobs) first
 };

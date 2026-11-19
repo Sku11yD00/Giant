@@ -4856,11 +4856,68 @@ and says why. A file with many small parts can come out over the
 triangles asked for (each part gets at least 16, and may stop at 1.25
 times its share); `seams_kept` says whether every part reached its
 share with its joins to the others in place. Commands: `bake_pose`, `get_baked_poses`,
-`clear_baked_poses`. Nothing draws the poses yet (CR2: figures).
+`clear_baked_poses`. The figures below draw them.
 
 Known limits: a clip's morph channels are not baked; the figure is cut
-at bind, so a coarse triangle across an elbow bends as a flat one; a
-part's material is the file's part's (CR2 draws with it).
+at bind, so a coarse triangle across an elbow bends as a flat one.
+
+### Figures (CR2)
+
+`PeopleFigures` (`editor/src/people_figures.h`) draws the people who
+have no entity, out to `distance` (400 m): each a figure, the instances
+of its look's baked pose put where the person is (where its trip has it
+by the clock, on the terrain there where the terrain has a height),
+with the look's materials and height. That is everyone farther off than
+those with entities, and anyone near who has none (over `most` of
+those, or waiting to be out of sight). A figure has no entity,
+skeleton, walker or senses. A look's people stand in one pose: the
+start of `clip` ("idle") of the look's file, its rest pose where the
+file has no such clip, cut to `triangles` (1,500). The pose is asked
+for once someone of the look is within `distance` (one look a frame),
+and its people are made figures once it is baked.
+
+A frame's work, bounded: the poses' meshes are taken as they are now
+(a pose baked again, or forgotten, takes its figures' meshes with it
+that frame: a mesh's id is never drawn after it left the renderer;
+main hands finished poses over, then updates the figures, then builds
+the frame, and commands run before all three); those given an entity
+stop being figures (the entities held, 1,024 at most, are looked up
+among the figures); 256 slots are checked for their person having left
+the scene; and `scanned_a_frame` (1,024) people of the list are looked
+at: one within `distance` with no entity and a pose is made a figure
+(`made_a_frame`, 64, at most `most`, 4,096), one drawn and now past
+`distance + keep` goes, one elsewhere than it was drawn (or whose
+ground changed) is put there. One look of the scene's is compared with
+what its figures were made from a frame. Only an edit does more at
+once, each a pass over the slots (16,384 at most): a look changed,
+`most` lowered, a pose baked again or forgotten.
+
+Figures keep their slots (the lowest free first, doubled from 256 as
+more are needed), and `scene_frame` takes them as `FigureDraws`: the
+slots, and a version for each chunk of 64. A chunk whose version
+changed is built again whole into a cell of its own, placed among the
+scene's cells like any other (as many instances a slot as the most
+parts a figure in it has; holes where one draws fewer or nothing, put
+where the chunk's first figure is, since the renderer keeps a cell's
+instances as floats about its first). A look's instances are made once
+a call by the same code as an animated entity's (its pose's meshes in
+place of the file's, each part with its look) and copied to each of
+its figures, so a chunk costs 64 copies and one coming, going or
+moving re-sends 64 slots. They are marked `render::Instance::moves`
+(out of the voxel world; drawn as meshes at every distance), and their
+materials are counted like any instance's.
+
+Off by default (`set_figure_settings`): two things are left to the
+plan's next parts. A figure stands, and one travelling is only put on
+along its way when the list comes round to it (CR3: they walk). And a
+person whose entity was just taken away is a figure again only when the
+list comes round, while one given an entity loses its figure at once,
+so the change can be seen (CR4: unseen, with nothing in between).
+Other limits: changing `triangles` or `clip` leaves the poses asked
+for before in `PoseBakes` (256 in all, `bake_pose`'s too) until
+`clear_baked_poses`; a look whose pose could not be had is asked for
+again only after a file is imported; frame time with thousands of
+figures is not measured yet (CR6, the crowd gate).
 
 ## Sound
 
