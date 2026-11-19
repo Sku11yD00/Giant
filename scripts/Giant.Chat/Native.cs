@@ -23,6 +23,12 @@ internal unsafe struct NativeChatApi
     // withdrawn (the work was stopped).
     public delegate* unmanaged<int, byte**, int> HeldTool;
 
+    // A picture of the result of the tool run last (RunTool, or HeldTool's
+    // finish): the index-th. 1 with its bytes (the editor's: copied here
+    // before the next call), their count and its type; 0 when there is no
+    // such picture.
+    public delegate* unmanaged<int, byte**, int*, byte**, int> ToolImage;
+
     // Writes a log line: level 0 trace, 1 info, 2 warning, 3 error.
     public delegate* unmanaged<int, byte*, void> Log;
 
@@ -210,7 +216,7 @@ public static unsafe class Native
                 status = s_api.RunTool(n, i, &reply);
             }
             string text = Taken(reply);
-            return status == Held ? null : new ToolReply(status == 0, text);
+            return status == Held ? null : new ToolReply(status == 0, text, Pictures());
         }
 
         public bool HeldAnswered()
@@ -225,7 +231,7 @@ public static unsafe class Native
         {
             byte* reply = null;
             int status = s_api.HeldTool(1, &reply);
-            return new ToolReply(status == 0, Taken(reply));
+            return new ToolReply(status == 0, Taken(reply), Pictures());
         }
 
         public void DropHeld()
@@ -233,6 +239,24 @@ public static unsafe class Native
             byte* reply = null;
             s_api.HeldTool(2, &reply);
             Taken(reply);
+        }
+
+        // The pictures of the result of the tool just run, copied.
+        private static List<ToolImage>? Pictures()
+        {
+            List<ToolImage>? pictures = null;
+            for (int index = 0; index < 16; ++index)
+            {
+                byte* data = null;
+                int size = 0;
+                byte* type = null;
+                if (s_api.ToolImage(index, &data, &size, &type) == 0 || data == null || size <= 0)
+                {
+                    break;
+                }
+                (pictures ??= []).Add(new ToolImage(new ReadOnlySpan<byte>(data, size).ToArray(), Marshal.PtrToStringUTF8((IntPtr)type) ?? "image/png"));
+            }
+            return pictures;
         }
 
         // The editor's string as ours, and freed.

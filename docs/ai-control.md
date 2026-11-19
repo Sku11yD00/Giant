@@ -91,6 +91,19 @@ The panel is these commands, which the AI over MCP can use too:
 | `stop_chat` | Stops Claude's work on the last message: no further commands run (one running now finishes). What it already did stays (undo takes it back). The work ends a moment later: `busy` says when |
 | `clear_chat` | Forgets the conversation; the next message starts a new one |
 
+Claude can look at the editor: when it runs `capture_screenshot`, the
+picture goes to it with the command's result (up to four pictures a
+command, PNG or JPEG, 3.5 MB each), and the Chat panel's line for that
+result says "(with a picture)". A picture is a picture of your editor's
+window as it is, panels included, and like your words it is sent to
+Claude's service. The conversation keeps at most six pictures (8 MB, which
+is also the most one command's result may bring): when another would go
+over, the oldest are replaced by a note until at most three (and half the bytes)
+are left, and Claude takes another if it needs to look again. Should
+Claude's service refuse a message, every picture is taken out, so the
+next message is not refused for the same picture. A picture costs tokens
+like text does (about 800 for the default size).
+
 Claude does not get the several hundred commands as a list. It has three
 tools: `find_commands` (search them by words), `describe_command` (one
 command's description and arguments) and `run_command`. It cannot close the

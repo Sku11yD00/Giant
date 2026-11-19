@@ -45,7 +45,13 @@ struct ChatToolReply {
     bool ok = false;
     std::string text;  // the result as JSON, or what went wrong
     bool held = false; // not run yet: the person is asked first (ChatGate); finish_held_chat_tool gives the reply
+    // The pictures the command returned (a screenshot), for Claude to look at: PNG or JPEG, at most
+    // k_chat_most_images, each of at most k_chat_most_image_bytes. Others are left out, and `text` says so.
+    std::vector<ai::CommandImage> images = {};
 };
+inline constexpr usize k_chat_most_images = 4;
+// (Claude's service takes a picture of up to 5 MB once it is written as base64: 3.75 MB of file.)
+inline constexpr usize k_chat_most_image_bytes = 3'500'000;
 
 // The person's say over what Claude changes. While `asks`, a command Claude
 // runs that changes something (one not read-only) is held, and the person is
@@ -133,7 +139,8 @@ enum class HeldAsk : int {
 inline constexpr int k_chat_tool_done = 0;
 inline constexpr int k_chat_tool_failed = 1;
 inline constexpr int k_chat_tool_held = 2;
-int held_chat_tool(ai::CommandRegistry& registry, ChatGate& gate, int what, std::string& reply);
+// `images`: the pictures of a finished command's result (ChatToolReply::images).
+int held_chat_tool(ai::CommandRegistry& registry, ChatGate& gate, int what, std::string& reply, std::vector<ai::CommandImage>& images);
 
 // When the Chat panel reads the conversation anew: a number that moves
 // whenever the conversation may have changed, and only then (a read must

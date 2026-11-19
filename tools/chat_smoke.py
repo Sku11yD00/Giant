@@ -11,12 +11,14 @@ no network), and the editor with --mcp pointed at it. Then: the chat is empty
 and .NET not started; a message without a key is refused with how to give
 one; a key file written while the editor runs is picked up; Claude's tool
 calls find and run a command in the editor (on the undo history), their
-results go back to the service, and the conversation reads as it happened.
+results go back to the service (a screenshot's picture with them), and the
+conversation reads as it happened.
 Then a second editor with --chat-asks: a command of Claude's that changes
 something waits for the person (get_chat's `asking`), nothing is changed
 while it does, and stopping or clearing withdraws the question.
 Fails (exit 1) on any wrong answer, or if the editor does not exit cleanly.
 """
+import base64
 import http.server
 import json
 import os
@@ -274,6 +276,28 @@ def everyday(tool, raw_tool, check, finish, service, settings):
     chat = finish()
     check([e["kind"] for e in chat["entries"]] == ["note", "you", "claude"], "a new conversation")
     check(len(service.requests[-1][2]["messages"]) == 1, "which starts fresh for Claude too")
+
+    # Claude looks at the editor: a screenshot's picture goes to the service with its result.
+    service.replies = [message("tool_use", use("toolu_8", "run_command", {"name": "capture_screenshot", "args": {"max_width": 256}})),
+                       message("end_turn", text("I see the editor."))]
+    tool("chat_send", {"text": "Look at it."})
+    chat = finish()
+    blocks = service.requests[-1][2]["messages"][-1]["content"][0]["content"]
+    check(isinstance(blocks, list) and [b["type"] for b in blocks] == ["text", "image"], f"the result, then its picture: {str(blocks)[:200]}")
+    picture = base64.b64decode(blocks[1]["source"]["data"])
+    check(blocks[1]["source"]["type"] == "base64" and blocks[1]["source"]["media_type"] == "image/png" and
+          picture[:8] == b"\x89PNG\r\n\x1a\n", "a PNG file, as base64")
+    check(0 < json.loads(blocks[0]["text"])["width"] <= 256, f"no wider than asked for: {blocks[0]['text']}")
+    check(chat["entries"][-2]["kind"] == "result" and chat["entries"][-2]["text"].endswith("(with a picture)") and
+          blocks[1]["source"]["data"][:64] not in json.dumps(chat), f"the chat says a picture came, without its bytes: {chat['entries'][-2]}")
+    # The next command's result has no picture of the last one's.
+    service.replies = [message("tool_use", use("toolu_9", "run_command", {"name": "get_clear_color"}),
+                               use("toolu_10", "run_command", {"name": "set_clear_color", "args": {"r": 7}})),
+                       message("end_turn", text("And its colour."))]
+    tool("chat_send", {"text": "And the colour?"})
+    finish()
+    plain = service.requests[-1][2]["messages"][-1]["content"]
+    check(all(isinstance(r["content"], str) for r in plain) and len(plain) == 2, f"results without pictures are words: {str(plain)[:200]}")
 
     # A key corrected while the editor runs is the one used from then on.
     with open(os.path.join(settings, "Giant", "claude_key.txt"), "w", encoding="utf-8") as file:

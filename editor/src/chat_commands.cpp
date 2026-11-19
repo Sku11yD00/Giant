@@ -83,15 +83,35 @@ std::string start_of(const std::string& description) {
 
 // Runs a command for Claude as the person would run it: checked against its schema, and on the undo history.
 ChatToolReply execute_for_claude(ai::CommandRegistry& registry, const std::string& name, const Json& args) {
-    const CommandResult result = registry.execute(name, args);
+    CommandResult result = registry.execute(name, args);
     if (!result.ok) {
         return {false, result.error};
     }
-    Json value = result.value;
-    if (!result.images.empty() && value.is_object()) {
-        value["note_to_assistant"] = "The command returned a picture, which the chat cannot pass on yet.";
+    ChatToolReply reply;
+    reply.ok = true;
+    // The pictures go to Claude beside the result: those its service takes.
+    usize left_out = 0;
+    for (ai::CommandImage& image : result.images) {
+        // (What it says it is, by the file's first bytes: a picture the service cannot read fails the whole request.)
+        const bool kind = (image.mime_type == "image/png" && image.data.starts_with("\x89PNG\r\n\x1a\n")) ||
+                          (image.mime_type == "image/jpeg" && image.data.starts_with("\xFF\xD8\xFF"));
+        if (kind && image.data.size() <= k_chat_most_image_bytes && reply.images.size() < k_chat_most_images) {
+            reply.images.push_back(std::move(image));
+        } else {
+            ++left_out;
+        }
     }
-    return {true, ai::to_json_text(value)};
+    Json value = std::move(result.value);
+    if (left_out > 0) {
+        if (!value.is_object()) {
+            value = Json{{"result", std::move(value)}};
+        }
+        value["note_to_assistant"] = std::to_string(left_out) +
+                                     " picture(s) of this result could not be passed on to you (too large, too many, or not PNG or "
+                                     "JPEG). Ask for a smaller one if the command can make it smaller.";
+    }
+    reply.text = ai::to_json_text(value);
+    return reply;
 }
 
 ChatToolReply find_commands(const ai::CommandRegistry& registry, const Json& input) {
@@ -231,14 +251,16 @@ Json ChatGate::asking() const {
     return {{"command", m_request.command}, {"args", m_request.args}, {"args_hidden", m_request.args_hidden}};
 }
 
-int held_chat_tool(ai::CommandRegistry& registry, ChatGate& gate, int what, std::string& reply) {
+int held_chat_tool(ai::CommandRegistry& registry, ChatGate& gate, int what, std::string& reply, std::vector<ai::CommandImage>& images) {
     reply.clear();
+    images.clear();
     switch (what) {
     case static_cast<int>(HeldAsk::answered):
         return gate.answered() ? k_chat_tool_done : k_chat_tool_held;
     case static_cast<int>(HeldAsk::finish): {
         ChatToolReply result = finish_held_chat_tool(registry, gate);
         reply = std::move(result.text);
+        images = std::move(result.images);
         return result.ok ? k_chat_tool_done : k_chat_tool_failed;
     }
     default:
@@ -303,7 +325,8 @@ Json chat_tools() {
          {{"name", "run_command"},
           {"description",
            "Runs one of the editor's commands in the person's open editor and returns its result as JSON, or its "
-           "error. Changes to the scene can be undone with the `undo` command; changes to files cannot."},
+           "error. Changes to the scene can be undone with the `undo` command; changes to files cannot. A picture a "
+           "command returns (capture_screenshot) comes back for you to look at."},
           {"input_schema",
            {{"type", "object"},
             {"properties",

@@ -557,6 +557,224 @@ internal static class Program
         public void DropHeld() => ++Dropped;
     }
 
+    // The blocks of the tool result for `id` in a request's message, or its text when it is words alone.
+    private static JsonElement ResultOf(JsonElement message, string id)
+    {
+        foreach (JsonElement result in message.GetProperty("content").EnumerateArray())
+        {
+            if (result.GetProperty("tool_use_id").GetString() == id)
+            {
+                return result.GetProperty("content");
+            }
+        }
+        throw new InvalidOperationException("no result for " + id);
+    }
+
+    private static int Pictures(JsonElement content)
+    {
+        int count = 0;
+        if (content.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement block in content.EnumerateArray())
+            {
+                count += block.GetProperty("type").GetString() == "image" ? 1 : 0;
+            }
+        }
+        return count;
+    }
+
+    private static void AToolsPicturesGoToClaude()
+    {
+        (Conversation c, FakeService service) = Make();
+        byte[] png = [0x89, 0x50, 0x4E, 0x47, 1, 2, 3];
+        service.Reply(Message("tool_use", Use("toolu_1", "run_command", "{\"name\":\"look\"}"), Use("toolu_2", "run_command", "{\"name\":\"words\"}"),
+                              Use("toolu_3", "run_command", "{\"name\":\"two\"}")));
+        service.Reply(Message("end_turn", Text("I see it.")));
+        c.Send("look at it");
+        Check(Finish(c, (_, input) => input.Contains("look", StringComparison.Ordinal) ? new ToolReply(true, "{\"width\":4}", [new ToolImage(png, "image/png")])
+                                    : input.Contains("two", StringComparison.Ordinal) ? new ToolReply(true, "", [new ToolImage(png, "image/png"), new ToolImage([9, 8], "image/jpeg")])
+                                    : new ToolReply(false, "failed", [new ToolImage(png, "image/png")])), "the work ends");
+        JsonElement results = service.Request(1).GetProperty("messages")[2];
+        JsonElement looked = ResultOf(results, "toolu_1");
+        Check(looked.ValueKind == JsonValueKind.Array && looked.GetArrayLength() == 2, "the result and its picture: " + looked);
+        Check(looked[0].GetProperty("type").GetString() == "text" && looked[0].GetProperty("text").GetString() == "{\"width\":4}", "the result's text first");
+        JsonElement source = looked[1].GetProperty("source");
+        Check(looked[1].GetProperty("type").GetString() == "image" && source.GetProperty("type").GetString() == "base64" &&
+              source.GetProperty("media_type").GetString() == "image/png" && source.GetProperty("data").GetString() == Convert.ToBase64String(png),
+              "then the picture, whole: " + looked[1]);
+        // A failure goes back as words alone, whatever came with it (the service takes no picture with one).
+        JsonElement failed = ResultOf(results, "toolu_2");
+        Check(failed.ValueKind == JsonValueKind.String && failed.GetString() == "failed" && results.GetProperty("content")[1].GetProperty("is_error").GetBoolean(),
+              "a failure's pictures are not passed on: " + failed);
+        // Two pictures: both, each with its type; and a text block is never empty.
+        JsonElement two = ResultOf(results, "toolu_3");
+        Check(Pictures(two) == 2 && two[2].GetProperty("source").GetProperty("media_type").GetString() == "image/jpeg" &&
+              two[2].GetProperty("source").GetProperty("data").GetString() == Convert.ToBase64String([9, 8]), "two pictures, each of its type");
+        Check(two[0].GetProperty("text").GetString() == "(no text)", "an empty result's text block is not empty");
+        // The person reads that a picture came, not its bytes.
+        Check(Lines(c)[2].Text == "{\"width\":4} (with a picture)" && Lines(c)[4].Text == "failed" && Lines(c)[6].Text == " (with 2 pictures)",
+              "the lines say so: " + Lines(c)[2].Text + " | " + Lines(c)[6].Text);
+        using JsonDocument read = JsonDocument.Parse(c.Read(0, 256, true));
+        Check(!read.RootElement.GetRawText().Contains(Convert.ToBase64String(png), StringComparison.Ordinal), "and reading the chat gives no picture's bytes");
+    }
+
+    private static void ThePicturesOfOneReplyAreBounded()
+    {
+        // More pictures in one reply's results than a conversation keeps: the first are passed on, the rest said to be left out.
+        (Conversation c, FakeService service) = Make();
+        List<string> uses = [];
+        for (int i = 0; i < 4; ++i)
+        {
+            uses.Add(Use("toolu_" + i, "run_command", "{\"name\":\"look\"}"));
+        }
+        service.Reply(Message("tool_use", [.. uses]));
+        service.Reply(Message("end_turn", Text("Seen.")));
+        c.Send("look four times at once");
+        Check(Finish(c, (_, _) => new ToolReply(true, "two", [new ToolImage([1], "image/png"), new ToolImage([2], "image/png")])), "the work ends");
+        JsonElement results = service.Request(1).GetProperty("messages")[2];
+        int passed = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            passed += Pictures(ResultOf(results, "toolu_" + i));
+        }
+        Check(passed == Conversation.MostImages, "as many as a conversation keeps: " + passed);
+        JsonElement last = ResultOf(results, "toolu_3");
+        Check(last.ValueKind == JsonValueKind.String && last.GetString() == "two\n" + Conversation.ImagesLeftOut, "the rest are said to be left out: " + last);
+        Check(Lines(c)[^2].Text == "two", "and the chat's line claims no picture for it: " + Lines(c)[^2].Text);
+        // By size too.
+        (c, service) = Make();
+        service.Reply(Message("tool_use", Use("toolu_a", "run_command", "{\"name\":\"look\"}")));
+        service.Reply(Message("end_turn", Text("Seen.")));
+        c.Send("look once");
+        byte[] huge = new byte[Conversation.MostImageBytes + 1];
+        Check(Finish(c, (_, _) => new ToolReply(true, "huge", [new ToolImage(huge, "image/png"), new ToolImage([1], "image/png")])), "the work ends");
+        JsonElement one = ResultOf(service.Request(1).GetProperty("messages")[2], "toolu_a");
+        Check(Pictures(one) == 1 && one[0].GetProperty("text").GetString() == "huge\n" + Conversation.ImagesLeftOut && one[1].GetProperty("source").GetProperty("data").GetString() == Convert.ToBase64String([1]),
+              "one too large for a conversation is left out, the small one beside it passed on");
+    }
+
+    private static void AnErrorOfTheServiceTakesThePicturesOut()
+    {
+        // A picture the service will not take would fail every later message: after an error none is kept.
+        (Conversation c, FakeService service) = Make();
+        service.Reply(Message("tool_use", "{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"sig-1\"}",
+                              Use("toolu_1", "run_command", "{\"name\":\"look\"}"), Use("toolu_2", "run_command", "{\"name\":\"words\"}")));
+        service.Reply("{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Could not process image\"}}", HttpStatusCode.BadRequest);
+        c.Send("look");
+        Check(Finish(c, (_, input) => input.Contains("look", StringComparison.Ordinal) ? new ToolReply(true, "shot", [new ToolImage([1, 2, 3], "image/png")]) : new ToolReply(false, "no")),
+              "the work ends");
+        Check(Pictures(ResultOf(service.Request(1).GetProperty("messages")[2], "toolu_1")) == 1, "the picture went out");
+        Check(Lines(c)[^1].Kind == "error" && Lines(c)[^1].Text.Contains("pictures were taken out", StringComparison.Ordinal), "the person is told: " + Lines(c)[^1].Text);
+        service.Reply(Message("end_turn", Text("Without it, then.")));
+        c.Send("go on");
+        Check(Finish(c) && Lines(c)[^1].Text == "Without it, then.", "the next message is answered");
+        JsonElement messages = service.Request(2).GetProperty("messages");
+        Check(messages[1].GetProperty("content")[0].GetProperty("type").GetString() == "tool_use", "Claude's thinking before it is taken out with the picture");
+        JsonElement again = ResultOf(messages[2], "toolu_1");
+        Check(messages.GetArrayLength() == 4 && again.ValueKind == JsonValueKind.String && again.GetString() == "shot\n" + Conversation.ImageGone,
+              "the result is sent again as words: " + again);
+        Check(ResultOf(messages[2], "toolu_2").GetString() == "no" && messages[2].GetProperty("content")[1].GetProperty("is_error").GetBoolean(),
+              "the result beside it as it was");
+        // An error with no picture kept says nothing of pictures.
+        service.Reply("{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad\"}}", HttpStatusCode.BadRequest);
+        c.Send("once more");
+        Check(Finish(c) && Lines(c)[^1].Kind == "error" && !Lines(c)[^1].Text.Contains("pictures", StringComparison.Ordinal), "no pictures, no word of them");
+    }
+
+    private static void PicturesAfterADeclinedMessage()
+    {
+        // A declined first reply takes the person's message back out: the places of the picture messages after it still hold.
+        (Conversation c, FakeService service) = Make();
+        int taken = 0;
+        Func<string, string, ToolReply> look = (_, _) => new ToolReply(true, "shot " + taken, [new ToolImage([(byte)taken++], "image/png")]);
+        service.Reply(Message("tool_use", Use("toolu_0", "run_command", "{\"name\":\"look\"}")));
+        service.Reply(Message("end_turn", Text("Seen.")));
+        c.Send("look");
+        Check(Finish(c, look), "the first look");
+        service.Reply(Message("refusal"));
+        c.Send("something declined");
+        Check(Finish(c, look) && Lines(c)[^1].Kind == "error", "declined, and taken back");
+        for (int i = 1; i <= Conversation.MostImages; ++i)
+        {
+            service.Reply(Message("tool_use", Use("toolu_" + i, "run_command", "{\"name\":\"look\"}")));
+        }
+        service.Reply(Message("end_turn", Text("Seen all.")));
+        c.Send("look many times");
+        Check(Finish(c, look), "the later looks");
+        JsonElement messages = service.Request(service.Requests - 1).GetProperty("messages");
+        // user, assistant, results 0, assistant "Seen.", user, then assistant and results for each later look.
+        Check(messages[4].GetProperty("role").GetString() == "user" && messages.GetArrayLength() == 5 + 2 * Conversation.MostImages, "the declined message is not there: " + messages.GetArrayLength());
+        int half = Conversation.MostImages / 2;
+        for (int i = 0; i <= Conversation.MostImages; ++i)
+        {
+            JsonElement content = ResultOf(messages[i == 0 ? 2 : 4 + 2 * i], "toolu_" + i);
+            bool gone = i <= Conversation.MostImages - half;
+            Check(gone ? content.ValueKind == JsonValueKind.String && content.GetString() == "shot " + i + "\n" + Conversation.ImageGone
+                       : Pictures(content) == 1 && content[0].GetProperty("text").GetString() == "shot " + i,
+                  "each result is in its place, " + (gone ? "let go" : "kept") + ": " + i);
+        }
+    }
+
+    private static void OldPicturesAreLetGo()
+    {
+        (Conversation c, FakeService service) = Make();
+        int looks = Conversation.MostImages + 2;
+        for (int i = 0; i < looks; ++i)
+        {
+            service.Reply(Message("tool_use", "{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"sig-" + i + "\"}",
+                                  Use("toolu_" + i, "run_command", "{\"name\":\"look\"}")));
+        }
+        service.Reply(Message("end_turn", Text("Seen.")));
+        c.Send("look often");
+        int taken = 0;
+        Check(Finish(c, (_, _) => new ToolReply(true, "shot " + taken, [new ToolImage([(byte)taken++, 1, 2], "image/png")])), "the work ends");
+        JsonElement messages = service.Request(service.Requests - 1).GetProperty("messages");
+        int kept = 0;
+        for (int i = 0; i < looks; ++i)
+        {
+            JsonElement content = ResultOf(messages[2 + 2 * i], "toolu_" + i);
+            bool gone = i < 4; // (at the seventh, down to half: the first four went together)
+            if (gone)
+            {
+                Check(content.ValueKind == JsonValueKind.String && content.GetString() == "shot " + i + "\n" + Conversation.ImageGone,
+                      "the oldest are words again, saying a picture was there: " + content);
+            }
+            else
+            {
+                Check(Pictures(content) == 1 && content[0].GetProperty("text").GetString() == "shot " + i, "the newest keep theirs: " + i);
+                ++kept;
+            }
+        }
+        Check(kept == 4 && Conversation.MostImages == 6, "half were left at the seventh, and the eighth came after: " + kept);
+        // While there was room, nothing was rewritten (what was sent before is sent again as it was).
+        JsonElement early = service.Request(Conversation.MostImages).GetProperty("messages");
+        Check(Pictures(ResultOf(early[2], "toolu_0")) == 1, "the first was still there while there was room");
+        Check(early[1].GetProperty("content")[0].GetProperty("signature").GetString() == "sig-0", "and Claude's thinking with it");
+        // A message written again would make every later thinking block one the service refuses (each is
+        // signed against all before it): the thinking up to then is taken out, whole; what comes after stays.
+        for (int i = 0; i < looks; ++i)
+        {
+            JsonElement said = messages[1 + 2 * i].GetProperty("content");
+            bool thought = said[0].GetProperty("type").GetString() == "thinking";
+            Check(thought == (i == looks - 1) && said[said.GetArrayLength() - 1].GetProperty("id").GetString() == "toolu_" + i,
+                  "reply " + i + (i == looks - 1 ? " keeps its thinking" : " is sent without its thinking") + ", with its tool call");
+        }
+
+        // By size too: the newest results keep theirs (Claude has yet to see them).
+        (c, service) = Make();
+        service.Reply(Message("tool_use", Use("toolu_a", "run_command", "{\"name\":\"look\"}")));
+        service.Reply(Message("tool_use", Use("toolu_b", "run_command", "{\"name\":\"look\"}"), Use("toolu_w", "run_command", "{\"name\":\"words\"}")));
+        service.Reply(Message("end_turn", Text("Seen.")));
+        c.Send("look twice");
+        byte[] large = new byte[Conversation.MostImageBytes / 2 + 1];
+        Check(Finish(c, (_, input) => input.Contains("words", StringComparison.Ordinal) ? new ToolReply(true, "said") : new ToolReply(true, "big", [new ToolImage(large, "image/png")])),
+              "the work ends");
+        messages = service.Request(2).GetProperty("messages");
+        Check(ResultOf(messages[2], "toolu_a").ValueKind == JsonValueKind.String && Pictures(ResultOf(messages[4], "toolu_b")) == 1,
+              "two that are too much together: the older goes");
+        Check(ResultOf(messages[4], "toolu_w").GetString() == "said" && messages[4].GetProperty("content").GetArrayLength() == 2, "the results beside it are as they were");
+    }
+
     private static void AToolBeingRunIsNotStopped()
     {
         (Conversation c, FakeService service) = Make();
@@ -761,6 +979,11 @@ internal static class Program
             ("clearing starts afresh", ClearingStartsAfresh),
             ("a tool the editor holds waits for the person", AHeldToolWaitsForThePerson),
             ("a held tool can be stopped or cleared away", AHeldToolIsWithdrawn),
+            ("a tool's pictures go to Claude with its result", AToolsPicturesGoToClaude),
+            ("old pictures are let go", OldPicturesAreLetGo),
+            ("the pictures of one reply are bounded", ThePicturesOfOneReplyAreBounded),
+            ("an error of the service takes the pictures out", AnErrorOfTheServiceTakesThePicturesOut),
+            ("pictures after a declined message", PicturesAfterADeclinedMessage),
             ("the service's errors are said", TheServicesErrorsAreSaid),
             ("long results are cut", LongResultsAreCut),
             ("reading by cursor", ReadingByCursor),

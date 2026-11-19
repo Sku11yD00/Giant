@@ -6,8 +6,10 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace giant::editor {
 
@@ -22,6 +24,11 @@ struct ChatApi {
     // 1: its reply, running it if they allowed it (0 done, 1 failed).
     // 2: it is withdrawn (Claude's work was stopped); 0.
     int (*held_tool)(int what, char** reply); // (HeldAsk, chat.h)
+    // A picture of the result of the tool run last (by run_tool, or held_tool's finish): the `index`th, 0 first.
+    // 1 with its bytes (the editor's: to be copied before the next call), their count and its type
+    // ("image/png"); 0 when there is none of that index (asked so, the editor lets the pictures go:
+    // they are asked for in order, once).
+    int (*tool_image)(int index, const unsigned char** data, int* size, const char** mime_type);
     void (*log)(int level, const char* text);
     void (*free_string)(char* text);
 };
@@ -29,6 +36,8 @@ struct ChatApi {
 // The registry and the gate of the one bridge. Main thread only.
 ai::CommandRegistry* g_registry = nullptr;
 ChatGate* g_gate = nullptr;
+// The pictures of the result of the tool run last, until the next is run.
+std::vector<ai::CommandImage> g_images;
 
 
 char* copy_string(const std::string& text) {
@@ -40,6 +49,7 @@ char* copy_string(const std::string& text) {
 }
 
 int chat_run_tool(const char* name, const char* input, char** reply) {
+    g_images.clear();
     ChatToolReply result;
     const auto parsed = ai::parse_json(input != nullptr ? input : "{}");
     if (g_registry == nullptr) {
@@ -53,13 +63,29 @@ int chat_run_tool(const char* name, const char* input, char** reply) {
         *reply = nullptr;
         return k_chat_tool_held;
     }
+    g_images = std::move(result.images);
     *reply = copy_string(result.text);
     return result.ok ? k_chat_tool_done : k_chat_tool_failed;
+}
+
+int chat_tool_image(int index, const unsigned char** data, int* size, const char** mime_type) {
+    if (index < 0 || static_cast<usize>(index) >= g_images.size()) {
+        g_images.clear(); // (asked past the last: all were copied, and need not be kept here)
+        return 0;
+    }
+    const ai::CommandImage& image = g_images[static_cast<usize>(index)];
+    *data = reinterpret_cast<const unsigned char*>(image.data.data());
+    *size = static_cast<int>(image.data.size()); // (at most k_chat_most_image_bytes)
+    *mime_type = image.mime_type.c_str();
+    return 1;
 }
 
 int chat_held_tool(int what, char** reply) {
     *reply = nullptr;
     const bool finish = what == static_cast<int>(HeldAsk::finish);
+    if (finish) {
+        g_images.clear();
+    }
     if (g_registry == nullptr || g_gate == nullptr) {
         if (finish) {
             *reply = copy_string("the editor cannot run commands right now");
@@ -67,8 +93,10 @@ int chat_held_tool(int what, char** reply) {
         return finish ? k_chat_tool_failed : k_chat_tool_done;
     }
     std::string text;
-    const int status = held_chat_tool(*g_registry, *g_gate, what, text);
+    std::vector<ai::CommandImage> images;
+    const int status = held_chat_tool(*g_registry, *g_gate, what, text, images);
     if (finish) {
+        g_images = std::move(images);
         *reply = copy_string(text);
     }
     return status;
@@ -81,7 +109,7 @@ void chat_log(int level, const char* text) {
 
 void chat_free_string(char* text) { std::free(text); }
 
-const ChatApi k_api{&chat_run_tool, &chat_held_tool, &chat_log, &chat_free_string};
+const ChatApi k_api{&chat_run_tool, &chat_held_tool, &chat_tool_image, &chat_log, &chat_free_string};
 
 } // namespace
 
@@ -94,6 +122,7 @@ ChatBridge::ChatBridge(ai::CommandRegistry& registry, ChatGate& gate, std::funct
 }
 
 ChatBridge::~ChatBridge() {
+    g_images.clear();
     g_registry = nullptr;
     g_gate = nullptr;
 }

@@ -11,8 +11,11 @@ using Anthropic.Models.Beta.Messages;
 
 namespace Giant.Chat;
 
-/// <summary>What a tool answered: the result, or why it failed.</summary>
-internal readonly record struct ToolReply(bool Ok, string Text);
+/// <summary>A picture a tool returned (a screenshot): the file's bytes and its type ("image/png" or "image/jpeg").</summary>
+internal sealed record ToolImage(byte[] Data, string MediaType);
+
+/// <summary>What a tool answered: the result, or why it failed; and the pictures that came with it, for Claude to look at.</summary>
+internal readonly record struct ToolReply(bool Ok, string Text, IReadOnlyList<ToolImage>? Images = null);
 
 /// <summary>
 /// The editor's side of Claude's tools, on its main thread. The editor may hold a tool until the
@@ -54,6 +57,17 @@ internal sealed class Conversation
     /// <summary>Characters of a tool's result or arguments kept for reading.</summary>
     public const int MostShownChars = 2000;
     private const int MostTokens = 16000;
+    /// <summary>
+    /// Pictures the conversation keeps for Claude (every request carries them all again), and the most
+    /// one reply's tools may bring together. When a reply's results take the conversation over either,
+    /// the oldest results' pictures are let go, down to half (so that it is not done at every look).
+    /// </summary>
+    public const int MostImages = 6;
+    public const long MostImageBytes = 8_000_000;
+    /// <summary>What stands in a result for a picture no longer kept.</summary>
+    public const string ImageGone = "(A picture came with this result. It is no longer kept: take another if you need to look again.)";
+    /// <summary>What a result says of pictures that were more than one reply's tools may bring.</summary>
+    public const string ImagesLeftOut = "(Not every picture of this result was passed on: too many, or too large, for one step. Take fewer at once.)";
 
     /// <summary>A line of the conversation as the person reads it.</summary>
     private sealed record Entry(long Serial, string Kind, string Text, string? Tool, bool Ok);
@@ -67,10 +81,24 @@ internal sealed class Conversation
         public readonly TaskCompletionSource<ToolReply> Done = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
+    // One tool's answer as it is handed back to Claude. `Images` only until the message is made of
+    // it (the message holds them from then on); `Pictures` and `Bytes` tell what it carries there.
+    private sealed record Answered(string ID, string Text, bool IsError, IReadOnlyList<ToolImage>? Images, int Pictures = 0, long Bytes = 0);
+
+    // A message of tool results that carries pictures: where it is, and what it was made from.
+    private sealed class Pictured(int index, List<Answered> answers)
+    {
+        public readonly int Index = index;
+        public readonly List<Answered> Answers = answers;
+    }
+
     /// <summary>What Claude is sent, and the work on it; replaced whole when the conversation is cleared.</summary>
     private sealed class Talk
     {
         public readonly List<BetaMessageParam> Messages = [];
+        public readonly List<Pictured> Pictured = []; // oldest first
+        // Claude's replies that hold its thinking (by their place in Messages): each as it is without.
+        public readonly Dictionary<int, List<BetaContentBlockParam>> Unthought = [];
         public readonly Queue<Waiting> Tools = new();
         public CancellationTokenSource? Stop;
         public bool Busy;
@@ -471,6 +499,7 @@ internal sealed class Conversation
                     break;
                 }
                 List<BetaContentBlockParam> said = [];
+                List<BetaContentBlockParam> unthought = []; // `said` without the thinking
                 List<BetaToolUseBlock> asked = [];
                 StringBuilder words = new();
                 // Where another model took over (the service's fallback), if one did: what the
@@ -492,6 +521,7 @@ internal sealed class Conversation
                         if (!string.IsNullOrWhiteSpace(text.Text)) // (an empty one may not be handed back)
                         {
                             said.Add(new BetaTextBlockParam { Text = text.Text });
+                            unthought.Add(said[^1]);
                             words.Append(text.Text);
                         }
                     }
@@ -502,6 +532,7 @@ internal sealed class Conversation
                             From = new BetaFallbackInfoParam { Model = fallback.From.Model },
                             To = new BetaFallbackInfoParam { Model = fallback.To.Model },
                         });
+                        unthought.Add(said[^1]);
                     }
                     else if (i < tookOver)
                     {
@@ -518,6 +549,7 @@ internal sealed class Conversation
                     else if (block.TryPickToolUse(out BetaToolUseBlock? use))
                     {
                         said.Add(new BetaToolUseBlockParam { ID = use.ID, Name = use.Name, Input = use.Input });
+                        unthought.Add(said[^1]);
                         asked.Add(use);
                     }
                 }
@@ -544,7 +576,7 @@ internal sealed class Conversation
                 {
                     lock (_lock)
                     {
-                        talk.Messages.Add(new BetaAssistantMessageParam { Content = said });
+                        AddSaid(talk, said, unthought);
                     }
                     if (reply.StopReason == BetaStopReason.MaxTokens)
                     {
@@ -553,12 +585,15 @@ internal sealed class Conversation
                     break;
                 }
                 // Every tool asked for is answered, in one message, or the next request is refused.
-                List<BetaContentBlockParam> results = [];
+                List<Answered> answers = [];
                 bool stopped = false;
+                int pictures = 0; // of this reply's results together
+                long pictureBytes = 0;
                 foreach (BetaToolUseBlock use in asked)
                 {
                     string input = JsonSerializer.Serialize(use.Input);
                     ToolReply answer;
+                    bool ran = false;
                     if (stopped || stop.IsCancellationRequested)
                     {
                         stopped = true;
@@ -576,21 +611,64 @@ internal sealed class Conversation
                             stopped = true;
                             answer = new ToolReply(false, "not run: the person stopped the work");
                         }
-                        if (!stopped)
+                        ran = !stopped;
+                    }
+                    // The pictures that go with it: a success's only (the service takes none with a
+                    // failure), and no more than one reply's results may bring together.
+                    List<ToolImage>? kept = null;
+                    bool leftOut = false;
+                    foreach (ToolImage image in answer.Ok && ran ? answer.Images ?? [] : [])
+                    {
+                        if (pictures == MostImages || pictureBytes + image.Data.Length > MostImageBytes)
                         {
-                            Note(talk, "result", Shown(answer.Text), use.Name, answer.Ok);
+                            leftOut = true;
+                            continue;
                         }
+                        ++pictures;
+                        pictureBytes += image.Data.Length;
+                        (kept ??= []).Add(image);
                     }
                     string given = answer.Text.Length <= MostResultChars
                         ? answer.Text
                         : string.Concat(Start(answer.Text, MostResultChars), "\n(cut: the result was longer; ask for less at once)");
-                    results.Add(new BetaToolResultBlockParam { ToolUseID = use.ID, Content = given, IsError = !answer.Ok });
+                    if (leftOut)
+                    {
+                        given += "\n" + ImagesLeftOut;
+                    }
+                    if (ran)
+                    {
+                        int count = kept?.Count ?? 0;
+                        Note(talk, "result", Shown(answer.Text) + (count == 0 ? "" : count == 1 ? " (with a picture)" : " (with " + count + " pictures)"),
+                             use.Name, answer.Ok);
+                    }
+                    answers.Add(new Answered(use.ID, given, !answer.Ok, kept));
+                }
+                // (Made here, not under the lock the editor's frame takes: pictures are megabytes to write out.)
+                BetaUserMessageParam results = Results(answers);
+                bool pictured = false;
+                for (int i = 0; i < answers.Count; ++i)
+                {
+                    if (answers[i].Images is { } images)
+                    {
+                        long bytes = 0;
+                        foreach (ToolImage image in images)
+                        {
+                            bytes += image.Data.Length;
+                        }
+                        answers[i] = answers[i] with { Images = null, Pictures = images.Count, Bytes = bytes };
+                        pictured = true;
+                    }
                 }
                 // Claude's reply and the answers to it, together or not at all.
                 lock (_lock)
                 {
-                    talk.Messages.Add(new BetaAssistantMessageParam { Content = said });
-                    talk.Messages.Add(new BetaUserMessageParam { Content = results });
+                    AddSaid(talk, said, unthought);
+                    talk.Messages.Add(results);
+                    if (pictured)
+                    {
+                        talk.Pictured.Add(new Pictured(talk.Messages.Count - 1, answers));
+                        LetOldPicturesGo(talk);
+                    }
                 }
                 if (stopped)
                 {
@@ -618,7 +696,16 @@ internal sealed class Conversation
         }
         catch (AnthropicApiException e)
         {
-            Note(talk, "error", "Claude's service answered with an error: " + e.Message);
+            // (A picture the service will not take would be sent, and refused, with every later
+            // message: none is kept past an error that may be about one.)
+            bool taken;
+            lock (_lock)
+            {
+                taken = talk.Pictured.Count > 0;
+                LetPicturesGo(talk, 0, 0, 0);
+            }
+            Note(talk, "error", "Claude's service answered with an error: " + e.Message +
+                                (taken ? " The pictures were taken out of the conversation, in case one of them was why." : ""));
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
@@ -634,6 +721,111 @@ internal sealed class Conversation
                 talk.Stop = null;
             }
             Interlocked.Decrement(ref _working);
+        }
+    }
+
+    // The message that hands a reply's tool results back: each with its text, and its pictures after it.
+    private static BetaUserMessageParam Results(List<Answered> answers)
+    {
+        List<BetaContentBlockParam> results = [];
+        foreach (Answered answer in answers)
+        {
+            if (answer.Images == null)
+            {
+                results.Add(new BetaToolResultBlockParam { ToolUseID = answer.ID, Content = answer.Text, IsError = answer.IsError });
+                continue;
+            }
+            // (An empty text block is refused.)
+            List<Block> blocks = [new BetaTextBlockParam { Text = answer.Text.Length > 0 ? answer.Text : "(no text)" }];
+            foreach (ToolImage image in answer.Images)
+            {
+                blocks.Add(new BetaImageBlockParam
+                {
+                    Source = new BetaBase64ImageSource
+                    {
+                        Data = Convert.ToBase64String(image.Data),
+                        MediaType = image.MediaType == "image/jpeg" ? MediaType.ImageJpeg : MediaType.ImagePng,
+                    },
+                });
+            }
+            results.Add(new BetaToolResultBlockParam { ToolUseID = answer.ID, Content = blocks, IsError = answer.IsError });
+        }
+        return new BetaUserMessageParam { Content = results };
+    }
+
+    // (Locked by the caller.) Keeps the conversation's pictures within MostImages and MostImageBytes:
+    // when they are over, the oldest results that carry any are let go until half of each is left
+    // (the newest results keep theirs: Claude has yet to see them).
+    private static void LetOldPicturesGo(Talk talk)
+    {
+        (int count, long bytes) = Kept(talk);
+        if (count > MostImages || bytes > MostImageBytes)
+        {
+            LetPicturesGo(talk, 1, MostImages / 2, MostImageBytes / 2);
+        }
+    }
+
+    private static (int Count, long Bytes) Kept(Talk talk)
+    {
+        int count = 0;
+        long bytes = 0;
+        foreach (Pictured pictured in talk.Pictured)
+        {
+            foreach (Answered answer in pictured.Answers)
+            {
+                count += answer.Pictures;
+                bytes += answer.Bytes;
+            }
+        }
+        return (count, bytes);
+    }
+
+    // (Locked by the caller.) Claude's reply joins the conversation.
+    private static void AddSaid(Talk talk, List<BetaContentBlockParam> said, List<BetaContentBlockParam> unthought)
+    {
+        if (unthought.Count < said.Count)
+        {
+            talk.Unthought[talk.Messages.Count] = unthought;
+        }
+        talk.Messages.Add(new BetaAssistantMessageParam { Content = said });
+    }
+
+    // (Locked by the caller.) Lets the oldest results' pictures go, all but those of the newest
+    // `keep` messages, until at most `count` pictures and `bytes` are left: each such message is
+    // written again as its texts, saying a picture was there.
+    //
+    // Claude's thinking is signed against everything said before it, so a message written again
+    // makes every later thinking block one the service refuses. All of the conversation's thinking
+    // so far is therefore taken out with it (which is allowed; taking out some is not): Claude
+    // goes on from its words and tools, without what it thought before.
+    private static void LetPicturesGo(Talk talk, int keep, int count, long bytes)
+    {
+        (int kept, long keptBytes) = Kept(talk);
+        bool rewritten = false;
+        while (talk.Pictured.Count > keep && (kept > count || keptBytes > bytes))
+        {
+            rewritten = true;
+            Pictured oldest = talk.Pictured[0];
+            talk.Pictured.RemoveAt(0);
+            for (int i = 0; i < oldest.Answers.Count; ++i)
+            {
+                Answered answer = oldest.Answers[i];
+                if (answer.Pictures > 0)
+                {
+                    kept -= answer.Pictures;
+                    keptBytes -= answer.Bytes;
+                    oldest.Answers[i] = answer with { Text = answer.Text + "\n" + ImageGone, Pictures = 0, Bytes = 0 };
+                }
+            }
+            talk.Messages[oldest.Index] = Results(oldest.Answers);
+        }
+        if (rewritten)
+        {
+            foreach ((int index, List<BetaContentBlockParam> unthought) in talk.Unthought)
+            {
+                talk.Messages[index] = new BetaAssistantMessageParam { Content = unthought };
+            }
+            talk.Unthought.Clear();
         }
     }
 

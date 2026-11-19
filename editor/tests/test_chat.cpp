@@ -587,33 +587,100 @@ GIANT_TEST("chat gate: the held tool as the chat's other side asks for it, and g
     ChatGate gate;
     gate.asks = true;
     std::string reply = "old";
+    std::vector<ai::CommandImage> images;
     const int answered = static_cast<int>(HeldAsk::answered), finish = static_cast<int>(HeldAsk::finish), drop = static_cast<int>(HeldAsk::drop);
     // None held: answered (there is nothing to wait for), and finishing fails without running anything.
     GIANT_CHECK(gate.asking().is_null());
-    GIANT_CHECK(held_chat_tool(f.commands, gate, answered, reply) == k_chat_tool_done && reply.empty());
-    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply) == k_chat_tool_failed && !reply.empty() && !f.commands.can_undo());
+    GIANT_CHECK(held_chat_tool(f.commands, gate, answered, reply, images) == k_chat_tool_done && reply.empty());
+    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply, images) == k_chat_tool_failed && !reply.empty() && !f.commands.can_undo());
     // Held: not answered until the person does; asking tells what.
     GIANT_CHECK(run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", 7.0}}}}, &gate).held);
-    GIANT_CHECK(held_chat_tool(f.commands, gate, answered, reply) == k_chat_tool_held && reply.empty());
+    GIANT_CHECK(held_chat_tool(f.commands, gate, answered, reply, images) == k_chat_tool_held && reply.empty());
     const Json asking = gate.asking();
     GIANT_CHECK(asking["command"] == "set_time" && asking["args_hidden"] == 0 &&
                 ai::parse_json(asking["args"].get<std::string>()).value_or(Json()) == Json({{"hours", 7.0}}));
-    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply) == k_chat_tool_failed && f.state.scene.clock.hours != 7.0 &&
+    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply, images) == k_chat_tool_failed && f.state.scene.clock.hours != 7.0 &&
                 gate.request() != nullptr); // (asked for too early: still held, not run)
     gate.answer(true);
     GIANT_CHECK(gate.asking().is_null()); // (answered: no longer asked, though not yet run)
-    GIANT_CHECK(held_chat_tool(f.commands, gate, answered, reply) == k_chat_tool_done);
-    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply) == k_chat_tool_done && f.state.scene.clock.hours == 7.0 &&
+    GIANT_CHECK(held_chat_tool(f.commands, gate, answered, reply, images) == k_chat_tool_done);
+    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply, images) == k_chat_tool_done && f.state.scene.clock.hours == 7.0 &&
                 ai::parse_json(reply).has_value());
     // Not allowed: a failure that says whose decision it was.
     GIANT_CHECK(run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", 8.0}}}}, &gate).held);
     gate.answer(false);
-    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply) == k_chat_tool_failed && reply.find("did not allow") != std::string::npos &&
+    GIANT_CHECK(held_chat_tool(f.commands, gate, finish, reply, images) == k_chat_tool_failed && reply.find("did not allow") != std::string::npos &&
                 f.state.scene.clock.hours == 7.0);
     // Withdrawn: gone, and a later one is not touched by it.
     GIANT_CHECK(run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", 9.0}}}}, &gate).held);
-    GIANT_CHECK(held_chat_tool(f.commands, gate, drop, reply) == k_chat_tool_done && gate.request() == nullptr && reply.empty());
-    GIANT_CHECK(held_chat_tool(f.commands, gate, drop, reply) == k_chat_tool_done); // (twice is nothing)
+    GIANT_CHECK(held_chat_tool(f.commands, gate, drop, reply, images) == k_chat_tool_done && gate.request() == nullptr && reply.empty());
+    GIANT_CHECK(held_chat_tool(f.commands, gate, drop, reply, images) == k_chat_tool_done); // (twice is nothing)
     GIANT_CHECK(run_chat_tool(f.commands, "run_command", {{"name", "set_time"}, {"args", {{"hours", 10.0}}}}, &gate).held &&
                 gate.asking()["command"] == "set_time" && f.state.scene.clock.hours == 7.0);
+}
+
+GIANT_TEST("chat tools: a command's pictures go to Claude with its result: those its service takes") {
+    ai::CommandRegistry commands;
+    std::vector<ai::CommandImage> made;
+    GIANT_CHECK(commands.add({"look", "Takes pictures.", Json{{"type", "object"}}, true, [&made](const Json&, ai::CommandContext&) {
+                                  ai::CommandResult result = ai::CommandResult::success({{"width", 4}});
+                                  result.images = made;
+                                  return result;
+                              }}));
+    const auto look = [&commands] { return run_chat_tool(commands, "run_command", {{"name", "look"}}); };
+    // None: the result alone.
+    ChatToolReply reply = look();
+    GIANT_CHECK(reply.ok && reply.images.empty() && ai::parse_json(reply.text).value_or(Json()) == Json({{"width", 4}}));
+    // A PNG and a JPEG: both, whole, in order.
+    const std::string png = std::string("\x89PNG\r\n\x1a\n", 8), jpeg = "\xFF\xD8\xFF";
+    made = {{"image/png", png + std::string("\0abc", 4)}, {"image/jpeg", jpeg + "jpeg"}};
+    reply = look();
+    GIANT_CHECK(reply.ok && reply.images.size() == 2 && reply.images[0].mime_type == "image/png" && reply.images[0].data == made[0].data &&
+                reply.images[1].mime_type == "image/jpeg" && reply.images[1].data == jpeg + "jpeg");
+    GIANT_CHECK(!ai::parse_json(reply.text).value_or(Json()).contains("note_to_assistant"));
+    // Another kind, an empty one, one that is not what it says, one too large and those past the most: left out,
+    // and Claude is told how many.
+    made = {{"image/gif", "GIF89a"}, {"image/png", ""}, {"image/png", jpeg + "not a png"}, {"image/jpeg", png},
+            {"image/png", png + std::string(k_chat_most_image_bytes - png.size() + 1, 'x')},
+            {"image/png", png + std::string(k_chat_most_image_bytes - png.size(), 'y')}};
+    for (usize i = 0; i < k_chat_most_images; ++i) {
+        made.push_back({"image/png", png + std::to_string(i)});
+    }
+    reply = look();
+    GIANT_CHECK(reply.ok && reply.images.size() == k_chat_most_images && reply.images[0].data.size() == k_chat_most_image_bytes &&
+                reply.images[1].data == png + "0" && reply.images.back().data == png + std::to_string(k_chat_most_images - 2));
+    const Json told = ai::parse_json(reply.text).value_or(Json());
+    GIANT_CHECK(told["width"] == 4 && told["note_to_assistant"].get<std::string>().starts_with("6 picture(s)"));
+    // A result that is no object is wrapped, so that the note is not lost.
+    GIANT_CHECK(commands.add({"count", "Counts.", Json{{"type", "object"}}, true, [](const Json&, ai::CommandContext&) {
+                                  ai::CommandResult result = ai::CommandResult::success(Json::array({1, 2}));
+                                  result.images.push_back({"image/gif", "GIF89a"});
+                                  return result;
+                              }}));
+    const Json counted = ai::parse_json(run_chat_tool(commands, "run_command", {{"name", "count"}}).text).value_or(Json());
+    GIANT_CHECK(counted["result"] == Json::array({1, 2}) && counted["note_to_assistant"].get<std::string>().starts_with("1 picture(s)"));
+    // A command that failed has none.
+    GIANT_CHECK(commands.add({"fail", "Fails.", Json{{"type", "object"}}, true, [](const Json&, ai::CommandContext&) {
+                                  ai::CommandResult result = ai::CommandResult::failure("no");
+                                  result.images.push_back({"image/png", "x"});
+                                  return result;
+                              }}));
+    reply = run_chat_tool(commands, "run_command", {{"name", "fail"}});
+    GIANT_CHECK(!reply.ok && reply.images.empty());
+    // A held command's pictures come with its reply once the person allowed it.
+    GIANT_CHECK(commands.add({"paint", "Paints, and shows it.", Json{{"type", "object"}}, false, [](const Json&, ai::CommandContext&) {
+                                  ai::CommandResult result = ai::CommandResult::success();
+                                  result.images.push_back({"image/png", std::string("\x89PNG\r\n\x1a\n", 8) + "painted"});
+                                  return result;
+                              }}));
+    ChatGate gate;
+    gate.asks = true;
+    GIANT_CHECK(run_chat_tool(commands, "run_command", {{"name", "paint"}}, &gate).held);
+    gate.answer(true);
+    std::string text;
+    std::vector<ai::CommandImage> images = {{"image/png", "stale"}};
+    GIANT_CHECK(held_chat_tool(commands, gate, static_cast<int>(HeldAsk::answered), text, images) == k_chat_tool_done && images.empty());
+    GIANT_CHECK(held_chat_tool(commands, gate, static_cast<int>(HeldAsk::finish), text, images) == k_chat_tool_done && images.size() == 1 &&
+                images[0].data.ends_with("painted"));
+    GIANT_CHECK(held_chat_tool(commands, gate, static_cast<int>(HeldAsk::drop), text, images) == k_chat_tool_done && images.empty());
 }
