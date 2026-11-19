@@ -4991,8 +4991,8 @@ and changes pose with no blend (far off, eight poses a round); one setting off o
 arriving shows it up to a pass of the list late (a second with 65,536
 people), jumping to where it is; with more travelling than
 `moved_a_frame` each moves every few frames; every frame with one
-moving gathers the frame's cells again and re-sends its chunks (what
-that costs with thousands is for CR6 to measure).
+moving gathers the frame's cells again and re-sends its chunks (with
+a thousand walking that is in the crowd gate's frame times, CR6).
 
 ### A figure and its entity change places (CR4)
 
@@ -5067,9 +5067,60 @@ size on screen needs, whatever `triangles` the pose was baked with.
 Not here: whether figures cast sun shadows. They do, as every
 instance does, and nothing in the renderer leaves one instance out of
 the shadow pages; what that costs with thousands of them moving is
-for the crowd gate to measure on the owner's machine (CR6:
-`shadow_drawn`, `shadow_waiting` and the frame time with `shadows` on
-and off), and a switch is made then if the numbers ask for one.
+for the crowd gate to measure on the owner's machine (CR6: the GPU's
+passes with the figures and without, `shadows` on and off, and the
+shadow pages drawn, waiting and behind), and a switch is made then if
+the numbers ask for one.
+
+### The crowd gate (CR6)
+
+`tools/crowd_gate.py` fills a square within the N3 gate's town site
+(40 m by 70 m, east of the houses) with 3,000 people: 2,000 standing in
+nine blocks of three files, and 1,000 walking the ten lanes beside and
+between the blocks. Each lane has a place at either end for each way,
+0.4 m to that way's side of its middle; a walker's home is one, and
+its behaviour (one a lane and a way: two states, each begun as the
+other's trip arrives) has it walk to the place at the other end, home,
+and across again without end. They start spread along their lanes, so
+the lanes hold a steady stream both ways, the two passing side by
+side, whatever the clock does. There are no roads: the trips go
+straight. Three looks of five colours each, fifteen in
+all.
+
+With the figures turned on and everything else as it is by default
+(256 entities, 60 m), it measures from 30 m over the square's edge
+what the figures add on the GPU: the timed passes with the figures
+and without, with the sun's shadows on and off (four states, three
+rounds, medians), so that what of the figures' cost is their shadows
+is told apart (what they add with the shadows on less what they add
+with them off: the figures cast shadows like anything else, and
+whether they should is decided by this number), and the shadow pages
+drawn, waiting and behind a frame with them and without. The clock
+runs at the world's own pace (a second a second): the sun turns the
+quarter degree at which every shadow page is drawn again once a
+minute, where a day run fast would have the gate measure that and not
+the crowd. Then it flies in from 460 m (beyond where figures
+are drawn), down a lane at head height between the two streams and
+once round the square up to 80 m, turning from the lane's heading to
+the square's middle over the first third of the round.
+
+It passes at 60 fps with the other gates' limits over the flight and
+each leg; all but a twentieth of the people drawn from the lane on
+with no figure waiting for room; every pose asked for baked (each look's standing one and its walk's)
+and a quarter of the walkers or more walking at once;
+nobody appearing or going close by in view; the figures under 2 ms on
+the GPU and no more shadow pages behind with them than without; the
+people's four phases (picking and placing the figures is in `people`;
+drawing them is in `render` and shows in the frame times) under 1 ms
+of the main thread in the worst sample; and no overflow. The 2 ms and
+1 ms are first budgets, set before any run on a real GPU: the first
+run's numbers say whether figures are turned on by default and
+whether the entities' count and distances change.
+
+On CI (the null device) 360 people are put through the same on a
+shorter flight, without the speed and the costs. Its arithmetic (the
+square's plan, the flight, the checks) is tested by
+`tools/test_crowd_gate.py`.
 
 ## Sound
 

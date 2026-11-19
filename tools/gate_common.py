@@ -61,7 +61,7 @@ def hitch_limit(times):
     return HITCH_FACTOR * max(median, FRAME_BUDGET_MS)
 
 
-def _median(values):
+def median(values):
     ordered = sorted(values)
     return ordered[len(ordered) // 2] if ordered else 0.0
 
@@ -164,7 +164,7 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
             if leg is not None:
                 name = leg(frame["stop"])
                 legs[name] = legs.get(name, 0) + 1
-        over = sorted(((n, _median(v)) for n, v in excess.items() if "/" not in n), key=lambda x: -x[1])
+        over = sorted(((n, median(v)) for n, v in excess.items() if "/" not in n), key=lambda x: -x[1])
         lines = [f"{len(frames)} {what} (over {limit:.1f} ms); the phase most over its typical time in each: "
                  f"{counts(blamed)}",
                  "  median ms over typical: " + ", ".join(f"{n} +{e:.1f}" for n, e in over if e >= 0.5)]
@@ -194,7 +194,7 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
     if hitches:
         lines += told(hitches, "hitches", hitch_over)
     if (frame_stats(times)["p99_ms"] > P99_LIMIT_MS and slow_over_ms <= P99_LIMIT_MS and
-            _median(times) < P99_LIMIT_MS):
+            median(times) < P99_LIMIT_MS):
         uneven = [f for f in slow if P99_LIMIT_MS < f["ms"] <= hitch_over]
         if uneven:
             lines += told(uneven, "slow frames", P99_LIMIT_MS)
@@ -224,18 +224,18 @@ def device_line(hitches):
     typical = [f["typical_device"] for f in with_device if f.get("typical_device")]
 
     def typical2(key):
-        return 2 * _median([t.get(key, 0) for t in typical]) if typical else 0.0
+        return 2 * median([t.get(key, 0) for t in typical]) if typical else 0.0
 
     keys = ("allocations", "created", "released")
-    before = {k: _median([(f.get("device_before") or {}).get(k, 0) for f in with_device]) for k in keys}
+    before = {k: median([(f.get("device_before") or {}).get(k, 0) for f in with_device]) for k in keys}
     waits = [f["device"].get("wait_ms", 0.0) for f in with_device]
     releases = [f["device"].get("release_ms", 0.0) for f in with_device]
     if not any(before.values()) and not any(waits) and not any(releases):
         return None  # (the null device counts nothing)
     parts = [f"{k} {before[k]:.0f} (typical {typical2(k):.0f})" for k in keys]
     return ("  the GPU device in the two frames before a hitch (median): " + ", ".join(parts) +
-            f"; begin_frame waited for the GPU {_median(waits):.1f} ms (worst {max(waits):.1f}), "
-            f"then freed for {_median(releases):.1f} ms (worst {max(releases):.1f})")
+            f"; begin_frame waited for the GPU {median(waits):.1f} ms (worst {max(waits):.1f}), "
+            f"then freed for {median(releases):.1f} ms (worst {max(releases):.1f})")
 
 
 def describe(times):
