@@ -1,6 +1,9 @@
 // Writes PNG images, for screenshots the AI and people can look at. Simple
-// and dependency-free: the image data is stored without compression, so
-// files are large; keep screenshots small (the editor scales them down).
+// and dependency-free: rows filtered (none, sub or up) and packed with a
+// small deflate (fixed codes, short searches), fast rather than as small
+// as a full encoder's. What repeats (panels, flat sky) packs to little, a
+// noisy render to less; keep screenshots small all the same (the editor
+// scales them down).
 #pragma once
 
 #include "giant/core/types.h"

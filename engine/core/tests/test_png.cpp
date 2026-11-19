@@ -20,13 +20,27 @@ GIANT_TEST("png: writes a valid file header and refuses bad sizes") {
     GIANT_CHECK(encode_png_rgba(0, 3, {}).empty());
 }
 
-GIANT_TEST("png: large images span several stored blocks") {
+GIANT_TEST("png: the image is packed: what repeats takes little, and anything still fits") {
     const u32 w = 300;
-    const u32 h = 100; // 120 KB of pixels: more than one 64 KB block
-    std::vector<u8> pixels(static_cast<usize>(w) * h * 4);
-    for (usize i = 0; i < pixels.size(); ++i) {
-        pixels[i] = static_cast<u8>(i * 7);
+    const u32 h = 100;
+    // One colour: next to nothing.
+    const std::vector<u8> flat(static_cast<usize>(w) * h * 4, 90);
+    GIANT_CHECK(encode_png_rgba(w, h, flat).size() < flat.size() / 50);
+    // A slope (each pixel a little more than the one before): the row filters make it repeat.
+    std::vector<u8> slope(flat.size());
+    for (usize i = 0; i < slope.size(); ++i) {
+        slope[i] = static_cast<u8>((i / 4) % w + (i / 4) / w);
     }
-    const std::string png = encode_png_rgba(w, h, pixels);
-    GIANT_CHECK(png.size() > pixels.size());
+    GIANT_CHECK(encode_png_rgba(w, h, slope).size() < slope.size() / 20);
+    // Noise does not pack, and costs little more than its bytes (the fixed codes take 9 bits for some).
+    std::vector<u8> noise(flat.size());
+    u32 seed = 12345;
+    for (u8& value : noise) {
+        seed = seed * 1664525u + 1013904223u;
+        value = static_cast<u8>(seed >> 24);
+    }
+    const usize packed = encode_png_rgba(w, h, noise).size();
+    GIANT_CHECK(packed > noise.size() / 2 && packed < noise.size() + noise.size() / 7 + 1024);
+    // The same pixels give the same file.
+    GIANT_CHECK(encode_png_rgba(w, h, noise) == encode_png_rgba(w, h, noise));
 }

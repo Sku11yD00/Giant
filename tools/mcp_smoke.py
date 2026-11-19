@@ -26,7 +26,7 @@ TIMEOUT = 3000  # seconds for the whole run (the gates are heavy on the software
 
 
 def decode_png(data):
-    """Decodes the editor's PNGs (8-bit RGBA, filter 0) to (width, height, bytes)."""
+    """Decodes the editor's PNGs (8-bit RGBA; row filters none, sub and up) to (width, height, bytes)."""
     import zlib
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise RuntimeError("not a PNG")
@@ -45,8 +45,20 @@ def decode_png(data):
     row = width * 4
     if len(raw) != (row + 1) * height:
         raise RuntimeError("PNG data has the wrong size")
-    pixels = b"".join(raw[y * (row + 1) + 1:(y + 1) * (row + 1)] for y in range(height))
-    return width, height, pixels
+    pixels = bytearray()
+    for y in range(height):
+        kind = raw[y * (row + 1)]
+        line = bytearray(raw[y * (row + 1) + 1:(y + 1) * (row + 1)])
+        if kind == 1:  # sub: each byte is less the pixel to its left
+            for i in range(4, row):
+                line[i] = (line[i] + line[i - 4]) & 0xFF
+        elif kind == 2 and y > 0:  # up: less the pixel above
+            above = pixels[(y - 1) * row:y * row]
+            line = bytearray((a + b) & 0xFF for a, b in zip(line, above))
+        elif kind not in (0, 2):
+            raise RuntimeError(f"PNG row filter {kind} is not one the editor writes")
+        pixels += line
+    return width, height, bytes(pixels)
 
 
 def build_scene(tool, call, check):

@@ -32,6 +32,11 @@ internal static class Prompt
           try to get the same thing done another way. Tell them what you meant to do and ask what they want.
           A script file (load_scripts) is loaded only once they allowed that file in the editor's window: a
           script is a program that runs with their rights.
+        - You can look at the editor: capture_screenshot returns a picture of the window as it is now (the
+          viewport and the panels). Look when what matters is how something looks (a place, a colour, the
+          light), or to check that a visible change came out as asked; read the scene with get_ and list_
+          commands when it is facts you need (they are exact, and cheaper). The default size is enough for
+          most looks.
         - If a command fails, read the error, fix the arguments and try again; if it keeps failing, say what
           went wrong in plain words.
         - Positions are in metres, y is up. Do not guess entity ids, file paths or names: read them from a

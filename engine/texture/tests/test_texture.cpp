@@ -12,6 +12,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace giant;
 using namespace giant::texture;
@@ -106,6 +108,46 @@ GIANT_TEST("texture: decodes a PNG and refuses what is not an image") {
     GIANT_CHECK(out.width == 0 && out.rgba.empty());
     GIANT_CHECK(!decode_image(bytes.first(bytes.size() / 2), out, error));
     GIANT_CHECK(!decode_image({}, out, error));
+}
+
+GIANT_TEST("texture: the PNGs the engine writes read back as they were, whatever is in them") {
+    // (encode_png_rgba packs: row filters and deflate. What it wrote is read here by another decoder.)
+    const auto round_trip = [](u32 width, u32 height, const std::vector<u8>& rgba) {
+        const std::string png = encode_png_rgba(width, height, rgba);
+        Image out;
+        std::string error;
+        return decode_image(std::span<const u8>(reinterpret_cast<const u8*>(png.data()), png.size()), out, error) && out.width == width &&
+               out.height == height && out.rgba == rgba;
+    };
+    u32 seed = 7;
+    const auto next = [&seed] {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<u8>(seed >> 24);
+    };
+    // Sizes from one pixel to rows longer than a match and data past the 32 KB window; noise, flats, slopes, repeats.
+    for (const auto& [width, height] : {std::pair<u32, u32>{1, 1}, {1, 9}, {3, 1}, {2, 2}, {65, 3}, {300, 100}, {1024, 40}, {17, 700}}) {
+        const usize bytes = static_cast<usize>(width) * height * 4;
+        std::vector<u8> noise(bytes), flat(bytes, 255), slope(bytes), repeat(bytes), mixed(bytes);
+        for (usize i = 0; i < bytes; ++i) {
+            noise[i] = next();
+            slope[i] = static_cast<u8>((i / 4) % width * 3 + (i / 4) / width * 5 + i % 4);
+            repeat[i] = static_cast<u8>((i % 37) * 11);
+            // Runs of one value among noise, of lengths about the longest match (258) and beyond.
+            mixed[i] = (i / 300) % 3 == 0 ? next() : static_cast<u8>(i / 300);
+        }
+        GIANT_CHECK(round_trip(width, height, noise));
+        GIANT_CHECK(round_trip(width, height, flat));
+        GIANT_CHECK(round_trip(width, height, slope));
+        GIANT_CHECK(round_trip(width, height, repeat));
+        GIANT_CHECK(round_trip(width, height, mixed));
+    }
+    // Every byte value, and every length of run from 1 to past the longest match.
+    std::vector<u8> runs;
+    for (u32 length = 1; length <= 300; ++length) {
+        runs.insert(runs.end(), length, static_cast<u8>(length * 7));
+    }
+    runs.resize((runs.size() / 400 + 1) * 400, 0);
+    GIANT_CHECK(round_trip(100, static_cast<u32>(runs.size() / 400), runs));
 }
 
 GIANT_TEST("texture: mips run to 1x1 from a top that is a multiple of 4 within max_size") {

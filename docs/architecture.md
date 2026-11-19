@@ -4159,6 +4159,37 @@ will do with them (a path is shown as written); what the person allowed
 runs against the scene as it is when they answer, not as it was when they
 were asked.
 
+#### Pictures (LW6b part 4)
+
+A command's pictures (`CommandResult::images`: a screenshot) go to Claude
+with its result. `execute_for_claude` keeps those Claude's service takes
+(PNG or JPEG, at most 4, each at most 3.5 MB: the service's limit is 5 MB
+as base64) in `ChatToolReply::images` and tells Claude how many it left
+out. The bytes do not go through the reply's JSON: the bridge keeps the
+last tool's pictures, and the C# side copies each (`ChatApi::tool_image`)
+right after the call that ran the tool, the held one's finish included.
+The conversation hands a result with pictures back as a list (its text,
+then an image block for each); one without stays a string. Every request
+carries the whole conversation, so its pictures are bounded
+(`Conversation.MostImages` 6, `MostImageBytes` 8 MB): when a new result
+goes over, the oldest results that carry pictures are written again as
+text with a note that a picture was there (`LetOldPicturesGo`), down to
+half of each bound, so that it happens once in several pictures and not
+with every one. One result's pictures are held to `MostImageBytes` too
+(the later ones are left out and Claude is told), so the newest result
+always fits. That rewrites earlier messages, so the service's cache of the
+conversation is read only up to the first of them once, each time it
+happens; and since a thinking block's signature holds only for the
+conversation as it was when Claude thought it, the rewrite takes all
+thinking so far out of the conversation as well (`Talk.Unthought`: what
+was said and the tools called stay). When the service refuses a request
+(`AnthropicApiException`), every picture is taken out the same way: a
+picture the service will not take must not refuse each message after it.
+A failed command's pictures are not sent. The Chat panel and `get_chat`
+say that a picture came, never its bytes. A screenshot's PNG is packed
+(`giant/core/png.h`: a filter chosen per row, one deflate block of fixed
+codes), which keeps a window-sized one well under the bounds.
+
 The key (`Keys`) is read from `ANTHROPIC_API_KEY`, else the first line of
 `claude_key.txt` in the person's own settings folder, with every message
 sent (so a corrected key is used at once). It is handed to the client
@@ -4369,8 +4400,7 @@ Whole text files are read and written by `giant/core/text_files.h`
 also flushes to the disk.
 
 Not yet: Claude's words arriving as they are written
-(replies come whole), pictures (a screenshot's result says there was one),
-asking before each change, shortening a long conversation (clear it when
+(replies come whole), shortening a long conversation (clear it when
 Claude's service says it is too long), and counting the tokens of requests
 another model took over (`get_chat` counts the answering model's). A C#
 script can still run the commands Claude may not (scripts are the

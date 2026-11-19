@@ -430,6 +430,8 @@ Open-world systems:
   ("Ask me before changes" in the Chat panel: Allow, Allow everything
   for this message, or Don't allow), and before any command loads a
   script file. Only the buttons in the editor's window answer.
+- LW6b part 4: Claude in the chat can look at the editor: a
+  screenshot it takes comes back to it as a picture.
 - LW7 part 1: mods as folders beside a world, each with a manifest (id,
   version, the mods it needs), a load order that is the same every time,
   and every problem said (`list_mods`, `enable_mod`; `docs/mods.md`).
