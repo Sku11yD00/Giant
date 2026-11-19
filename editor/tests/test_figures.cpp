@@ -8,6 +8,7 @@
 #include "../src/people_travel.h"
 #include "../src/pose_bakes.h"
 #include "../src/scene_render.h"
+#include "../src/texture_library.h"
 
 #include "giant_test.h"
 #include "gltf_test_files.h"
@@ -823,4 +824,90 @@ GIANT_TEST("figures: one let go on its way walks on as a figure from where its e
     f.figures.settings.hidden = "";
     live(0.0, 4, 3.0);
     GIANT_CHECK(f.figures.figure_of(sleeper) != nullptr && f.figures.stats().taken_over == 1);
+}
+
+GIANT_TEST("figures: each person is drawn in the one of its look's tints its seed gives, far as a figure and near as an entity alike") {
+    Fixture f;
+    if (f.renderer == nullptr) return;
+    f.row(12); // x = 10 to 32
+    for (u32 i = 0; i < 12; ++i) f.state.scene.people[i].seed = i;
+    // The colour the figure standing at `x` is drawn in.
+    const auto colour = [&f](double x) {
+        for (const render::Instance& i : f.frame.instances) {
+            if (i.mesh != render::k_no_mesh && i.moves && i.position.x == x) return f.frame.materials[i.material].base_color;
+        }
+        return Vec3{-1.0f, -1.0f, -1.0f};
+    };
+    const Vec3 own{0.2f, 0.4f, 0.6f};
+    f.frames(4);
+    f.draw();
+    GIANT_CHECK(f.drawn() == 12 && colour(10.0) == own && colour(32.0) == own);
+    // Three tints by command: every figure is drawn again, each in its own.
+    const Json tints = Json::array({Json::array({1.0, 0.0, 0.0}), Json::array({0.0, 1.0, 0.0}), Json::array({0.0, 0.0, 1.0})});
+    ai::CommandResult r = f.run("set_person_look", {{"name", "villager"}, {"tints", tints}});
+    GIANT_CHECK(r.ok && r.value["tints"] == tints);
+    f.frames(2);
+    f.draw();
+    GIANT_CHECK(f.drawn() == 12);
+    const world::PersonLook& look = f.state.scene.person_looks[0];
+    for (u32 i = 0; i < 12; ++i) GIANT_CHECK(colour(10.0 + 2.0 * i) == look.tints[i % 3]);
+    // (Three materials for the twelve, and the entity made for one near is in the same colour.)
+    std::vector<u32> materials;
+    for (const render::Instance& i : f.frame.instances) {
+        if (i.mesh != render::k_no_mesh && i.moves) materials.push_back(i.material);
+    }
+    std::sort(materials.begin(), materials.end());
+    GIANT_CHECK(std::unique(materials.begin(), materials.end()) - materials.begin() == 3);
+    const world::Person& fifth = f.state.scene.people[4];
+    const world::Entity body = PeopleState::entity_for(fifth, look, {fifth.position, fifth.yaw}, 0.0);
+    GIANT_CHECK(body.material.base_color == look.tints[1] && colour(18.0) == look.tints[1]);
+    // Another seed: another tint, once the list has come round to it.
+    f.state.scene.people[4].seed = 2;
+    f.frames(2);
+    f.draw();
+    GIANT_CHECK(colour(18.0) == look.tints[2] && colour(16.0) == look.tints[0]);
+    // Refused: a colour out of range, one of two numbers.
+    GIANT_CHECK(!f.run("set_person_look", {{"name", "villager"}, {"tints", Json::array({Json::array({1.0, 0.0, 2.0})})}}).ok);
+    GIANT_CHECK(!f.run("set_person_look", {{"name", "villager"}, {"tints", Json::array({Json::array({1.0, 0.0})})}}).ok);
+    // None again: everyone in the look's own.
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"tints", Json::array()}}).ok);
+    f.frames(2);
+    f.draw();
+    GIANT_CHECK(f.drawn() == 12 && colour(18.0) == own && colour(10.0) == own);
+}
+
+GIANT_TEST("figures: tinted figures of two looks each draw with their own look's textures") {
+    Fixture f;
+    if (f.renderer == nullptr) return;
+    // (A character with uvs: nothing is textured on a file with none.)
+    geometry::testing::SkinOptions with_uvs;
+    with_uvs.mirrored_uvs = true;
+    const std::string mapped = write("mapped.glb", geometry::testing::skinned_arm(with_uvs));
+    GIANT_CHECK(f.meshes->load(mapped).mesh != nullptr && f.meshes->find(mapped)->has_uvs);
+    TextureLibrary textures(nullptr, {});
+    f.frame.textures = &textures;
+    world::PersonLook& villager = f.state.scene.person_looks[0];
+    villager.mesh = mapped;
+    villager.material.maps.base_color = "villager.png";
+    villager.tints = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}};
+    world::PersonLook soldier = villager;
+    soldier.name = "soldier";
+    soldier.material.maps.base_color = "soldier.png";
+    f.state.scene.person_looks.push_back(soldier);
+    f.row(4);
+    for (u32 i = 0; i < 4; ++i) {
+        f.state.scene.people[i].seed = i;
+        if (i >= 2) f.state.scene.people[i].look = "soldier";
+    }
+    f.frames(6);
+    f.draw();
+    GIANT_CHECK(f.drawn() == 4);
+    const auto base_map = [&f](double x) {
+        for (const render::Instance& i : f.frame.instances) {
+            if (i.mesh != render::k_no_mesh && i.moves && i.position.x == x) return f.frame.material_textures[i.material][0];
+        }
+        return TextureLibrary::k_no_ref;
+    };
+    GIANT_CHECK(base_map(10.0) != TextureLibrary::k_no_ref && base_map(10.0) == base_map(12.0));
+    GIANT_CHECK(base_map(14.0) != TextureLibrary::k_no_ref && base_map(14.0) == base_map(16.0) && base_map(14.0) != base_map(10.0));
 }

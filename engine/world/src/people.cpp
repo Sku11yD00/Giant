@@ -90,7 +90,23 @@ std::optional<std::string> check_person_look(const PersonLook& look) {
             if (look.activities[j].activity == a.activity) return "activities names \"" + a.activity + "\" twice";
         }
     }
+    if (look.tints.size() > k_max_look_tints) return "at most " + std::to_string(k_max_look_tints) + " tints";
+    for (const Vec3& t : look.tints) {
+        for (const float c : {t.x, t.y, t.z}) {
+            if (!(c >= 0.0f && c <= 1.0f)) return "tints must be colours of 0 to 1";
+        }
+    }
     return std::nullopt;
+}
+
+u32 person_tint(const PersonLook& look, u32 seed) {
+    return look.tints.empty() ? 0u : seed % static_cast<u32>(look.tints.size());
+}
+
+Material person_material(const PersonLook& look, u32 tint) {
+    Material m = look.material;
+    if (tint < look.tints.size()) m.base_color = look.tints[tint];
+    return m;
 }
 
 std::optional<std::string> check_person(const Person& person) {

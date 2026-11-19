@@ -5017,6 +5017,40 @@ numbers from the owner's PC (CR6), and so does turning figures on by
 default. `tools/living_gate.py` turns figures off all the same, to
 measure what it measured before whatever the default.
 
+### Variety and what figures cost (CR5)
+
+A look comes in colours: `PersonLook::tints` (at most 16, saved with
+the look as `tints`, `set_person_look`) are the base colours its
+people have, each person the one its `seed` gives
+(`world::person_tint`: the seed modulo their number), in place of the
+look's material's (`world::person_material`: what that material
+draws, so of a file in parts the first part; the others keep the
+file's materials or their own looks). Both tiers ask the same two functions, so a person is
+the same colour as a figure and as an entity: `PeopleState::entity_for`
+gives the entity that material, and a figure's slot points at it
+(`FigureDraw::material`: `PeopleFigures` keeps each look's material in
+each of its tints where it stays, since a material's textures are
+looked up by where its maps are). `follow_figures` makes a look's
+instances once a pose as before and gives a tinted figure's first part
+the table's material for its tint, looked up once a call for each (a
+look draws with at most 16 materials more).
+A look's tints changed puts its figures again in their colours and has
+its entities made again, as any change to what a look draws does; a
+person's seed changed shows when the list comes round to it.
+
+Several looks were there from CR2 (each look its own poses, up to
+1,024 in all). Detail far off needs nothing new: a baked pose is a
+cluster mesh like any imported one (`geometry::build_clusters`), so
+the renderer's cut draws a figure 300 m off with the few triangles its
+size on screen needs, whatever `triangles` the pose was baked with.
+
+Not here: whether figures cast sun shadows. They do, as every
+instance does, and nothing in the renderer leaves one instance out of
+the shadow pages; what that costs with thousands of them moving is
+for the crowd gate to measure on the owner's machine (CR6:
+`shadow_drawn`, `shadow_waiting` and the frame time with `shadows` on
+and off), and a switch is made then if the numbers ask for one.
+
 ## Sound
 
 `engine/audio` (core only) hears the world. `Mixer` (mixer.h) plays a

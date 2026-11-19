@@ -562,6 +562,7 @@ constexpr usize k_max_person_looks = 1024;
 // plays instead of the motion matching (which takes over again when they
 // walk). An activity the look names no clip for shows as standing.
 constexpr usize k_max_look_activities = 32;
+constexpr usize k_max_look_tints = 16;
 struct LookActivity {
     std::string activity; // 1 to k_max_tag_bytes of a-z, 0-9 and _ (as a routine's)
     std::string clip;     // 1 to k_max_name_bytes
@@ -578,6 +579,9 @@ struct PersonLook {
     Hair hair;
     std::vector<std::string> matched; // the clips it is motion matched among (as EntityAnimation::matched; empty: {"*"})
     std::vector<LookActivity> activities; // each activity once (at most k_max_look_activities)
+    // The base colours its people come in (linear, 0 to 1; at most k_max_look_tints): each person has
+    // one of them by its seed, in place of `material`'s (people.h: person_tint). None: all the material's.
+    std::vector<Vec3> tints;
     // (A member added here: editor PeopleState::update tells what an entity is made from, member by member.)
     bool operator==(const PersonLook&) const = default;
 };

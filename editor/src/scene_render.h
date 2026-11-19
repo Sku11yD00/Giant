@@ -36,6 +36,11 @@ struct FigureDraw {
     // Its pose's, a part each (PoseBakes::Pose::meshes). One list is one look's: figures of a look in
     // different poses (standing, the poses of a walk) point at different lists.
     const std::vector<render::MeshId>* meshes = nullptr;
+    // What its first part is drawn with when not the look's own material: the look's in the person's
+    // tint (world::person_material). Good for the call like the rest, and kept where it is from call
+    // to call (a material's textures are looked up by where its maps are). Null: the look's own.
+    const world::Material* material = nullptr;
+    bool operator==(const FigureDraw&) const = default;
 };
 struct FigureDraws {
     // (Every slot's pointers good for the call: a chunk is read whole when any of it changed.)
@@ -221,8 +226,11 @@ struct SceneFrame {
     struct FigureLook {
         u32 first = 0;
         u32 count = 0;
+        bool textured = false; // its file has uvs
     };
     std::unordered_map<const std::vector<render::MeshId>*, FigureLook> figure_looks;
+    // The table's material for each tinted one met this call (FigureDraw::material): looked up once.
+    std::unordered_map<const world::Material*, u32> figure_tints;
     Cell figure_made;
     std::vector<render::MeshId> figure_rest; // scratch: a figure's meshes after its first
     std::vector<u32> figure_materials_before, figure_materials; // scratch: the materials a chunk drew with, and draws with

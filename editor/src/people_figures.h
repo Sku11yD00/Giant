@@ -200,6 +200,7 @@ private:
         u32 kind = k_stand;
         u32 moving = ~0u;           // its place in m_moving (~0: it is not travelling)
         u32 person_at = 0;          // where its person was last found in the scene's list
+        u32 seed = 0;               // its person's, when it was put (which of its look's tints it has)
     };
     // Where a person is and what its figure is to show.
     struct Pick {
@@ -242,6 +243,11 @@ private:
     Settings m_settings_seen; // as the poses were asked for
     std::vector<world::PersonLook> m_looks; // as the figures were made from them (FigureDraw::look points here)
     std::vector<LookPose> m_poses;          // k_kinds for each of m_looks (FigureDraw::meshes points here)
+    // Each look's material in each of its tints, k_max_look_tints for each of m_looks (FigureDraw::material
+    // points here: where each is stays, a look's changed in place).
+    std::vector<world::Material> m_tinted;
+    void tint(u32 look);
+    const world::Material* material(u32 look, u32 seed) const;
     std::vector<float> m_round;             // beside m_looks: the ground a round of its walk covers at height 1 (0: not known)
     std::vector<u8> m_walked;               // beside m_looks: a pose of its walk was asked for (its round is measured)
     std::vector<u32> m_asked;               // the poses (in m_poses) that have one in PoseBakes

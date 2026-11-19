@@ -1024,6 +1024,13 @@ def crowd_gate(tool, call, check):
         model = tool("create_entity", {"shape": "mesh", "mesh": path, "position": [0, 0, -500]})["id"]
         tool("set_person_look", {"name": "villager", "entity": model})
         tool("delete_entities", {"ids": [model]})
+        # (Crowds part 5: a look comes in colours, one a person.)
+        coloured = tool("set_person_look", {"name": "villager", "tints": [[0.75, 0.25, 0.25], [0.25, 0.25, 0.75]]})
+        check(coloured["tints"] == [[0.75, 0.25, 0.25], [0.25, 0.25, 0.75]] and
+              tool("get_person_looks")["person_looks"][0]["tints"] == coloured["tints"], f"a look's tints are kept, got {coloured}")
+        many = call("tools/call", {"name": "set_person_look",
+                                   "arguments": {"name": "villager", "tints": [[0.5, 0.5, 0.5]] * 17}})
+        check(many.get("isError") is True, "more tints than a look may have are refused")
         tool("create_people", {"people": [{"look": "villager", "position": [300 + 2 * (i % 20), 0, 2 * (i // 20)]}
                                           for i in range(200)]})
         # (Beyond where one looked towards is given an entity: 200 m.)
