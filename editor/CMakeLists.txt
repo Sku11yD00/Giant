@@ -138,6 +138,8 @@ if(GIANT_BUILD_TESTS)
     add_test(NAME gate_person COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_gate_person.py)
     # The living-world gate's own arithmetic: the valley's plan and its checks of the people (no editor).
     add_test(NAME living_gate_checks COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_living_gate.py)
+    # The crowd gate's own arithmetic: the square's plan, its flight and its checks (no editor).
+    add_test(NAME crowd_gate_checks COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_crowd_gate.py)
     # The N2 gate's scene and flight, on the null device (the software
     # renderer would take hours): everything but the speed. Optimised builds
     # only: a debug or sanitizer build takes most of an hour over it.
@@ -179,6 +181,11 @@ if(GIANT_BUILD_TESTS)
         COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/living_gate.py
                 $<TARGET_FILE:giant_editor> --hidden --backend null)
       set_tests_properties(editor_living_gate PROPERTIES TIMEOUT 2400 ENVIRONMENT "${gate_env}")
+      # The crowd gate (crowds plan CR6): a market square's people drawn as figures, flown to, through and over.
+      add_test(NAME editor_crowd_gate
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/crowd_gate.py
+                $<TARGET_FILE:giant_editor> --hidden --backend null)
+      set_tests_properties(editor_crowd_gate PROPERTIES TIMEOUT 1800 ENVIRONMENT "${gate_env}")
     endif()
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")

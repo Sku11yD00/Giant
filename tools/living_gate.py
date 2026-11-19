@@ -180,6 +180,18 @@ def ground_heights(tool, points):
     return heights
 
 
+def keep_look(tool, name, mesh, colour, position, tints=None):
+    """Makes the person look `name`: a character of `mesh` dressed in `colour` at `position`, kept as a
+    look (in `tints`, colours its people come in, if given) and not needed after."""
+    id_ = tool("create_entity", {"name": name, "shape": "mesh", "mesh": mesh, "body": "none", "position": position,
+                                 "base_color": colour, "roughness": 0.85})["id"]
+    tool("set_animation", {"id": id_, "clip": "idle", "matched": ["*"]})
+    tool("set_person_look", {"name": name, "entity": id_})
+    if tints:
+        tool("set_person_look", {"name": name, "tints": tints})
+    tool("delete_entities", {"ids": [id_]})
+
+
 def settle_valley(tool, whole, town_h, villages, day_seconds):
     """Peoples the valley build_valley made: the villages' houses, the places, the roads, the looks, the
     routines and the people, and sets the clock to a day in `day_seconds`. Returns (the plan, the
@@ -223,14 +235,8 @@ def settle_valley(tool, whole, town_h, villages, day_seconds):
         tool("create_route", {"points": [[x, h, z] for (x, z), h in zip(way, ground(way))], "kind": "path"})
     street = market_spots()
     tool("create_route", {"points": [[x, town_h, z] for x, z in street], "kind": "road", "width": 4})
-    # The looks: a character dressed, kept as a look, and not needed after.
     for i, (name, colour) in enumerate(LOOKS):
-        id_ = tool("create_entity", {"name": name, "shape": "mesh", "mesh": whole, "body": "none",
-                                     "position": [TOWN[0] + 60.0 + i, town_h, TOWN[1]], "base_color": colour,
-                                     "roughness": 0.85})["id"]
-        tool("set_animation", {"id": id_, "clip": "idle", "matched": ["*"]})
-        tool("set_person_look", {"name": name, "entity": id_})
-        tool("delete_entities", {"ids": [id_]})
+        keep_look(tool, name, whole, colour, [TOWN[0] + 60.0 + i, town_h, TOWN[1]])
     for name, entries in ROUTINES.items():
         tool("set_routine", {"name": name, "entries": entries, "alarmed": ALARMED})
     # The people: each by its home, a step from the next.
@@ -343,6 +349,20 @@ def people_ms(typicals):
         return None
     worst = max(samples, key=lambda s: sum(s[1].values()))[1]
     return sum(worst.values()), worst, weighted_median([(frames, sum(parts.values())) for frames, parts in samples])
+
+
+def people_cost(typicals, budget_ms, judged):
+    """The people's share of a frame over a flight (people_ms) told: (a line, or None when the editor
+    times no such phases; what it fails: not timed, or, when `judged`, the worst sample over `budget_ms`)."""
+    cost = people_ms(typicals)
+    if cost is None:
+        return None, [f"the editor does not time the people's share of a frame (the phases {PEOPLE_PHASES})"]
+    parts = ", ".join(f"{name} {ms:.3f}" for name, ms in cost[1].items())
+    told = (f"the people take {cost[2]:.3f} ms of the main thread a frame (the median), "
+            f"{cost[0]:.3f} ms in the worst sample of the flight ({parts})")
+    if judged and cost[0] > budget_ms:
+        return told, [f"the people take {cost[0]:.3f} ms a frame in the flight's worst sample, over {budget_ms} ms ({parts})"]
+    return told, []
 
 
 def loaded_failures(before, after, moving_m=MOVING_M, settled_m=SETTLED_M):
@@ -552,16 +572,10 @@ def main() -> int:
               f"{after['made'] - before['made']} made, {after['released'] - before['released']} released, "
               f"{after['swapped'] - before['swapped']} swapped; {appeared} appeared and {vanished} went close by in view; "
               f"at most {seen['unseen']} waited to be out of sight, {seen['waiting']} for room")
-        cost = people_ms(editor.typicals)
-        if cost is None:
-            failures.append(f"the editor does not time the people's share of a frame (the phases {PEOPLE_PHASES})")
-        else:
-            parts = ", ".join(f"{name} {ms:.3f}" for name, ms in cost[1].items())
-            print(f"living_gate: the people take {cost[2]:.3f} ms of the main thread a frame (the median), "
-                  f"{cost[0]:.3f} ms in the worst sample of the flight ({parts})")
-            if real_gpu and cost[0] > PEOPLE_BUDGET_MS:
-                failures.append(f"the people take {cost[0]:.3f} ms a frame in the flight's worst sample, over "
-                                f"{PEOPLE_BUDGET_MS} ms ({parts})")
+        told, over = people_cost(editor.typicals, PEOPLE_BUDGET_MS, real_gpu)
+        if told:
+            print(f"living_gate: {told}")
+        failures += over
         if appeared or vanished:
             failures.append(f"in the flight {appeared} people appeared and {vanished} went close by in view")
         if seen["street_walking"] < townsfolk // 8:
