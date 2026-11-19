@@ -817,7 +817,7 @@ GIANT_TEST("travel: those far from the camera are passed over until they or it c
     GIANT_CHECK(f.run("undo").ok);
     frame();
     frame();
-    frame(); // (what the travel kept of the one gone is dropped a frame on: all are looked at once more)
+    frame(); // (back in its place in the list: those after it are looked at afresh once more)
     GIANT_CHECK(people.stats().passed_over == 17);
     f.person(3000.0, 60.0);
     frame();

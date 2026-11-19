@@ -233,6 +233,7 @@ private:
     double m_camera_gone = 0.0; // metres the camera has moved, frame to frame, in all
     double m_reach_seen = 0.0;  // how far off an entity is made, last frame
     double m_fastest_seen = 0.0; // the travel's, last frame
+    double m_clock_seen = 0.0;   // the travel's, last frame
     u64 m_puts_seen = 0;        // the travel's, last frame
     const PeopleTravel* m_travel_seen = nullptr;
     Stats m_stats;

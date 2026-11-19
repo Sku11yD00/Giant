@@ -459,8 +459,9 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     // looked at afresh.
     const u64 puts = travel != nullptr ? travel->puts() : 0;
     const double fastest = travel != nullptr ? travel->fastest() : 0.0;
+    const double clock = travel != nullptr ? travel->seconds() : 0.0;
     if (m_was_off || resets != m_resets_seen || puts != m_puts_seen || travel != m_travel_seen || far_made != m_reach_seen ||
-        fastest != m_fastest_seen) {
+        fastest != m_fastest_seen || clock < m_clock_seen) { // (a clock put back: travellers went back with it)
         m_far.clear();
     }
     if (m_camera_known) {
@@ -473,6 +474,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     }
     m_puts_seen = puts;
     m_fastest_seen = fastest;
+    m_clock_seen = clock;
     m_travel_seen = travel;
     m_reach_seen = far_made;
     m_most_seen = most;
@@ -603,7 +605,6 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     double farthest_off = 0.0;
     const u32 a_frame = std::clamp<u32>(settings.made_a_frame, 1, 64);
     if (m_far.size() != people.size()) m_far.resize(people.size());
-    const double clock = travel != nullptr ? travel->seconds() : 0.0;
     m_stats.passed_over = 0;
     for (; m_cursor < end; ++m_cursor) {
         const world::Person& person = people[m_cursor];
