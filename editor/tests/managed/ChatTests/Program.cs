@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -25,6 +26,214 @@ internal sealed class FakeService : HttpMessageHandler
     public string? Always;
     /// <summary>When set, the next request fails with it instead of being answered.</summary>
     public Exception? Throw;
+    /// <summary>When set, a reply stops half way through its words until it is released (or the request is stopped).</summary>
+    public TaskCompletionSource? Pause;
+    /// <summary>When set, a reply breaks off half way through its words.</summary>
+    public bool Break;
+    /// <summary>When set, a reply simply ends half way through its words (as a server closing the connection does).</summary>
+    public bool Short;
+    /// <summary>When set, the service reports an error half way through a reply's words.</summary>
+    public bool Fail;
+
+    /// <summary>
+    /// A whole message as the service streams it: its events in order, the words of a text in two
+    /// parts. <paramref name="half"/> is where the first part of the first text ends (bytes).
+    /// </summary>
+    public static byte[] Streamed(string message, out int half)
+    {
+        using JsonDocument document = JsonDocument.Parse(message);
+        JsonElement root = document.RootElement;
+        StringBuilder sse = new();
+        int cut = -1;
+        void Event(string type, Action<Utf8JsonWriter> write)
+        {
+            using MemoryStream stream = new();
+            using (Utf8JsonWriter json = new(stream))
+            {
+                json.WriteStartObject();
+                json.WriteString("type", type);
+                write(json);
+                json.WriteEndObject();
+            }
+            sse.Append("event: ").Append(type).Append("\ndata: ").Append(Encoding.UTF8.GetString(stream.ToArray())).Append("\n\n");
+        }
+        void Delta(int index, string type, string key, string value) => Event("content_block_delta", json =>
+        {
+            json.WriteNumber("index", index);
+            json.WriteStartObject("delta");
+            json.WriteString("type", type);
+            json.WriteString(key, value);
+            json.WriteEndObject();
+        });
+        Event("message_start", json =>
+        {
+            json.WriteStartObject("message");
+            foreach (JsonProperty property in root.EnumerateObject())
+            {
+                if (property.Name == "content")
+                {
+                    json.WriteStartArray("content");
+                    json.WriteEndArray();
+                }
+                else if (property.Name is "stop_reason" or "stop_details")
+                {
+                    json.WriteNull(property.Name);
+                }
+                else if (property.Name == "usage")
+                {
+                    // (As the service does: what was read with the start, what was written only with the end.)
+                    json.WriteStartObject("usage");
+                    foreach (JsonProperty count in property.Value.EnumerateObject())
+                    {
+                        if (count.Name == "output_tokens")
+                        {
+                            json.WriteNumber(count.Name, 1);
+                        }
+                        else
+                        {
+                            count.WriteTo(json);
+                        }
+                    }
+                    json.WriteEndObject();
+                }
+                else
+                {
+                    property.WriteTo(json);
+                }
+            }
+            json.WriteEndObject();
+        });
+        int index = 0;
+        foreach (JsonElement block in root.GetProperty("content").EnumerateArray())
+        {
+            string kind = block.GetProperty("type").GetString() ?? "";
+            int at = index;
+            Event("content_block_start", json =>
+            {
+                json.WriteNumber("index", at);
+                json.WriteStartObject("content_block");
+                foreach (JsonProperty property in block.EnumerateObject())
+                {
+                    if ((kind == "text" && property.Name == "text") || (kind == "thinking" && property.Name is "thinking" or "signature"))
+                    {
+                        json.WriteString(property.Name, "");
+                    }
+                    else if (kind == "tool_use" && property.Name == "input")
+                    {
+                        json.WriteStartObject("input");
+                        json.WriteEndObject();
+                    }
+                    else
+                    {
+                        property.WriteTo(json);
+                    }
+                }
+                json.WriteEndObject();
+            });
+            if (kind == "text")
+            {
+                string text = block.GetProperty("text").GetString() ?? "";
+                int middle = text.Length / 2;
+                if (middle > 0 && char.IsLowSurrogate(text[middle]))
+                {
+                    --middle;
+                }
+                Delta(at, "text_delta", "text", text[..middle]);
+                if (cut < 0)
+                {
+                    cut = Encoding.UTF8.GetByteCount(sse.ToString());
+                }
+                Delta(at, "text_delta", "text", text[middle..]);
+            }
+            else if (kind == "thinking")
+            {
+                Delta(at, "thinking_delta", "thinking", block.GetProperty("thinking").GetString() ?? "");
+                Delta(at, "signature_delta", "signature", block.GetProperty("signature").GetString() ?? "");
+            }
+            else if (kind == "tool_use")
+            {
+                // (In parts, as it comes; a tool given nothing gets one empty part.)
+                string input = block.GetProperty("input").GetRawText();
+                if (input == "{}")
+                {
+                    Delta(at, "input_json_delta", "partial_json", "");
+                }
+                else
+                {
+                    Delta(at, "input_json_delta", "partial_json", input[..(input.Length / 2)]);
+                    Delta(at, "input_json_delta", "partial_json", input[(input.Length / 2)..]);
+                }
+            }
+            Event("content_block_stop", json => json.WriteNumber("index", at));
+            ++index;
+        }
+        Event("message_delta", json =>
+        {
+            json.WriteStartObject("delta");
+            foreach (string name in (string[])["stop_reason", "stop_sequence", "stop_details"])
+            {
+                if (root.TryGetProperty(name, out JsonElement value))
+                {
+                    json.WritePropertyName(name);
+                    value.WriteTo(json);
+                }
+            }
+            json.WriteEndObject();
+            json.WriteStartObject("usage");
+            json.WriteNumber("output_tokens", root.GetProperty("usage").GetProperty("output_tokens").GetInt64());
+            json.WriteEndObject();
+        });
+        Event("message_stop", _ => { });
+        byte[] bytes = Encoding.UTF8.GetBytes(sse.ToString());
+        half = cut < 0 ? bytes.Length : cut;
+        return bytes;
+    }
+
+    // A reply's bytes in two parts, the second only once `pause` is released (or never: `broken`).
+    private sealed class Parts(byte[] bytes, int half, Task? pause, bool broken, bool cut, CancellationToken stop) : Stream
+    {
+        private int _at;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancel = default)
+        {
+            if (_at == half && half < bytes.Length)
+            {
+                if (pause != null)
+                {
+                    using CancellationTokenSource either = CancellationTokenSource.CreateLinkedTokenSource(stop, cancel);
+                    await pause.WaitAsync(either.Token).ConfigureAwait(false);
+                }
+                if (broken)
+                {
+                    throw new IOException("the connection broke");
+                }
+                if (cut)
+                {
+                    return 0;
+                }
+            }
+            int end = _at < half ? half : bytes.Length;
+            int count = Math.Min(buffer.Length, end - _at);
+            bytes.AsMemory(_at, count).CopyTo(buffer);
+            _at += count;
+            return count;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancel) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancel).AsTask();
+        public override int Read(byte[] buffer, int offset, int count) => ReadAsync(buffer, offset, count, CancellationToken.None).GetAwaiter().GetResult();
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush()
+        {
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 
     public void Reply(string body, HttpStatusCode status = HttpStatusCode.OK)
     {
@@ -88,6 +297,19 @@ internal sealed class FakeService : HttpMessageHandler
         if (Hold is { } hold)
         {
             await hold.Task.WaitAsync(stop).ConfigureAwait(false);
+        }
+        if (reply.Status == HttpStatusCode.OK)
+        {
+            // (As the service answers a request that asks for a stream.)
+            byte[] bytes = Streamed(reply.Body, out int half);
+            if (Fail)
+            {
+                bytes = [.. bytes.AsSpan(0, half), .. "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"u8];
+                half = bytes.Length;
+            }
+            StreamContent content = new(new Parts(bytes, half, Pause?.Task, Break, Short, stop));
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("text/event-stream");
+            return new HttpResponseMessage(reply.Status) { Content = content };
         }
         return new HttpResponseMessage(reply.Status)
         {
@@ -180,6 +402,127 @@ internal static class Program
         return lines;
     }
 
+    // The words of the reply now arriving, as a reader of the conversation is given them.
+    private static string Writing(Conversation conversation)
+    {
+        using JsonDocument read = JsonDocument.Parse(conversation.Read(0, 0, true));
+        return read.RootElement.GetProperty("writing").GetString() ?? "";
+    }
+
+    private static void AReplyShowsWhileItComes()
+    {
+        (Conversation conversation, FakeService service) = Make();
+        service.Pause = new TaskCompletionSource();
+        service.Reply(Message("end_turn", Text("Hello there, friend")));
+        Check(Writing(conversation) == "", "nothing is being written before a message");
+        service.Hold = new TaskCompletionSource();
+        Check(conversation.Send("hi") == null && Until(() => service.Requests == 1), "sent");
+        int before = conversation.Stamp; // (the request is held: no word has come yet)
+        service.Hold.SetResult();
+        service.Hold = null;
+        Check(Until(() => Writing(conversation) == "Hello the"), "the first words show while the rest is on its way: " + Writing(conversation));
+        // A reader that holds the first words is given only what came since (here nothing yet), by the reply's name.
+        using (JsonDocument first = JsonDocument.Parse(conversation.Read(0, 0, true)))
+        {
+            long id = first.RootElement.GetProperty("writing_id").GetInt64();
+            Check(id > 0 && first.RootElement.GetProperty("writing_from").GetInt64() == 0 &&
+                  first.RootElement.GetProperty("writing_end").GetInt64() == 9, "the words are named and counted: " + first.RootElement.GetRawText());
+            using JsonDocument rest = JsonDocument.Parse(conversation.Read(0, 0, true, id, 6));
+            Check(rest.RootElement.GetProperty("writing").GetString() == "the" && rest.RootElement.GetProperty("writing_from").GetInt64() == 6,
+                  "a reader holding the first six characters is given the rest: " + rest.RootElement.GetRawText());
+            using JsonDocument other = JsonDocument.Parse(conversation.Read(0, 0, true, id + 1, 6));
+            using JsonDocument beyond = JsonDocument.Parse(conversation.Read(0, 0, true, id, 10));
+            Check(other.RootElement.GetProperty("writing").GetString() == "Hello the" && other.RootElement.GetProperty("writing_from").GetInt64() == 0 &&
+                  beyond.RootElement.GetProperty("writing").GetString() == "Hello the",
+                  "a reader holding another answer's words, or more than there are, is given all of it");
+        }
+        Check(conversation.Stamp != before, "the stamp moves with the words (the panel reads again)");
+        int resting = conversation.Stamp;
+        Thread.Sleep(50);
+        Check(conversation.Stamp == resting, "and rests while none come (nothing is read again)");
+        Check(conversation.Busy && Kinds(conversation) == "you", "they are no line yet: " + Kinds(conversation));
+        service.Pause.SetResult();
+        Check(Finish(conversation), "finished");
+        List<(string Kind, string Text, string? Tool, bool? Ok)> lines = Lines(conversation);
+        Check(Kinds(conversation) == "you claude" && lines[1].Text == "Hello there, friend", "the whole answer is one line: " + Kinds(conversation));
+        Check(Writing(conversation) == "", "and nothing is being written any more");
+
+        // A stopped answer: what showed stays to be read, and Claude is not sent it again.
+        service.Pause = new TaskCompletionSource();
+        service.Reply(Message("end_turn", Text("One two three four")));
+        service.Reply(Message("end_turn", Text("Yes")));
+        Check(conversation.Send("count") == null, "sent again");
+        Check(Until(() => Writing(conversation) == "One two t"), "the second answer's first words show");
+        Check(conversation.Stop(), "there was work to stop");
+        Check(Finish(conversation), "stopped");
+        lines = Lines(conversation);
+        Check(Kinds(conversation) == "you claude you claude note" && lines[3].Text == "One two t …" &&
+              lines[4].Text == "Stopped." + Conversation.Unfinished,
+              "what it had begun stays, marked, and the note says Claude will not remember it: " + Kinds(conversation) + " / " + lines[^1].Text);
+        Check(Writing(conversation) == "", "nothing is left being written after a stop");
+        service.Pause = null;
+        Check(conversation.Send("still there?") == null && Finish(conversation), "the next message is answered");
+        JsonElement messages = service.Request(service.Requests - 1).GetProperty("messages");
+        Check(messages.GetArrayLength() == 4 && messages[2].GetProperty("content").GetString() == "count" &&
+              messages[3].GetProperty("content").GetString() == "still there?",
+              "the answer that was stopped is no part of what Claude is sent: " + messages.GetRawText());
+        Check(service.Request(0).GetProperty("stream").GetBoolean(), "the reply is asked for as a stream");
+
+        // A connection that breaks half way.
+        service.Break = true;
+        service.Reply(Message("end_turn", Text("Left unsaid")));
+        Check(conversation.Send("and now?") == null && Finish(conversation), "the broken reply ends the work");
+        lines = Lines(conversation);
+        Check(lines[^2].Kind == "claude" && lines[^2].Text == "Left  …" && lines[^1].Kind == "error" &&
+              lines[^1].Text.EndsWith(Conversation.Unfinished, StringComparison.Ordinal),
+              "a reply that breaks off stays as far as it came, and is said to be unfinished: " + lines[^2].Text + " / " + lines[^1].Text);
+        service.Break = false;
+        // A reply that just ends, with no word of why: the same.
+        service.Short = true;
+        service.Reply(Message("end_turn", Text("Ended early")));
+        Check(conversation.Send("and this?") == null && Finish(conversation), "the cut reply ends the work");
+        lines = Lines(conversation);
+        Check(lines[^2].Kind == "claude" && lines[^2].Text == "Ended …" && lines[^1].Kind == "error" &&
+              lines[^1].Text.EndsWith(Conversation.Unfinished, StringComparison.Ordinal),
+              "a reply that ends before its end is not taken for a whole one: " + lines[^2].Kind + " " + lines[^2].Text + " / " + lines[^1].Text);
+        service.Short = false;
+        // The service saying half way that it cannot go on: the same, in its own words.
+        service.Fail = true;
+        service.Reply(Message("end_turn", Text("Too busy now")));
+        Check(conversation.Send("and that?") == null && Finish(conversation), "the failed reply ends the work");
+        lines = Lines(conversation);
+        Check(lines[^2].Kind == "claude" && lines[^2].Text == "Too bu …" && lines[^1].Kind == "error" &&
+              lines[^1].Text.Contains("Overloaded", StringComparison.Ordinal) && lines[^1].Text.EndsWith(Conversation.Unfinished, StringComparison.Ordinal),
+              "an error the service reports part way is said, and the answer is unfinished: " + lines[^2].Text + " / " + lines[^1].Text);
+        service.Fail = false;
+        service.Reply(Message("end_turn", Text("Here")));
+        Check(conversation.Send("are you there?") == null && Finish(conversation), "the conversation goes on after both");
+        messages = service.Request(service.Requests - 1).GetProperty("messages");
+        Check(!messages.GetRawText().Contains("Left", StringComparison.Ordinal) && !messages.GetRawText().Contains("Ended", StringComparison.Ordinal) &&
+              !messages.GetRawText().Contains("Too bu", StringComparison.Ordinal),
+              "and neither unfinished answer is sent to Claude again");
+
+        // A declined reply's words are withdrawn, and clearing withdraws them too.
+        service.Pause = new TaskCompletionSource();
+        service.Reply(Message("refusal", Text("I was about to say")).Replace("\"stop_sequence\":null",
+            "\"stop_sequence\":null,\"stop_details\":{\"type\":\"refusal\",\"category\":null,\"explanation\":\"It is not something I help with.\"}", StringComparison.Ordinal));
+        Check(conversation.Send("something declined") == null && Until(() => Writing(conversation).Length > 0), "a reply to be declined begins to show");
+        int linesBefore = Lines(conversation).Count;
+        service.Pause.SetResult();
+        Check(Finish(conversation), "declined");
+        lines = Lines(conversation);
+        Check(Writing(conversation) == "" && lines.Count == linesBefore + 1 && lines[^1].Kind == "error",
+              "what showed of a declined reply is gone, with no line of it: " + Kinds(conversation));
+        Check(lines[^1].Text.Contains("It is not something I help with.", StringComparison.Ordinal), "and why it was declined is said: " + lines[^1].Text);
+        service.Pause = new TaskCompletionSource();
+        service.Reply(Message("end_turn", Text("Never finished here")));
+        Check(conversation.Send("again") == null && Until(() => Writing(conversation).Length > 0), "another reply begins to show");
+        conversation.Clear();
+        Check(Writing(conversation) == "" && Kinds(conversation) == "note", "a cleared conversation shows none of it: " + Kinds(conversation));
+        Check(Until(() => !conversation.Working), "the cleared work ends");
+        Check(Writing(conversation) == "" && Kinds(conversation) == "note", "and its late words do not come back");
+    }
+
     private static string Kinds(Conversation conversation) => string.Join(" ", Lines(conversation).ConvertAll(l => l.Kind));
 
     private static void AnAnswerInWords()
@@ -210,7 +553,8 @@ internal static class Program
     {
         (Conversation c, FakeService service) = Make();
         service.Reply(Message("tool_use",
-            "{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"sig-1\"}",
+            "{\"type\":\"thinking\",\"thinking\":\"Which command plants?\",\"signature\":\"sig-1\"}",
+            "{\"type\":\"redacted_thinking\",\"data\":\"hidden-1\"}",
             Text("I will look."),
             Use("toolu_1", "find_commands", "{\"name\":\"tree\"}"),
             Use("toolu_2", "run_command", "{\"name\":\"bad\",\"args\":{\"x\":1}}")));
@@ -235,9 +579,14 @@ internal static class Program
         JsonElement messages = service.Request(1).GetProperty("messages");
         Check(messages.GetArrayLength() == 3, "the second carries the first's answer and the results");
         JsonElement said = messages[1].GetProperty("content");
-        Check(messages[1].GetProperty("role").GetString() == "assistant" && said.GetArrayLength() == 4, "Claude's whole reply is handed back");
-        Check(said[0].GetProperty("type").GetString() == "thinking" && said[0].GetProperty("signature").GetString() == "sig-1", "its thinking as it came");
-        Check(said[2].GetProperty("id").GetString() == "toolu_1" && said[3].GetProperty("input").GetProperty("args").GetProperty("x").GetInt32() == 1, "its tool calls as they came");
+        Check(messages[1].GetProperty("role").GetString() == "assistant" && said.GetArrayLength() == 5, "Claude's whole reply is handed back");
+        Check(said[0].GetProperty("type").GetString() == "thinking" && said[0].GetProperty("signature").GetString() == "sig-1" &&
+              said[0].GetProperty("thinking").GetString() == "Which command plants?", "its thinking as it came");
+        Check(said[1].GetProperty("type").GetString() == "redacted_thinking" && said[1].GetProperty("data").GetString() == "hidden-1", "what it thought out of sight too");
+        Check(said[3].GetProperty("id").GetString() == "toolu_1" && said[4].GetProperty("input").GetProperty("args").GetProperty("x").GetInt32() == 1, "its tool calls as they came");
+        using JsonDocument counts = JsonDocument.Parse(c.Read(0, 0, true));
+        Check(counts.RootElement.GetProperty("input_tokens").GetInt64() == 20 && counts.RootElement.GetProperty("output_tokens").GetInt64() == 10,
+              "the tokens of both replies are counted, what was read from the start of each and what was written from its end: " + counts.RootElement.GetRawText());
         JsonElement results = messages[2].GetProperty("content");
         Check(messages[2].GetProperty("role").GetString() == "user" && results.GetArrayLength() == 2, "both results in one message");
         Check(results[0].GetProperty("tool_use_id").GetString() == "toolu_1" && results[1].GetProperty("tool_use_id").GetString() == "toolu_2", "each for its call");
@@ -967,6 +1316,7 @@ internal static class Program
             ("an answer in words", AnAnswerInWords),
             ("tools run on the calling thread, results go back together", ToolsRunOnTheCallingThread),
             ("without a key nothing is sent", WithoutAKeyNothingIsSent),
+            ("a reply shows while it comes", AReplyShowsWhileItComes),
             ("one message at a time", OneMessageAtATime),
             ("a declined request is not kept", ADeclinedRequestIsNotKept),
             ("a cut off reply runs nothing", ACutOffReplyRunsNothing),

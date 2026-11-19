@@ -93,6 +93,7 @@ private:
     std::string m_chat_error;                 // why the last message could not be sent
     bool m_chat_details = false;              // show what each tool was given and gave back
     bool m_chat_to_end = true;                // scroll to the newest line at the next draw
+    bool m_chat_grew = false;                 // the conversation grew since it was last drawn (followed down from its end)
     bool m_chat_focus = false;                // put the keyboard back in the box at the next draw
 
     u32 m_edit_epoch = 1; // bumped whenever no widget is being edited

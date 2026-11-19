@@ -154,7 +154,7 @@ public:
             ++m_value;
         }
     }
-    // The C# side's own stamp this frame (the newest line and whether Claude works).
+    // The C# side's own stamp this frame (a count of its changes, and whether Claude works).
     void updated(int managed) {
         if (managed != m_managed) {
             m_managed = managed;
@@ -188,6 +188,8 @@ public:
     bool update(ai::CommandRegistry& commands, const EditorState& state);
 
     const std::vector<Line>& lines() const { return m_lines; }
+    // The words of the reply now arriving (get_chat's `writing`): no line yet.
+    const std::string& writing() const { return m_writing; }
     bool started() const { return m_started; }     // a message was ever sent (the chat's C# side runs)
     bool key_found() const { return m_key_found; } // (false until started)
     const std::string& model() const { return m_model; }
@@ -196,6 +198,9 @@ public:
 
 private:
     std::vector<Line> m_lines;
+    std::string m_writing;
+    u64 m_writing_id = 0;  // which answer it is of (get_chat's `writing_id`; 0: none)
+    u64 m_writing_end = 0; // how much of it is held, as get_chat counts (`writing_end`)
     u64 m_after = 0;
     u64 m_seen = ~u64{0}; // the stamp read at (none yet)
     bool m_started = false;

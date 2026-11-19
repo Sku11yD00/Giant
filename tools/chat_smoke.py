@@ -48,6 +48,33 @@ def use(call_id, name, tool_input):
     return {"type": "tool_use", "id": call_id, "name": name, "input": tool_input, "caller": {"type": "direct"}}
 
 
+def sse(reply) -> list:
+    """A whole message as the service streams it: its events in order."""
+    out = []
+
+    def event(kind, **fields):
+        out.append(f"event: {kind}\ndata: {json.dumps({'type': kind, **fields})}\n\n")
+
+    event("message_start", message={**reply, "content": [], "stop_reason": None})
+    for index, block in enumerate(reply["content"]):
+        if block["type"] == "text":
+            words = block["text"]
+            half = len(words) // 2
+            event("content_block_start", index=index, content_block={**block, "text": ""})
+            for part in (words[:half], words[half:]):
+                event("content_block_delta", index=index, delta={"type": "text_delta", "text": part})
+        elif block["type"] == "tool_use":
+            event("content_block_start", index=index, content_block={**block, "input": {}})
+            event("content_block_delta", index=index,
+                  delta={"type": "input_json_delta", "partial_json": json.dumps(block["input"])})
+        else:
+            event("content_block_start", index=index, content_block=block)
+        event("content_block_stop", index=index)
+    event("message_delta", delta={"stop_reason": reply["stop_reason"], "stop_sequence": None}, usage=reply["usage"])
+    event("message_stop")
+    return [e.encode() for e in out]
+
+
 class Service:
     """Answers each request with the next reply set up, and keeps what was asked."""
 
@@ -55,6 +82,7 @@ class Service:
         self.replies = []
         self.requests = []  # (path, headers, body)
         self.gate = None  # when set (a threading.Event), a request is answered only once it is
+        self.pause = None  # when set (a threading.Event), a reply stops after its first words until it is
         self.lock = threading.Lock()
         service = self
 
@@ -71,11 +99,22 @@ class Service:
                     status, out = 500, {"type": "error", "error": {"type": "api_error", "message": "no reply was set up"}}
                 else:
                     status, out = 200, reply
-                data = json.dumps(out).encode()
+                streamed = status == 200 and body.get("stream") is True
+                events = sse(out) if streamed else [json.dumps(out).encode()]
+                data = b"".join(events)
                 self.send_response(status)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", "text/event-stream" if streamed else "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
+                with service.lock:
+                    pause = service.pause
+                if pause is not None and streamed:
+                    # The first words, then the rest only once it is let go.
+                    first = next((i for i, e in enumerate(events) if b"text_delta" in e), len(events) - 1) + 1
+                    self.wfile.write(b"".join(events[:first]))
+                    self.wfile.flush()
+                    pause.wait(TIMEOUT)
+                    data = b"".join(events[first:])
                 self.wfile.write(data)
 
             def log_message(self, *_):
@@ -298,6 +337,23 @@ def everyday(tool, raw_tool, check, finish, service, settings):
     finish()
     plain = service.requests[-1][2]["messages"][-1]["content"]
     check(all(isinstance(r["content"], str) for r in plain) and len(plain) == 2, f"results without pictures are words: {str(plain)[:200]}")
+
+    # An answer shows while it is being written, and is a line once it is whole.
+    service.replies = [message("end_turn", text("Word by word it comes."))]
+    service.pause = threading.Event()
+    tool("chat_send", {"text": "Say something."})
+    until = time.monotonic() + 60
+    writing = ""
+    while not writing and time.monotonic() < until:
+        writing = tool("get_chat")["writing"]
+        time.sleep(0.05)
+    check(writing == "Word by wor", f"the first words show while the rest is on its way: {writing!r}")
+    service.pause.set()
+    service.pause = None
+    chat = finish()
+    check(chat["writing"] == "" and chat["entries"][-1]["text"] == "Word by word it comes.",
+          f"the whole answer is a line, and nothing is being written: {chat['entries'][-1]}")
+    check(service.requests[-1][2].get("stream") is True, "the reply is asked for as a stream")
 
     # A key corrected while the editor runs is the one used from then on.
     with open(os.path.join(settings, "Giant", "claude_key.txt"), "w", encoding="utf-8") as file:

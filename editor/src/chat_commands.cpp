@@ -380,7 +380,9 @@ bool ChatView::update(ai::CommandRegistry& commands, const EditorState& state) {
     bool changed = false;
     // (A few reads at most: the rest the next time it is drawn.)
     for (int read = 0; read < 8; ++read) {
-        const CommandResult reply = commands.execute("get_chat", {{"after", m_after}, {"limit", 256}});
+        // (Of the answer being written only the words not held yet: it is read with every few that come.)
+        const CommandResult reply = commands.execute(
+            "get_chat", {{"after", m_after}, {"limit", 256}, {"writing_id", m_writing_id}, {"writing_from", m_writing_end}});
         if (!reply.ok || !reply.value.is_object()) {
             if (read > 0) {
                 m_seen = ~u64{0}; // (part way through: the rest at the next draw)
@@ -393,6 +395,12 @@ bool ChatView::update(ai::CommandRegistry& commands, const EditorState& state) {
         m_model = text_of(v, "model");
         m_input_tokens = number_of(v, "input_tokens", 0);
         m_output_tokens = number_of(v, "output_tokens", 0);
+        if (number_of(v, "writing_from", 0) == 0 || number_of(v, "writing_id", 0) != m_writing_id) {
+            m_writing.clear(); // (another answer, or this one from its start)
+        }
+        m_writing += text_of(v, "writing");
+        m_writing_id = number_of(v, "writing_id", 0);
+        m_writing_end = number_of(v, "writing_end", 0);
         // Lines the conversation no longer keeps (it was cleared, or they are too old) go here too.
         const u64 oldest = number_of(v, "oldest", 0);
         const auto kept = std::find_if(m_lines.begin(), m_lines.end(), [oldest](const Line& l) { return l.serial >= oldest; });
@@ -458,7 +466,11 @@ void register_chat_commands(ai::CommandRegistry& registry, EditorState& state) {
          "Reads the chat with Claude: the lines after serial `after`, oldest first. A line's `kind` is \"you\" (the "
          "person), \"claude\" (its words), \"tool\" (a tool it called: `tool` names it, `text` is the arguments), "
          "\"result\" (what came back; `ok`), \"note\" or \"error\". Pass the reply's `after` as the next call's to "
-         "read on. Also: `busy` (Claude is working), `latest` and `oldest` (the newest line's serial and the oldest "
+         "read on. Also: `busy` (Claude is working), `writing` (the words of Claude's answer as far as they have come, "
+         "\"\" when none is on its way; they become a \"claude\" line once it is whole. To be given only the new words, "
+         "pass the last reply's `writing_id` and its `writing_end` as `writing_from`: `writing` then starts at "
+         "the reply's `writing_from`, which is 0 again when it is another answer), "
+         "`latest` and `oldest` (the newest line's serial and the oldest "
          "kept; 2,000 are), `started` (false until the first message is sent), and once started `key_found`, "
          "`model` and the tokens of the requests answered so far. `asking`: the command of Claude's the person is being "
          "asked about in the editor's window before it may run ({command, args: its arguments as text, args_hidden: bytes "
@@ -467,7 +479,11 @@ void register_chat_commands(ai::CommandRegistry& registry, EditorState& state) {
              "properties": {"after": {"type": "integer", "minimum": 0, "maximum": 9007199254740991,
                                       "description": "Read the lines after this serial (default 0: from the oldest kept)."},
                             "limit": {"type": "integer", "minimum": 1, "maximum": 256,
-                                      "description": "The most lines to return (default 64)."}}})"),
+                                      "description": "The most lines to return (default 64)."},
+                            "writing_id": {"type": "integer", "minimum": 0, "maximum": 9007199254740991,
+                                           "description": "The answer being written whose first words you hold (an earlier reply's `writing_id`)."},
+                            "writing_from": {"type": "integer", "minimum": 0, "maximum": 9007199254740991,
+                                             "description": "How much of it you hold (that reply's `writing_end`): `writing` is what came after."}}})"),
          true, [ask](const Json& args, CommandContext&) { return ask("read", args); }});
 
     add(registry,

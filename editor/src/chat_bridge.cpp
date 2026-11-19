@@ -165,7 +165,8 @@ ai::CommandResult ChatBridge::ask(std::string_view what, const ai::Json& args) {
     if (!m_started && what != "send") {
         if (what == "read") {
             return ai::CommandResult::success({{"entries", ai::Json::array()}, {"after", 0}, {"latest", 0}, {"oldest", 1},
-                                               {"busy", false},                {"started", false}, {"asking", nullptr}});
+                                               {"busy", false},                {"writing", ""},    {"writing_id", 0}, {"writing_from", 0}, {"writing_end", 0},
+                                               {"started", false},             {"asking", nullptr}});
         }
         return ai::CommandResult::success(what == "stop" ? ai::Json{{"stopped", false}} : ai::Json::object());
     }
