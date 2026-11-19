@@ -951,3 +951,49 @@ GIANT_TEST("people commands: a new person's id is never one of a mod's people's"
     GIANT_CHECK(!world::check_people(scene.places, scene.person_looks, scene.routines, scene.people, scene.next_person_id));
     GIANT_CHECK(!f.run("create_people", {{"people", one}}).ok && scene.people.size() == 3);
 }
+
+GIANT_TEST("people near the camera: a look's tints show on its entities, each in the one its seed gives; undone, its own colour") {
+    Fixture f;
+    PeopleState people;
+    f.state.people = &people;
+    world::Scene& scene = f.state.scene;
+    GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"entity", f.model}}).ok);
+    GIANT_CHECK(f.run("delete_entities", {{"ids", {f.model}}}).ok && scene.size() == 0);
+    Json batch = Json::array();
+    for (int i = 0; i < 10; ++i) batch.push_back({{"look", "villager"}, {"position", at(10.0 * i, 0, 0)}});
+    batch.push_back({{"look", "villager"}, {"position", at(5, 2, 5)}, {"name", "Ada"}, {"yaw", 90.0}});
+    GIANT_CHECK(f.run("create_people", {{"people", batch}}).ok);
+    GIANT_CHECK(f.run("set_people_settings", {{"embody_distance", 25.0}, {"release_distance", 35.0}}).ok);
+    const DVec3 camera{0.0, 0.0, 0.0};
+    for (int i = 0; i < 4; ++i) people.update(scene, camera, nullptr);
+    GIANT_CHECK(people.stats().embodied == 4);
+    // The look given tints: its entities are made again, each in the one its seed gives; another
+    // seed, another; undone, the look's own colour again. (`entity` leaves the tints be.)
+    {
+        const Vec3 own = scene.person_looks[0].material.base_color;
+        const Json tints = Json::array({Json::array({1.0, 0.0, 0.0}), Json::array({0.0, 1.0, 0.0}), Json::array({0.0, 0.0, 1.0})});
+        GIANT_CHECK(f.run("set_person", {{"id", 11}, {"seed", 4}}).ok);
+        GIANT_CHECK(f.run("set_person_look", {{"name", "villager"}, {"tints", tints}}).ok);
+        GIANT_CHECK(f.run("get_person_looks").value["person_looks"][0]["tints"] == tints);
+        for (int i = 0; i < 4; ++i) people.update(scene, camera, nullptr);
+        const world::Entity* tinted = scene.find(people.entity_of(scene, 11));
+        GIANT_CHECK(tinted != nullptr && tinted->material.base_color == Vec3(0.0f, 1.0f, 0.0f) && tinted->material.roughness == 0.8f);
+        GIANT_CHECK(f.run("set_person", {{"id", 11}, {"seed", 5}}).ok);
+        for (int i = 0; i < 4; ++i) people.update(scene, camera, nullptr);
+        tinted = scene.find(people.entity_of(scene, 11));
+        GIANT_CHECK(tinted != nullptr && tinted->material.base_color == Vec3(0.0f, 0.0f, 1.0f));
+        // Refused: more than a look has, a colour out of range.
+        Json many = Json::array();
+        for (usize i = 0; i <= world::k_max_look_tints; ++i) many.push_back(Json::array({0.5, 0.5, 0.5}));
+        GIANT_CHECK(!f.run("set_person_look", {{"name", "villager"}, {"tints", many}}).ok);
+        GIANT_CHECK(!f.run("set_person_look", {{"name", "villager"}, {"tints", Json::array({Json::array({1.0, 0.0, 2.0})})}}).ok);
+        GIANT_CHECK(scene.person_looks[0].tints.size() == 3);
+        GIANT_CHECK(f.run("undo").ok && f.run("undo").ok && scene.person_looks[0].tints.empty());
+        for (int i = 0; i < 4; ++i) people.update(scene, camera, nullptr);
+        tinted = scene.find(people.entity_of(scene, 11));
+        GIANT_CHECK(tinted != nullptr && tinted->material.base_color == own && people.stats().embodied == 4);
+        GIANT_CHECK(f.run("undo").ok); // (the seed)
+        for (int i = 0; i < 4; ++i) people.update(scene, camera, nullptr);
+        GIANT_CHECK(people.stats().embodied == 4 && world::save_scene(scene).find("tints") == std::string::npos);
+    }
+}

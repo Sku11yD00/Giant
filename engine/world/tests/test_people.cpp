@@ -35,6 +35,7 @@ PersonLook look(const char* name) {
     l.hair.on = true;
     l.matched = {"walk", "idle"};
     l.activities = {{"work", "hammer", 1.5f, true}, {"sleep", "lie down", 1.0f, false}};
+    l.tints = {{0.5f, 0.25f, 0.125f}, {0.0f, 1.0f, 0.75f}};
     return l;
 }
 
@@ -118,6 +119,23 @@ GIANT_TEST("people: a place, a look and a person are checked field by field") {
     GIANT_CHECK(!check_person_look(l));
     l.activities.resize(k_max_look_activities + 1, {"x", "y", 1.0f, true});
     GIANT_CHECK(check_person_look(l));
+    // The colours its people come in: a few, each a colour; a person has one by its seed, and is
+    // drawn in the look's material in that colour (the material's own with none).
+    l.activities.clear();
+    l.tints = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+    GIANT_CHECK(!check_person_look(l));
+    GIANT_CHECK(person_tint(l, 0) == 0 && person_tint(l, 4) == 1 && person_tint(l, 4294967295u) == 0);
+    l.material.roughness = 0.7f;
+    GIANT_CHECK(person_material(l, 1).base_color == Vec3(0.0f, 1.0f, 0.0f) && person_material(l, 1).roughness == 0.7f);
+    GIANT_CHECK(person_material(l, 3) == l.material);
+    l.tints[1].y = 1.5f;
+    GIANT_CHECK(check_person_look(l) && check_person_look(l)->find("tints") != std::string::npos);
+    l.tints[1].y = std::numeric_limits<float>::quiet_NaN();
+    GIANT_CHECK(check_person_look(l));
+    l.tints.assign(k_max_look_tints + 1, Vec3{0.5f, 0.5f, 0.5f});
+    GIANT_CHECK(check_person_look(l));
+    l.tints.clear();
+    GIANT_CHECK(!check_person_look(l) && person_tint(l, 7) == 0 && person_material(l, 0) == l.material);
 
     GIANT_CHECK(!check_person(person(1, "villager", "", 3)));
     GIANT_CHECK(check_person(person(0, "villager", "", 3)));
@@ -240,6 +258,11 @@ GIANT_TEST("people: a file with wrong people is refused, saying where") {
     GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","activities":{"eat":"a"}}])", "activities"));
     GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","activities":["eat"]}])", "activities[0]"));
     GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","activities":[{"activity":"eat","clip":"a","fade":1}]}])", "activities[0].fade"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","tints":[[1,0]]}])", "tints[0]"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","tints":[[1,0,0],[1,0,2]]}])", "tints[1]"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","tints":[[1e300,0,0]]}])", "tints[0]"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","tints":[[1,0,"1"]]}])", "tints[0]"));
+    GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","tints":"red"}])", "tints"));
     GIANT_CHECK(refused(R"("person_looks":[{"name":"v","mesh":"v.glb","parts":[{"name":"a"}]}])", "parts[0]"));
     GIANT_CHECK(refused(R"("places":[{"name":"inn"}])", "places[0].position"));
     GIANT_CHECK(refused(R"("places":[{"name":"inn","position":[0,0,0],"radius":0}])", "places[0].radius"));

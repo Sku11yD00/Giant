@@ -49,7 +49,7 @@ world::Entity PeopleState::entity_for(const world::Person& person, const world::
     e.transform.position = {at.position.x, ground, at.position.z};
     e.transform.rotation = quat_from_axis_angle({0.0f, 1.0f, 0.0f}, degrees_to_radians(at.yaw));
     e.transform.scale = {look.height, look.height, look.height};
-    e.material = look.material;
+    e.material = world::person_material(look, world::person_tint(look, person.seed));
     e.parts = look.parts;
     e.hair = look.hair;
     e.animation.matched = look.matched;
@@ -485,7 +485,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         const world::PersonLook& is = looks[m_look_cursor];
         world::PersonLook& was = m_looks[m_look_cursor];
         if (is.name == was.name && is.mesh == was.mesh && is.height == was.height && is.material == was.material &&
-            is.parts == was.parts && is.hair == was.hair && is.matched == was.matched) {
+            is.parts == was.parts && is.hair == was.hair && is.matched == was.matched && is.tints == was.tints) {
             // Only what its people show for their activities, if anything: the entities stay, and
             // those playing a clip of the old list are matched again (and begin the new one's).
             if (!(is.activities == was.activities)) {

@@ -36,6 +36,10 @@ std::optional<std::string> check_people(std::span<const Place> places, std::span
 
 const Place* find_place(std::span<const Place> places, std::string_view name);
 const PersonLook* find_person_look(std::span<const PersonLook> looks, std::string_view name);
+// Which of a look's tints a person of that seed has (0 with none), and the material it is drawn
+// with: the look's, in that base colour. The same wherever the person is drawn, near or far.
+u32 person_tint(const PersonLook& look, u32 seed);
+Material person_material(const PersonLook& look, u32 tint);
 // (People are kept in the order made, ids rising: found by halving.)
 const Person* find_person(std::span<const Person> people, PersonId id);
 const Routine* find_routine(std::span<const Routine> routines, std::string_view name);

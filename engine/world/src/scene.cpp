@@ -1048,6 +1048,11 @@ Json person_looks_json(std::span<const PersonLook> looks) {
             }
             look["activities"] = std::move(activities);
         }
+        if (!l.tints.empty()) {
+            Json tints = Json::array();
+            for (const Vec3& t : l.tints) tints.push_back(vec3_json(t));
+            look["tints"] = std::move(tints);
+        }
         out.push_back(std::move(look));
     }
     return out;
@@ -2156,6 +2161,27 @@ void read_people(Reader& root, std::vector<Place>& places, std::vector<PersonLoo
                     ar.finish();
                     if (!error.empty()) return;
                     l.activities.push_back(std::move(a));
+                }
+            }
+            if (const Json* tints = r.get("tints", false); tints != nullptr && r.ok()) {
+                if (!tints->is_array() || tints->size() > k_max_look_tints) {
+                    r.fail("tints", "must be an array of at most " + std::to_string(k_max_look_tints) + " colours");
+                    return;
+                }
+                for (usize k = 0; k < tints->size(); ++k) {
+                    const Json& t = (*tints)[k];
+                    double rgb[3] = {0.0, 0.0, 0.0};
+                    bool colour = t.is_array() && t.size() == 3;
+                    for (usize c = 0; c < 3 && colour; ++c) {
+                        colour = t[c].is_number();
+                        if (colour) rgb[c] = t[c].get<double>();
+                        colour = colour && rgb[c] >= 0.0 && rgb[c] <= 1.0; // (not so for what is not a number)
+                    }
+                    if (!colour) {
+                        r.fail("tints[" + std::to_string(k) + "]", "must be a colour, [r, g, b] each 0 to 1");
+                        return;
+                    }
+                    l.tints.push_back({static_cast<float>(rgb[0]), static_cast<float>(rgb[1]), static_cast<float>(rgb[2])});
                 }
             }
             r.finish();

@@ -241,6 +241,26 @@ PeopleFigures::Pick PeopleFigures::pick(const world::Scene& scene, const world::
     return out;
 }
 
+// A look's material in each of its tints, kept where figures' draws point (those past its tints: plain).
+void PeopleFigures::tint(u32 look) {
+    const world::PersonLook& l = m_looks[look];
+    for (u32 t = 0; t < world::k_max_look_tints; ++t) {
+        world::Material& m = m_tinted[usize{look} * world::k_max_look_tints + t];
+        if (t < l.tints.size()) {
+            m = world::person_material(l, t);
+        } else {
+            m = {};
+        }
+    }
+}
+
+// What a figure of that look and seed draws its first part with, when not the look's own (null).
+const world::Material* PeopleFigures::material(u32 look, u32 seed) const {
+    const world::PersonLook& l = m_looks[look];
+    if (l.tints.empty()) return nullptr;
+    return &m_tinted[usize{look} * world::k_max_look_tints + world::person_tint(l, seed)];
+}
+
 void PeopleFigures::put(const world::Scene& scene, u32 slot, const world::Person& person, u32 person_at, u32 look,
                         const Pick& pick) {
     FigureDraw now;
@@ -252,6 +272,7 @@ void PeopleFigures::put(const world::Scene& scene, u32 slot, const world::Person
     now.look = &m_looks[look];
     need(look, pick.kind);
     now.meshes = shown(look, pick.kind);
+    now.material = material(look, person.seed);
     Slot& info = m_info[slot];
     if (info.person != 0 && info.kind >= k_first_activity) --m_acting;
     if (pick.kind >= k_first_activity) ++m_acting;
@@ -260,8 +281,9 @@ void PeopleFigures::put(const world::Scene& scene, u32 slot, const world::Person
     info.at = pick.at;
     info.kind = pick.kind;
     info.person_at = person_at;
+    info.seed = person.seed;
     FigureDraw& drawn = m_slots[slot];
-    if (drawn.at == now.at && drawn.look == now.look && drawn.meshes == now.meshes) return; // (as it is drawn)
+    if (drawn == now) return; // (as it is drawn)
     drawn = now;
     touch(slot);
 }
@@ -333,6 +355,8 @@ void PeopleFigures::follow_looks(const world::Scene& scene) {
         clear();
         m_looks = looks;
         m_poses.assign(looks.size() * k_kinds, {});
+        m_tinted.assign(looks.size() * world::k_max_look_tints, {});
+        for (u32 i = 0; i < looks.size(); ++i) tint(i);
         m_round.assign(looks.size(), 0.0f);
         m_walked.assign(looks.size(), 0);
         forget_asking();
@@ -348,7 +372,7 @@ void PeopleFigures::follow_looks(const world::Scene& scene) {
     world::PersonLook& was = m_looks[i];
     const bool activities = !same_poses(is.activities, was.activities);
     if (is.name == was.name && is.mesh == was.mesh && is.height == was.height && is.material == was.material &&
-        is.parts == was.parts && !activities) {
+        is.parts == was.parts && is.tints == was.tints && !activities) {
         was.activities = is.activities; // (what else a look says shows on entities alone)
         return;
     }
@@ -370,6 +394,7 @@ void PeopleFigures::follow_looks(const world::Scene& scene) {
         }
     }
     was = is; // (where it is: the slots' pointers to it hold)
+    tint(i);
     for (u32 s = 0; s < m_info.size(); ++s) {
         Slot& info = m_info[s];
         if (info.person == 0 || info.look != i) continue;
@@ -379,6 +404,7 @@ void PeopleFigures::follow_looks(const world::Scene& scene) {
         }
         m_slots[s].at.scale = {is.height, is.height, is.height};
         m_slots[s].meshes = shown(i, info.kind);
+        m_slots[s].material = material(i, info.seed);
         touch(s);
     }
 }

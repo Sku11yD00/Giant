@@ -80,12 +80,15 @@ Json place_json(const Place& p) {
 Json look_json(const PersonLook& l, usize people) {
     Json parts = Json::array();
     for (const world::PartLook& p : l.parts) parts.push_back(p.name);
+    Json tints = Json::array();
+    for (const Vec3& t : l.tints) tints.push_back(Json::array({t.x, t.y, t.z}));
     Json activities = Json::array();
     for (const world::LookActivity& a : l.activities) {
         activities.push_back({{"activity", a.activity}, {"clip", a.clip}, {"speed", a.speed}, {"loop", a.loop}});
     }
     return {{"name", l.name},       {"mesh", l.mesh},        {"height", l.height}, {"parts", std::move(parts)},
-            {"hair", l.hair.on},    {"matched", l.matched},  {"activities", std::move(activities)}, {"people", people}};
+            {"hair", l.hair.on},    {"matched", l.matched},  {"activities", std::move(activities)}, {"tints", std::move(tints)},
+            {"people", people}};
 }
 
 Json routine_json(const Routine& r, usize people) {
@@ -587,6 +590,9 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "id) gives it that entity's look: its mesh file (it must draw one), material, parts' looks, hair "
          "and matched clips, and its scale as `height`; so dress a character with create_entity/set_entity, "
          "then keep it as a look (the entity is not needed after). `height` and `matched` set those alone. "
+         "`tints` (replaces the list; `entity` leaves it be): up to 16 base colours its people come in, each "
+         "person one of them by its `seed` (near as an entity and far as a figure alike) in place of the "
+         "material's (a file in parts: its first part, the others keep theirs); "
          "`activities` (replaces the list; `entity` leaves it be): what people of this look show while they "
          "do an activity of their routine where it has them be, each `{activity, clip, speed, loop}`: the "
          "file's `clip` plays (at `speed`, default 1; `loop` false: once, its last pose held) instead of "
@@ -609,7 +615,13 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                                                    {"clip", {{"type", "string"}, {"minLength", 1}, {"maxLength", world::k_max_name_bytes}}},
                                                    {"speed", {{"type", "number"}, {"minimum", 0.01}, {"maximum", 100}}},
                                                    {"loop", {{"type", "boolean"}}}})},
-                          {"description", "The clip shown for each activity of a routine (each activity once)."}}}}),
+                          {"description", "The clip shown for each activity of a routine (each activity once)."}}},
+                        {"tints",
+                         {{"type", "array"},
+                          {"maxItems", world::k_max_look_tints},
+                          {"items", {{"type", "array"}, {"minItems", 3}, {"maxItems", 3},
+                                     {"items", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}}}},
+                          {"description", "The base colours its people come in, each [r, g, b] (linear): each person one by its seed. []: all the material's."}}}}),
          false,
          [&state](const Json& args, CommandContext& context) {
              std::vector<PersonLook>& looks = state.scene.person_looks;
@@ -653,6 +665,10 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                      look.activities.push_back(std::move(activity));
                  }
              }
+             if (args.contains("tints")) {
+                 look.tints.clear();
+                 for (const Json& t : args["tints"]) look.tints.push_back({t[0].get<float>(), t[1].get<float>(), t[2].get<float>()});
+             }
              if (const auto bad = world::check_person_look(look)) return CommandResult::failure(*bad);
              PeopleChange change;
              change.look = {true, index, fresh ? std::nullopt : std::optional<PersonLook>(looks[index]), look};
@@ -685,7 +701,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
     add(registry,
         {"get_person_looks",
          "Lists the person looks: each one's mesh file, height, the parts it gives looks of their own, "
-         "whether it wears hair, its matched clips, its `activities` (the clip shown for each), and how many `people` have it.",
+         "whether it wears hair, its matched clips, its `activities` (the clip shown for each), its `tints` (the colours its people come in), and how many `people` have it.",
          object_schema(Json::array(), Json::object()),
          true,
          [&state](const Json&, CommandContext&) {

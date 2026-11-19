@@ -1023,6 +1023,7 @@ bool follow_figures(const FigureDraws* draws, const render::Renderer& renderer, 
     const usize chunks = std::min((d.slots.size() + k_figure_chunk - 1) / k_figure_chunk, d.versions.size());
     out.figure_rebuilt.clear();
     out.figure_looks.clear();
+    out.figure_tints.clear();
     out.figure_made.instances.clear();
     std::vector<u32>& before = out.scratch; // the materials that lost a user here
     before.clear();
@@ -1065,9 +1066,21 @@ bool follow_figures(const FigureDraws* draws, const render::Renderer& renderer, 
             emit(world::Shape::mesh, f.look->mesh, f.at, f.look->material, no_decal, renderer, meshes, out, out.figure_made,
                  f.meshes->front(), true, &out.figure_rest, &f.look->parts);
         }
-        const SceneFrame::FigureLook look{first, static_cast<u32>(out.figure_made.instances.size()) - first};
+        const SceneFrame::FigureLook look{first, static_cast<u32>(out.figure_made.instances.size()) - first,
+                                          fits && file->has_uvs};
         out.figure_looks.emplace(f.meshes, look);
         return look;
+    };
+    // The table's material for a tinted figure's first part (the look's own in its person's colour):
+    // looked up once a call for each, and counted like the looks' own instances (taken off below).
+    const auto tinted = [&](const FigureDraw& f, bool textured) {
+        const auto [it, added] = out.figure_tints.try_emplace(f.material, 0u);
+        if (added) {
+            render::Instance counted = k_hole;
+            counted.material = it->second = material_index(*f.material, out, textured);
+            out.figure_made.instances.push_back(counted);
+        }
+        return it->second;
     };
     for (usize c = 0; c < chunks; ++c) {
         if (out.figure_versions[c] == d.versions[c]) continue;
@@ -1098,6 +1111,7 @@ bool follow_figures(const FigureDraws* draws, const render::Renderer& renderer, 
             const SceneFrame::FigureLook look = made(f);
             for (u32 k = 0; k < look.count; ++k) {
                 render::Instance i = out.figure_made.instances[look.first + k];
+                if (k == 0 && f.material != nullptr) i.material = tinted(f, look.textured); // (its first part: the look's own material's)
                 i.position = f.at.position;
                 i.rotation = f.at.rotation;
                 i.scale = f.at.scale;

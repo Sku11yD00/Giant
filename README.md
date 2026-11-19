@@ -476,6 +476,9 @@ Open-world systems:
   entity is taken away is a figure from that same frame, where it
   stood, and one given an entity shows what it does (sitting, working)
   from its first frame.
+- Crowds part 5: variety. A look can come in up to 16 colours
+  (`set_person_look`'s `tints`); each person has one of them by its
+  seed, the same as a figure far off and as an entity near.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
