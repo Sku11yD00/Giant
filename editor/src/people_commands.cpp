@@ -1263,7 +1263,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "activity (set_person_look's `activities`: the clip's start, its end for one not looped), and "
          "is not drawn while the activity is `hidden`. One whose walk or activity pose is not there yet, "
          "or cannot be had, stands. `on` "
-         "(default false: until a figure and its entity change places unseen, one may be seen to); "
+         "(default false: until the crowd gate has measured what they cost); "
          "`distance` (metres from the camera a person is drawn out to, default 400, at most 4000) and "
          "`keep` (metres farther one drawn stays, default 40); `most` at once (default 4096, at most "
          "16384); `made_a_frame` (default 64) and `scanned_a_frame` (people looked at a frame, default "
@@ -1281,7 +1281,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "`waiting` (wanted but over `most`) and `hidden_now` (not drawn: at the `hidden` activity), both as of "
          "the last time through the list, `walking` (travelling), `moved` (of those, put on last frame), "
          "`acting` (at an activity their look names: held in its pose where the file has the clip), `poses` (asked of bake_pose for the looks: a standing "
-         "one, the walk's, one for each activity met), `made` and `removed` since the scene was taken up, and "
+         "one, the walk's, one for each activity met), `made`, `removed` and `taken_over` (of `made`: in the frame the person's entity was taken away, where it stood) since the scene was taken up, and "
          "`looks_ready`, `looks_baking` and `looks_without` (the scene's looks by their standing pose: baked, "
          "being baked, and none: nobody of the look has been within `distance`, or it is not to be had: "
          "the file not loaded or not skinned, the bake failed, or as many poses are kept as can be, "
@@ -1349,6 +1349,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                                             {"waiting", t.waiting},
                                             {"made", t.made},
                                             {"removed", t.removed},
+                                            {"taken_over", t.taken_over},
                                             {"looks_ready", t.looks_ready},
                                             {"looks_baking", t.looks_baking},
                                             {"looks_without", t.looks_without}};

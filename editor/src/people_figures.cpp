@@ -282,6 +282,19 @@ void PeopleFigures::set_moving(u32 slot, bool moving) {
     info.moving = ~0u;
 }
 
+// A person is made a figure in the lowest free slot. False: no slot is to be had (`most` are kept).
+bool PeopleFigures::make(const world::Scene& scene, const world::Person& person, u32 person_at, u32 look, const Pick& pick) {
+    if (m_free.empty() && !grow()) return false;
+    std::pop_heap(m_free.begin(), m_free.end(), std::greater<>());
+    const u32 slot = m_free.back();
+    m_free.pop_back();
+    put(scene, slot, person, person_at, look, pick);
+    m_of.emplace(person.id, slot);
+    set_moving(slot, pick.moving);
+    ++m_stats.made;
+    return true;
+}
+
 void PeopleFigures::remove(u32 slot) {
     set_moving(slot, false);
     if (m_info[slot].kind >= k_first_activity) --m_acting;
@@ -564,13 +577,32 @@ void PeopleFigures::update(const world::Scene& scene, const DVec3& camera) {
             if (it != m_of.end()) remove(it->second);
         }
     }
+    // Those whose entity was taken away this frame are figures from this frame on, where they are and
+    // as they are (walking, at what they do): nobody is missing between the two. (As many as were
+    // let go: at most those held.)
+    const u32 most = std::min(settings.most, k_max_figures);
+    const double made_within = std::clamp(static_cast<double>(settings.distance), 1.0, 4000.0);
+    const double kept_within = made_within + std::clamp(static_cast<double>(settings.keep), 0.0, 1000.0);
+    if (bodies != nullptr) {
+        for (const world::PersonId id : bodies->let_go()) {
+            if (m_of.size() >= most || m_of.contains(id) || bodies->holds(id)) continue;
+            const world::Person* person = world::find_person(scene.people, id);
+            const auto named = person != nullptr ? m_look_of.find(person->look) : m_look_of.end();
+            if (named == m_look_of.end()) continue;
+            const u32 look = named->second;
+            need(look, k_stand);
+            if (m_poses[usize{look} * k_kinds].meshes.empty()) continue; // (made when the list comes round, its pose there)
+            const Pick now = pick(scene, *person, look);
+            if (now.hidden || square_distance(now.at.position, camera) > kept_within * kept_within) continue;
+            if (make(scene, *person, static_cast<u32>(person - scene.people.data()), look, now)) ++m_stats.taken_over;
+        }
+    }
     // Those whose person is no longer in the scene (a stretch of the slots a frame).
     for (u32 k = 0; k < k_gone_looked_a_frame && k < m_info.size(); ++k) {
         const u32 s = static_cast<u32>(m_gone_cursor++ % m_info.size());
         if (m_info[s].person != 0 && world::find_person(scene.people, m_info[s].person) == nullptr) remove(s);
     }
     // More than may be (`most` lowered): any go.
-    const u32 most = std::min(settings.most, k_max_figures);
     while (m_of.size() > most) remove(m_of.begin()->second);
 
     move(scene);
@@ -585,8 +617,6 @@ void PeopleFigures::update(const world::Scene& scene, const DVec3& camera) {
         m_waiting_now = 0;
         m_hidden_now = 0;
     }
-    const double made_within = std::clamp(static_cast<double>(settings.distance), 1.0, 4000.0);
-    const double kept_within = made_within + std::clamp(static_cast<double>(settings.keep), 0.0, 1000.0);
     const usize end = std::min(people.size(), m_cursor + std::clamp<usize>(settings.scanned_a_frame, 1, 65536));
     const u32 a_frame = std::clamp<u32>(settings.made_a_frame, 1, 1024);
     u32 made = 0;
@@ -632,18 +662,11 @@ void PeopleFigures::update(const world::Scene& scene, const DVec3& camera) {
             continue;
         }
         if (made >= a_frame) break; // (this one first next frame)
-        if (m_free.empty() && !grow()) {
+        if (!make(scene, person, person_at, look, now)) {
             ++m_waiting_now;
             continue;
         }
-        std::pop_heap(m_free.begin(), m_free.end(), std::greater<>());
-        const u32 slot = m_free.back();
-        m_free.pop_back();
-        put(scene, slot, person, person_at, look, now);
-        m_of.emplace(person.id, slot);
-        set_moving(slot, now.moving);
         ++made;
-        ++m_stats.made;
     }
 
     m_draws.slots = m_slots;

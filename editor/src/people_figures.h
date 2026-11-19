@@ -53,9 +53,19 @@
 // walking look's round measured again that frame; poses asked for before a file
 // was imported with clips of another length stay there too, until
 // clear_baked_poses); a rig whose hips are not found by name stands as it
-// goes; and one whose entity was just
-// taken away is a figure again only when the list comes round (CR4: no
-// gap, nothing seen to change).
+// goes.
+//
+// A person in reach of both is a figure or has an entity, never both:
+// one given an entity stops being a figure in that frame, and one whose
+// entity was taken away (PeopleState::let_go) is made a figure in that
+// frame, where it is and as it is, before the list comes round to it.
+// Neither only as anyone may be: at the `hidden` activity, its look's
+// standing pose not there yet, or `most` figures kept. (Where a figure
+// and an entity change places is PeopleState's to say: out of view near
+// the camera, or far off.) Those are made beside `made_a_frame`: as many
+// as were let go that frame, a few as the camera moves, at most all the
+// entities there were (PeopleState::Settings::most: the people turned
+// off, `most` lowered), a person looked up, picked and put each.
 //
 // View state: not undone, not saved.
 #pragma once
@@ -96,8 +106,8 @@ public:
     static constexpr u32 k_no_kind = ~0u;
 
     struct Settings {
-        // Off until the plan's later parts (CR4) have a figure and its
-        // entity change places unseen: on, one may be seen to.
+        // Off until the crowd gate (CR6) has measured what they cost on
+        // the owner's machine: nothing is on by default unmeasured.
         bool on = false;
         float distance = 400.0f;    // metres from the camera a person is drawn out to (1 to 4000)
         float keep = 40.0f;         // metres farther one drawn stays so (0 to 1000)
@@ -134,6 +144,7 @@ public:
         u32 slots = 0;         // kept for them
         u64 made = 0;          // since the scene was taken up
         u64 removed = 0;
+        u64 taken_over = 0;    // of `made`: in the frame the person's entity was taken away, where it stood
         u32 waiting = 0;       // wanted last time through the list, not made: `most` reached
         u32 hidden = 0;        // not drawn last time through the list: at the `hidden` activity
         u32 walking = 0;       // of `figures`: travelling, put on along their way in turn
@@ -221,6 +232,7 @@ private:
     void follow_poses();
     void move(const world::Scene& scene);
     void put(const world::Scene& scene, u32 slot, const world::Person& person, u32 person_at, u32 look, const Pick& pick);
+    bool make(const world::Scene& scene, const world::Person& person, u32 person_at, u32 look, const Pick& pick);
     void set_moving(u32 slot, bool moving);
     void remove(u32 slot);
     void touch(u32 slot);

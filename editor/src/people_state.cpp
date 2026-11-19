@@ -82,6 +82,7 @@ void PeopleState::release(world::PersonId id) {
     if (travel != nullptr) travel->hold(id, false);
     if (walkers != nullptr) walkers->stop(world::person_entity_id(id)); // (else it would walk on as the next entity of that id)
     m_entities.push_back(world::person_entity_id(id));
+    m_let_go.push_back(id);
     ++m_stats.released;
 }
 
@@ -108,6 +109,7 @@ void PeopleState::release_all(world::Scene& scene) {
         m_stats.released += m_entities.size();
         flush(scene);
     }
+    for (const auto& [id, held] : m_held) m_let_go.push_back(id);
     if (travel != nullptr) {
         for (const auto& [id, held] : m_held) travel->hold(id, false);
     }
@@ -386,8 +388,8 @@ void PeopleState::act(const world::Scene& scene) {
             held.acting = 0;
         }
         if (wanted == 0 || wanted == held.act_failed || now < held.act_at || begun >= k_acts_begun_a_frame) continue;
-        // One not animated yet (its file cannot be matched, or its turn has not come) is made its copy
-        // of the character by the play: a few of those a frame, beside the animation's own.
+        // One not animated yet (just made, its file cannot be matched, or its turn has not come) is made
+        // its copy of the character by the play: a few of those a frame, beside the animation's own.
         const bool animated = animation->find(entity) != nullptr;
         if (!animated && made >= k_acts_made_a_frame) continue;
         const world::LookActivity& a = shown[wanted - 1];
@@ -415,6 +417,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     if (scene.identity() != m_scene) take_up(scene);
     strays(scene);
     m_entities.clear();
+    m_let_go.clear();
     if (!settings.on || hold) {
         if (!m_held.empty()) release_all(scene);
         m_stats.waiting = 0;
@@ -553,8 +556,6 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         again(id);
     }
     flush(scene);
-    walk(scene);
-    act(scene);
 
     // The next stretch of the list: those near enough are made, a few a frame.
     const std::vector<world::Person>& people = scene.people;
@@ -653,6 +654,9 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         if (in_plain_view(at.position)) ++m_stats.appeared_in_view;
     }
     flush(scene); // (those that gave theirs up)
+    // Those held walk their ways and show what they do: those made this frame too, from their first.
+    walk(scene);
+    act(scene);
     m_stats.embodied = static_cast<u32>(m_held.size());
 }
 
