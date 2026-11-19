@@ -4912,10 +4912,8 @@ did, not when one in it moved or changed pose. They are marked `render::Instance
 (out of the voxel world; drawn as meshes at every distance), and their
 materials are counted like any instance's.
 
-Off by default (`set_figure_settings`): a person whose entity was
-just taken away is a figure again only when the list comes round, while
-one given an entity loses its figure at once, so the change can be
-seen (CR4: unseen, with nothing in between). Other limits: changing
+Off by default (`set_figure_settings`) until the crowd gate (CR6) has
+measured what they cost on the owner's machine. Limits: changing
 `triangles` or a clip leaves the poses asked for before in `PoseBakes`
 (1,024 in all, `bake_pose`'s too) until `clear_baked_poses`; a pose
 that could not be had is asked for again only after a file is imported
@@ -4975,6 +4973,49 @@ people), jumping to where it is; with more travelling than
 `moved_a_frame` each moves every few frames; every frame with one
 moving gathers the frame's cells again and re-sends its chunks (what
 that costs with thousands is for CR6 to measure).
+
+### A figure and its entity change places (CR4)
+
+A person in reach of both is a figure or has an entity, never both.
+Main updates the entities first (`PeopleState`), then
+the figures, then draws: one given an entity stops being a figure in
+that frame, and one whose entity was taken away
+(`PeopleState::let_go`, the frame's) is made a figure in that frame,
+where it is and as it is (walking its trip from where its entity had
+walked to, or at what it does), not when the list comes round to it
+(`taken_over` counts them). Neither only as anyone may be: one at the
+`hidden` activity is not drawn, and one whose look has no standing
+pose yet, or with `most` figures kept, waits for the list as before.
+Those taken over are made beside `made_a_frame`: as many as were let
+go that frame, which is a few as the camera moves and at most every
+entity there was (`set_people_settings`'s `most`, 256, at most 1,024)
+when the people are turned off or `most` is lowered, each a person
+looked up, picked and put. An entity just made shows what its routine
+has it do from its first frame: the activity's clip is begun in the
+frame it is made (it stood so as a figure), where before it stood a
+frame first. Clips are begun a few a frame (eight, two of them on
+entities not animated yet, as new ones are), so with more entities
+made a frame than that (`made_a_frame` over 2) the rest stand until
+their turn, a frame or a few; one whose file is still being read, or
+with no room to animate one more, stands until it can.
+
+Where the two change places is `PeopleState`'s rule, unchanged (LW4):
+near the camera only while unseen, in view only farther off than
+`embody_distance` (60 m, out to `view_distance`, 200 m), given up past
+`release_distance` or the kept view. With figures on
+what that rule hides is smaller: a person waiting to be out of sight
+for its entity, or over `most` entities, is drawn as a figure
+meanwhile rather than not at all.
+
+Limits: the pose is not carried over. A walking figure's pose is by
+the distance gone and its entity's by the motion matching, so the step
+may differ at the change (in view only past 60 m); an entity on a trip
+is let go where it walked to, which may be a little to the side of its
+way, where its figure stands. The entities' count and distances are as
+they were: retuning them for the new tier waits for the crowd gate's
+numbers from the owner's PC (CR6), and so does turning figures on by
+default. `tools/living_gate.py` turns figures off all the same, to
+measure what it measured before whatever the default.
 
 ## Sound
 

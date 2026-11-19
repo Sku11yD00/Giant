@@ -94,6 +94,10 @@ public:
     // by main (and tests). With all three, one standing where its routine
     // has it plays the clip its look gives the activity (LookActivity), and
     // is motion matched again when it walks or the activity has no clip.
+    // One just given its entity is in that clip from its first frame (it
+    // stood so as a figure: people_figures.h; nothing fades from the rest
+    // pose or the matching into a clip); with more made a frame than clips
+    // are begun (below), the rest stand until their turn, a frame or a few.
     const PeopleRoutines* routines = nullptr;
     AnimationState* animation = nullptr;
     const MeshLibrary* meshes = nullptr;
@@ -147,6 +151,9 @@ public:
     void held(std::vector<world::PersonId>& out) const {
         for (const auto& [id, h] : m_held) out.push_back(id);
     }
+    // Those whose entity was taken away in the last update (people_figures.h draws them from that
+    // frame on: nobody is missing between the two).
+    const std::vector<world::PersonId>& let_go() const { return m_let_go; }
 
     // The entity made for `person` of `look`, standing at `at` (not added to a scene).
     static world::Entity entity_for(const world::Person& person, const world::PersonLook& look,
@@ -203,6 +210,7 @@ private:
     u64 m_resets_seen = 0;   // the travel's, last frame
     std::vector<world::PersonId> m_scratch;
     std::vector<world::EntityId> m_entities; // scratch: entities to take from the scene
+    std::vector<world::PersonId> m_let_go;   // those released in the last update
     std::vector<DVec3> m_path;               // scratch: a walker's path
     Stats m_stats;
 };

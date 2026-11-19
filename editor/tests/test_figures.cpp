@@ -708,3 +708,119 @@ GIANT_TEST("figures: with the poses nearly all taken, a standing pose is had bef
     f.draw();
     GIANT_CHECK(f.drawn() == 2 && f.baked(f.walker, "walk", 0.0f, true) != render::k_no_mesh);
 }
+
+GIANT_TEST("figures: one whose entity is taken away is a figure in that frame, where it stands, before the list comes round") {
+    Fixture f;
+    if (f.renderer == nullptr) return;
+    GIANT_CHECK(!PeopleFigures::Settings{}.on); // (off until the crowd gate has measured them: the fixture turns them on)
+    f.row(40); // x = 10 to 88
+    f.frames(4);
+    GIANT_CHECK(f.figures.stats().figures == 40);
+    // Five are given entities: they are figures no longer.
+    f.figures.bodies = &f.bodies;
+    f.bodies.settings.most = 5;
+    for (int i = 0; i < 6; ++i) {
+        f.bodies.update(f.state.scene, f.camera, nullptr);
+        f.frames(1);
+    }
+    std::vector<world::PersonId> held;
+    f.bodies.held(held);
+    GIANT_CHECK(held.size() == 5 && f.figures.stats().figures == 35 && f.figures.stats().taken_over == 0);
+    for (const world::PersonId id : held) GIANT_CHECK(f.figures.figure_of(id) == nullptr);
+    // Their entities taken away (no more may be held): each is a figure again in that same frame,
+    // though the list would come round to one person of it a frame.
+    f.figures.settings.scanned_a_frame = 1;
+    f.bodies.settings.most = 0;
+    f.bodies.update(f.state.scene, f.camera, nullptr);
+    GIANT_CHECK(f.bodies.let_go().size() == 5 && f.bodies.stats().embodied == 0);
+    f.frames(1);
+    GIANT_CHECK(f.figures.stats().figures == 40 && f.figures.stats().taken_over == 5);
+    for (const world::PersonId id : held) {
+        const world::Transform* figure = f.figures.figure_of(id);
+        const world::Person* person = world::find_person(f.state.scene.people, id);
+        GIANT_CHECK(figure != nullptr && figure->position.x == person->position.x);
+    }
+    f.draw();
+    GIANT_CHECK(f.drawn() == 40);
+    // The next frame nobody was let go: nothing more is taken over.
+    f.bodies.update(f.state.scene, f.camera, nullptr);
+    f.frames(1);
+    GIANT_CHECK(f.bodies.let_go().empty() && f.figures.stats().taken_over == 5 && f.figures.stats().figures == 40);
+    // With as many figures as may be kept, one let go waits like anyone.
+    f.bodies.settings.most = 5;
+    for (int i = 0; i < 6; ++i) {
+        f.bodies.update(f.state.scene, f.camera, nullptr);
+        f.frames(1);
+    }
+    GIANT_CHECK(f.figures.stats().figures == 35);
+    f.figures.settings.most = 35;
+    f.bodies.settings.most = 0;
+    f.bodies.update(f.state.scene, f.camera, nullptr);
+    f.frames(1);
+    GIANT_CHECK(f.figures.stats().figures == 35 && f.figures.stats().taken_over == 5);
+}
+
+GIANT_TEST("figures: one let go on its way walks on as a figure from where its entity was; one asleep is taken over by nobody") {
+    Fixture f;
+    if (f.renderer == nullptr) return;
+    f.town();
+    f.bodies.travel = &f.travel;
+    f.figures.bodies = &f.bodies;
+    f.bodies.settings.most = 0;
+    f.camera = {0.0, 0.0, 50.0};
+    // As main has them: where the people are, their entities, then the figures.
+    const auto live = [&f](double more, int count, double hours) {
+        for (int i = 0; i < count; ++i) {
+            f.seconds += more / count;
+            f.travel.update(f.state.scene, 1, f.seconds);
+            f.routines.update(f.state.scene, f.travel, hours);
+            f.bodies.update(f.state.scene, f.camera, nullptr);
+            f.poses->finish();
+            f.figures.update(f.state.scene, f.camera);
+        }
+    };
+    const world::PersonId id = f.one("walker", 0.0);
+    live(0.0, 4, 3.0);
+    GIANT_CHECK(f.run("send_person", {{"id", id}, {"to", at(200, 0, 50)}, {"speed", 1.4}}).ok);
+    live(5.0, 10, 3.0);
+    const world::Transform* figure = f.figures.figure_of(id);
+    GIANT_CHECK(figure != nullptr && figure->position.x > 6.0 && figure->position.x < 7.5 && f.figures.stats().walking == 1);
+    // Given an entity (nothing walks it here: it stands where it was made, its trip held there).
+    f.bodies.settings.most = 1;
+    live(2.0, 4, 3.0);
+    const world::Entity* entity = f.state.scene.find(world::person_entity_id(id));
+    GIANT_CHECK(entity != nullptr && f.figures.figure_of(id) == nullptr && f.figures.stats().figures == 0);
+    if (entity == nullptr) return;
+    const double stood = entity->transform.position.x;
+    GIANT_CHECK(stood > 6.0 && stood < 10.0);
+    // Its entity taken away: that frame it is a figure there, walking, and goes on from there.
+    f.figures.settings.scanned_a_frame = 1;
+    f.bodies.settings.most = 0;
+    live(0.0, 1, 3.0);
+    figure = f.figures.figure_of(id);
+    GIANT_CHECK(f.bodies.let_go().size() == 1 && f.figures.stats().taken_over == 1 && f.figures.stats().walking == 1);
+    GIANT_CHECK(figure != nullptr && std::fabs(figure->position.x - stood) < 1e-6 && figure->position.z == 50.0);
+    GIANT_CHECK(f.figures.kind_of(id) >= PeopleFigures::k_first_walk && f.figures.kind_of(id) < PeopleFigures::k_first_activity);
+    live(1.0, 2, 3.0);
+    figure = f.figures.figure_of(id);
+    GIANT_CHECK(figure != nullptr && std::fabs(figure->position.x - (stood + 1.4)) < 1e-6);
+
+    // One asleep by the mill has no figure; its entity taken away, it still has none (it is not
+    // drawn at that), until nothing is hidden and the list comes round.
+    GIANT_CHECK(f.run("set_routine", {{"name", "night"}, {"entries", {{{"from", 0}, {"activity", "sleep"}}}}}).ok);
+    const world::PersonId sleeper = f.one("walker", 180.0, "night");
+    f.figures.settings.scanned_a_frame = 1024;
+    f.camera = {180.0, 0.0, 50.0};
+    live(0.0, 6, 3.0);
+    GIANT_CHECK(f.figures.figure_of(sleeper) == nullptr && f.figures.stats().hidden == 1);
+    f.bodies.settings.most = 1;
+    live(0.0, 6, 3.0);
+    GIANT_CHECK(f.bodies.holds(sleeper));
+    f.bodies.settings.most = 0;
+    live(0.0, 1, 3.0);
+    GIANT_CHECK(f.bodies.let_go().size() == 1 && f.bodies.let_go()[0] == sleeper);
+    GIANT_CHECK(f.figures.figure_of(sleeper) == nullptr && f.figures.stats().taken_over == 1);
+    f.figures.settings.hidden = "";
+    live(0.0, 4, 3.0);
+    GIANT_CHECK(f.figures.figure_of(sleeper) != nullptr && f.figures.stats().taken_over == 1);
+}

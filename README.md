@@ -466,12 +466,16 @@ Open-world systems:
 - Crowds part 2: figures. People with no entity (those farther off than
   the ones near the camera) are drawn as instances of their look's baked
   pose, out to 400 m, with no skeleton (`set_figure_settings`; off by
-  default until they change places with their entities unseen).
+  default until the crowd gate has measured what they cost).
 - Crowds part 3: figures walk. One travelling is put along its way
   every frame, facing along it, stepping through eight poses of its
   look's walk baked in place (which one by how far it has gone, so its
   feet keep to the ground at any speed); one at what its routine has it
   do is held in its look's pose for that, and one asleep is not drawn.
+- Crowds part 4: nobody is missing between far and near. A person whose
+  entity is taken away is a figure from that same frame, where it
+  stood, and one given an entity shows what it does (sitting, working)
+  from its first frame.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

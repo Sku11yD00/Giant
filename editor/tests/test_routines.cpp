@@ -640,10 +640,9 @@ GIANT_TEST("routines: what one does is what it last acted on; clips are begun a 
     GIANT_CHECK(f.travel.stats().trips == 0);
     f.camera = {50.0, 0.0, 3.0};
     f.frames(12.2, 0.0, 1);
-    GIANT_CHECK(f.people.stats().embodied == 12 && f.people.stats().acting == 0); // (made this frame: they act from the next)
+    GIANT_CHECK(f.people.stats().embodied == 12); // (made this frame: they act from their first)
     // (At most eight begin a frame, and of those not animated yet, each making its copy, two: this
     // file cannot be matched, so only the few the animation took up meanwhile are.)
-    f.frames(12.2, 0.0, 1);
     const u32 first = f.people.stats().acting;
     GIANT_CHECK(first >= 2 && first <= 8);
     f.frames(12.2, 0.0, 1);

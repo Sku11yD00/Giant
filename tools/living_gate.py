@@ -428,6 +428,9 @@ def main() -> int:
             failures.append(f"opened, the world has {tool('get_people', {'limit': 0})['total']} people, not {len(ids)}")
         tool("set_render_settings", {"voxel_ms_per_frame": 1.0})
         tool("set_people_settings", {"most": MOST_EMBODIED, "made_a_frame": 4})
+        # (This gate measures the living world as it was measured before distant people were drawn:
+        # what figures cost is the crowd gate's to measure.)
+        tool("set_figure_settings", {"on": False})
         tool("set_sense_settings", {"calm_seconds": CALM_SECONDS})
         # The day begins: simulating, the clock running.
         started = tool("simulate", {"on": True, "clock": True})
