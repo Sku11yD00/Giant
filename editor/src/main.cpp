@@ -496,6 +496,7 @@ int run(const Options& options) {
     state.people = &people;
     editor::PeopleFigures figures; // those farther off, drawn as baked poses
     figures.travel = &travel;
+    figures.routines = &routines;
     figures.bodies = &people;
     figures.poses = &pose_bakes;
     figures.meshes = &meshes;

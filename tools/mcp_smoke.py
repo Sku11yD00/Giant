@@ -1056,6 +1056,33 @@ def crowd_gate(tool, call, check):
         check(gone["on"] is False and tool("set_figure_settings")["figures"] == 0
               and tool("get_engine_info")["last_frame"]["scene_instances"] == before, "off, nobody is drawn so")
         tool("clear_baked_poses")
+
+        # Crowds part 3: one travelling is put along its way, in the poses of its look's walk baked in place.
+        tool("create_route", {"points": [[300, 0, -20], [300, 0, -120]], "kind": "road"})
+        tool("simulate", {"on": True})
+        tool("set_figure_settings", {"on": True})
+        tool("send_person", {"id": 1, "to": [300, 0, -120], "speed": 1.4})
+        figure, state = None, None
+        seen = set()
+        until = time.monotonic() + 60  # (by the clock: the simulation's time is the frames')
+        while time.monotonic() < until:
+            state = tool("set_figure_settings", {"id": 1})
+            figure = state["figure"]
+            if figure and figure["pose"] == "walk":
+                seen.add(figure["walk_pose"])
+            if len(seen) >= 3 and state["poses"] >= 9 and figure and figure["at"][2] < -1:
+                break
+        check(figure is not None and figure["pose"] == "walk" and len(seen) >= 3 and state["walking"] == 1,
+              f"one sent along the road walks as a figure, stepping through the walk's poses: {sorted(seen)}, {state}")
+        check(figure["at"][2] < -1 and abs(figure["at"][0] - 300) < 0.01 and abs(abs(figure["yaw"]) - 180) < 1,
+              f"put along its way, facing along it, got {figure}")
+        walks = [p for p in tool("get_baked_poses", {"wait": True})["poses"] if p["clip"] == "walk"]
+        check(len(walks) == 8 and all(p["in_place"] and p["state"] == "ready" for p in walks),
+              f"the walk's poses are baked in place, got {walks}")
+        check(all(abs(p["center"][2]) < 0.35 for p in walks), f"each over the spot it stands on, got {walks}")
+        tool("simulate", {"on": False})
+        tool("set_figure_settings", {"on": False})
+        tool("clear_baked_poses")
         tool("set_render_settings", {"gpu_culling": culling})
 
 

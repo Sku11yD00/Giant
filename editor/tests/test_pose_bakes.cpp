@@ -137,7 +137,8 @@ GIANT_TEST("pose bakes: a pose is baked on a worker, the same one asked for agai
 
     // As many as are kept, and no more; cleared, indices begin again.
     for (usize i = f.poses->poses().size(); i < PoseBakes::k_max_poses; ++i) {
-        GIANT_CHECK(f.poses->want(arm, "bend", 0.001f * static_cast<float>(i + 1), 3000, error) == i);
+        // (390 times in the clip none above is at, then the same in another size.)
+        GIANT_CHECK(f.poses->want(arm, "bend", 0.501f + 0.001f * static_cast<float>(i % 390), 3000 + static_cast<u32>(i / 390), error) == i);
     }
     GIANT_CHECK(f.poses->want(arm, "bend", 0.9f, 3000, error) == PoseBakes::k_no_pose && error.find("clear_baked_poses") != std::string::npos);
     const auto cleared = f.run("clear_baked_poses");
@@ -253,4 +254,34 @@ GIANT_TEST("pose bakes: the meshes go to the renderer a few a frame, part by par
     f.poses->clear();
     for (const render::MeshId id : second) GIANT_CHECK(f.renderer->mesh(id) == nullptr);
     GIANT_CHECK(f.poses->poses().empty() && f.poses->baking() == 0);
+}
+
+GIANT_TEST("pose bakes: a walk's pose baked in place has the clip's travel so far taken out; the travel of a clip is its hips'") {
+    Fixture f;
+    const std::string walker = write("walker.glb", geometry::testing::skinned_walker());
+    GIANT_CHECK(f.meshes->load(walker).mesh != nullptr);
+    const MeshLibrary::Skinned& skinned = *f.meshes->find(walker)->skinned;
+    // The walk goes 1.4 m along +z in its second; idle goes nowhere; no clip, none.
+    const Vec3 walk = PoseBakes::travel(skinned, skinned.find_clip("walk"));
+    GIANT_CHECK(std::fabs(walk.z - 1.4f) < 1e-5f && walk.x == 0.0f && walk.y == 0.0f);
+    GIANT_CHECK(length(PoseBakes::travel(skinned, skinned.find_clip("idle"))) == 0.0f);
+    GIANT_CHECK(length(PoseBakes::travel(skinned, anim::k_no_clip)) == 0.0f);
+
+    const auto carried = f.run("bake_pose", {{"mesh", walker}, {"clip", "walk"}, {"time", 0.5}});
+    const auto stays = f.run("bake_pose", {{"mesh", walker}, {"clip", "walk"}, {"time", 0.5}, {"in_place", true}});
+    const auto quarter = f.run("bake_pose", {{"mesh", walker}, {"clip", "walk"}, {"time", 0.25}, {"in_place", true}});
+    GIANT_CHECK(carried.ok && stays.ok && quarter.ok);
+    // Another pose than the one carried along, the same one when asked for again.
+    GIANT_CHECK(carried.value["pose"] == 0 && stays.value["pose"] == 1 && stays.value["in_place"] == true && carried.value["in_place"] == false);
+    GIANT_CHECK(f.run("bake_pose", {{"mesh", walker}, {"clip", "walk"}, {"time", 0.5}, {"in_place", true}}).value["pose"] == 1);
+    f.poses->finish();
+    const PoseBakes::Pose a = f.poses->poses()[0], b = f.poses->poses()[1], c = f.poses->poses()[2];
+    GIANT_CHECK(a.state == PoseBakes::State::ready && b.state == PoseBakes::State::ready && c.state == PoseBakes::State::ready);
+    // Half way through the hips have gone 0.7 m: in place they are over where they began, as high.
+    GIANT_CHECK(std::fabs(a.center.z - 0.7f) < 1e-4f && std::fabs(b.center.z) < 1e-4f && std::fabs(a.center.y - b.center.y) < 1e-6f);
+    // A quarter through, the feet are at their farthest (0.3 m each way about the hips): the step stays.
+    GIANT_CHECK(std::fabs(c.center.z) < 1e-4f && c.radius > b.radius + 0.05f);
+    // The rest pose has gone nowhere: in place or not, one pose.
+    const auto rest = f.run("bake_pose", {{"mesh", walker}, {"in_place", true}});
+    GIANT_CHECK(rest.ok && rest.value["in_place"] == false && f.run("bake_pose", {{"mesh", walker}}).value["pose"] == rest.value["pose"]);
 }

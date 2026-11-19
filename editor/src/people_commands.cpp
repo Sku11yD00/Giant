@@ -202,6 +202,24 @@ Json person_json(const Person& p, const PeopleState* people = nullptr, const wor
     return j;
 }
 
+// A person's figure (set_figure_settings): null with none.
+Json figure_json(const EditorState& state, world::PersonId id) {
+    const world::Transform* at = state.figures->figure_of(id);
+    if (at == nullptr) return nullptr;
+    const u32 kind = state.figures->kind_of(id);
+    Json j = {{"at", point_json(at->position)}, {"yaw", state.figures->yaw_of(id)}};
+    if (kind == PeopleFigures::k_stand) {
+        j["pose"] = "stand";
+    } else if (kind < PeopleFigures::k_first_activity) { // (a walk's)
+        j["pose"] = "walk";
+        j["walk_pose"] = kind - PeopleFigures::k_first_walk;
+    } else {
+        j["pose"] = "activity";
+        j["activity"] = std::string(state.figures->activity_of(id));
+    }
+    return j;
+}
+
 Json people_state_json(const PeopleState& people) {
     const PeopleState::Settings& s = people.settings;
     const PeopleState::Stats& t = people.stats();
@@ -1237,25 +1255,43 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "How the people farther from the camera than those with entities are drawn (crowds): as figures, "
          "each the instances of one baked pose of its look's character (bake_pose) put where the person "
          "is, with no entity, skeleton or physics, so a town seen from afar shows its people. A look's "
-         "pose is asked for when someone of it is first within `distance`. `on` "
+         "standing pose is asked for when someone of it is first within `distance`. One travelling "
+         "(send_person, a routine) is put along its way every frame, facing along it, stepping through "
+         "`walk_poses` poses of `walk_clip` baked in place: which by how far it has gone, a round of them "
+         "to the ground the clip covers in one (so its feet keep to the ground at any speed). One at "
+         "what its routine has it do, where that has it be, is held in the pose its look gives the "
+         "activity (set_person_look's `activities`: the clip's start, its end for one not looped), and "
+         "is not drawn while the activity is `hidden`. One whose walk or activity pose is not there yet, "
+         "or cannot be had, stands. `on` "
          "(default false: until a figure and its entity change places unseen, one may be seen to); "
          "`distance` (metres from the camera a person is drawn out to, default 400, at most 4000) and "
          "`keep` (metres farther one drawn stays, default 40); `most` at once (default 4096, at most "
          "16384); `made_a_frame` (default 64) and `scanned_a_frame` (people looked at a frame, default "
-         "1024); `triangles` each look's pose is cut to (default 1500) and `clip`, the clip of the look's "
-         "file whose start its people stand in (default \"idle\"; a file without it: its rest pose). "
-         "Changing either of the last two has every look's pose asked for again, one a frame (one "
+         "1024); `moved_a_frame` (of those travelling, put on along their way a frame, in turn: default "
+         "2048); `triangles` each pose is cut to (default 1500); `clip`, the clip of the look's "
+         "file whose start its people stand in (default \"idle\"; a file without it: its rest pose); "
+         "`walk_clip` (default \"walk\"; \"\" or a file without it: one travelling stands as it goes), "
+         "`walk_poses` (2 to 16, default 8) and `stride` (metres a round of the walk covers for a look of "
+         "height 1 where the clip itself goes nowhere, default 1.4); `hidden` (an activity, default "
+         "\"sleep\"; \"\": none). "
+         "Changing `triangles`, `clip`, `walk_clip` or `walk_poses` has every pose asked for again, 4 a frame (one "
          "kept from before is taken, the rest are baked; nobody is a figure until its look's is there; "
          "the old ones stay until clear_baked_poses). Fields left out stay; with none it only reports. Returns the settings with "
          "`figures` (kept now: each drawn while its look's pose is there) and `slots` (kept for them), "
-         "`waiting` (wanted but over `most`), `made` and `removed` since the scene was taken up, and "
-         "`looks_ready`, `looks_baking` and `looks_without` (the scene's looks by their pose: baked, "
+         "`waiting` (wanted but over `most`) and `hidden_now` (not drawn: at the `hidden` activity), both as of "
+         "the last time through the list, `walking` (travelling), `moved` (of those, put on last frame), "
+         "`acting` (at an activity their look names: held in its pose where the file has the clip), `poses` (asked of bake_pose for the looks: a standing "
+         "one, the walk's, one for each activity met), `made` and `removed` since the scene was taken up, and "
+         "`looks_ready`, `looks_baking` and `looks_without` (the scene's looks by their standing pose: baked, "
          "being baked, and none: nobody of the look has been within `distance`, or it is not to be had: "
          "the file not loaded or not skinned, the bake failed, or as many poses are kept as can be, "
-         "256 with bake_pose's). The counts are the last frame's. A person given an entity is a figure "
+         "1024 with bake_pose's). The counts are the last frame's. With `id` (a person) also `figure`: "
+         "null, or `at` [x, y, z] where its figure stands, `yaw` (degrees) and `pose` (\"stand\", "
+         "\"walk\" with `walk_pose`, its place in the round, or \"activity\" with `activity`, its name). "
+         "A person given an entity is a figure "
          "no longer; one near with no entity (over set_people_settings' `most`, or waiting to be out of "
-         "sight) is a figure too; figures stand on the ground (one travelling is put on along its way "
-         "every so often). View state: not saved, not undone.",
+         "sight) is a figure too; figures stand on the ground. One setting off, arriving or beginning "
+         "an activity shows it when the list comes round to it. View state: not saved, not undone.",
          object_schema(Json::array(),
                        {{"on", {{"type", "boolean"}}},
                         {"distance", {{"type", "number"}, {"minimum", 1}, {"maximum", 4000}}},
@@ -1263,6 +1299,12 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                         {"most", {{"type", "integer"}, {"minimum", 0}, {"maximum", PeopleFigures::k_max_figures}}},
                         {"made_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1024}}},
                         {"scanned_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65536}}},
+                        {"moved_a_frame", {{"type", "integer"}, {"minimum", 1}, {"maximum", PeopleFigures::k_max_figures}}},
+                        {"walk_clip", {{"type", "string"}, {"maxLength", world::k_max_name_bytes}}},
+                        {"walk_poses", {{"type", "integer"}, {"minimum", 2}, {"maximum", PeopleFigures::k_max_walk_poses}}},
+                        {"stride", {{"type", "number"}, {"minimum", 0.1}, {"maximum", 10}}},
+                        {"hidden", {{"type", "string"}, {"maxLength", world::k_max_tag_bytes}}},
+                        {"id", {{"type", "integer"}, {"minimum", 1}}},
                         {"triangles",
                          {{"type", "integer"}, {"minimum", PoseBakes::k_min_triangles}, {"maximum", PoseBakes::k_max_triangles}}},
                         {"clip", {{"type", "string"}, {"maxLength", world::k_max_name_bytes}}}}),
@@ -1278,8 +1320,13 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
              s.scanned_a_frame = args.value("scanned_a_frame", s.scanned_a_frame);
              s.triangles = args.value("triangles", s.triangles);
              s.clip = args.value("clip", s.clip);
+             s.moved_a_frame = args.value("moved_a_frame", s.moved_a_frame);
+             s.walk_clip = args.value("walk_clip", s.walk_clip);
+             s.walk_poses = args.value("walk_poses", s.walk_poses);
+             s.stride = args.value("stride", s.stride);
+             s.hidden = args.value("hidden", s.hidden);
              const PeopleFigures::Stats& t = state.figures->stats();
-             return CommandResult::success({{"on", s.on},
+             Json out = Json{{"on", s.on},
                                             {"distance", s.distance},
                                             {"keep", s.keep},
                                             {"most", s.most},
@@ -1287,6 +1334,16 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                                             {"scanned_a_frame", s.scanned_a_frame},
                                             {"triangles", s.triangles},
                                             {"clip", s.clip},
+                                            {"moved_a_frame", s.moved_a_frame},
+                                            {"walk_clip", s.walk_clip},
+                                            {"walk_poses", s.walk_poses},
+                                            {"stride", s.stride},
+                                            {"hidden", s.hidden},
+                                            {"hidden_now", t.hidden},
+                                            {"walking", t.walking},
+                                            {"moved", t.moved},
+                                            {"acting", t.acting},
+                                            {"poses", t.poses},
                                             {"figures", t.figures},
                                             {"slots", t.slots},
                                             {"waiting", t.waiting},
@@ -1294,7 +1351,9 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
                                             {"removed", t.removed},
                                             {"looks_ready", t.looks_ready},
                                             {"looks_baking", t.looks_baking},
-                                            {"looks_without", t.looks_without}});
+                                            {"looks_without", t.looks_without}};
+             if (args.contains("id")) out["figure"] = figure_json(state, args["id"].get<world::PersonId>());
+             return CommandResult::success(std::move(out));
          }});
     add(registry,
         {"make_noise",

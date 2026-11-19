@@ -33,7 +33,9 @@ inline constexpr u32 k_figure_chunk = 64;
 struct FigureDraw {
     world::Transform at;
     const world::PersonLook* look = nullptr;             // null: an empty slot, nothing drawn
-    const std::vector<render::MeshId>* meshes = nullptr; // its pose's, a part each (PoseBakes::Pose::meshes)
+    // Its pose's, a part each (PoseBakes::Pose::meshes). One list is one look's: figures of a look in
+    // different poses (standing, the poses of a walk) point at different lists.
+    const std::vector<render::MeshId>* meshes = nullptr;
 };
 struct FigureDraws {
     // (Every slot's pointers good for the call: a chunk is read whole when any of it changed.)
@@ -213,15 +215,17 @@ struct SceneFrame {
     std::vector<Cell> figure_cells;
     std::vector<u64> figure_versions; // each chunk's, as last built
     std::vector<u32> figure_rebuilt;  // scratch: the chunks built this call
-    // Scratch: what a look's figure draws (its instances as emit makes
-    // them, in figure_made), made once a call for each look met.
+    // Scratch: what a look's figure draws in a pose (its instances as emit
+    // makes them, in figure_made), made once a call for each pose met (by
+    // its list of meshes: FigureDraw::meshes).
     struct FigureLook {
         u32 first = 0;
         u32 count = 0;
     };
-    std::unordered_map<const world::PersonLook*, FigureLook> figure_looks;
+    std::unordered_map<const std::vector<render::MeshId>*, FigureLook> figure_looks;
     Cell figure_made;
     std::vector<render::MeshId> figure_rest; // scratch: a figure's meshes after its first
+    std::vector<u32> figure_materials_before, figure_materials; // scratch: the materials a chunk drew with, and draws with
     std::unordered_map<world::EntityId, world::CellCoord> where; // entity -> its cell
     std::vector<world::CellCoord> order;                          // cells by z, then x (decals go so)
     // Holes in `instances` no cell has (first -> size), joined, to find

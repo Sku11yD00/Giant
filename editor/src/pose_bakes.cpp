@@ -1,5 +1,6 @@
 #include "pose_bakes.h"
 
+#include "giant/anim/motion.h"
 #include "giant/anim/player.h"
 #include "giant/anim/skeleton.h"
 #include "giant/geometry/mesh.h"
@@ -117,6 +118,31 @@ void PoseBakes::make(Figure& figure) {
     figure.made = true;
 }
 
+namespace {
+
+// Where the hips are over the ground at `time` of a clip, in the file's space.
+Vec3 hips_at(const MeshLibrary::Skinned& skinned, const anim::Clip& clip, u32 hips, float time,
+             std::vector<anim::JointTransform>& local, std::vector<Mat4>& model) {
+    local = skinned.skeleton.rest;
+    local.resize(skinned.skeleton.size());
+    model.resize(skinned.skeleton.size());
+    anim::sample(skinned.skeleton, clip, time, local);
+    anim::model_matrices(skinned.skeleton, local, model);
+    return {model[hips].at(0, 3), 0.0f, model[hips].at(2, 3)};
+}
+
+} // namespace
+
+Vec3 PoseBakes::travel(const MeshLibrary::Skinned& skinned, u32 clip) {
+    const u32 hips = anim::find_motion_joints(skinned.skeleton).hips;
+    if (clip >= skinned.clips.size() || hips >= skinned.skeleton.size()) return {};
+    std::vector<anim::JointTransform> local;
+    std::vector<Mat4> model;
+    const Vec3 from = hips_at(skinned, skinned.clips[clip], hips, 0.0f, local, model);
+    const Vec3 to = hips_at(skinned, skinned.clips[clip], hips, skinned.clips[clip].duration, local, model);
+    return to - from;
+}
+
 void PoseBakes::run(Bake& bake) {
     const auto start = std::chrono::steady_clock::now();
     Figure& figure = *bake.figure;
@@ -131,6 +157,15 @@ void PoseBakes::run(Bake& bake) {
     if (bake.clip < skinned.clips.size()) anim::sample(skinned.skeleton, skinned.clips[bake.clip], bake.time, local);
     std::vector<Mat4> model(joints), skin(joints);
     anim::model_matrices(skinned.skeleton, local, model);
+    if (bake.in_place && bake.clip < skinned.clips.size() && skinned.clips[bake.clip].duration > 0.0f) {
+        // What the clip has carried it by now is taken out: the share of its whole travel the time is of
+        // its length (a walk goes on steadily: its sway about that stays).
+        const Vec3 back = travel(skinned, bake.clip) * (-bake.time / skinned.clips[bake.clip].duration);
+        for (Mat4& m : model) {
+            m.at(0, 3) += back.x;
+            m.at(2, 3) += back.z;
+        }
+    }
     anim::skin_matrices(skinned.skeleton, model, skin);
     Vec3 lo{}, hi{};
     bool any = false;
@@ -191,6 +226,7 @@ bool PoseBakes::begin(usize index, std::string& error) {
     slot.bake->figure = std::move(figure);
     slot.bake->clip = clip;
     slot.bake->time = pose.time;
+    slot.bake->in_place = pose.in_place;
     pose.state = State::baking;
     pose.problem.clear();
     pose.source_triangles = mesh->triangles;
@@ -198,7 +234,8 @@ bool PoseBakes::begin(usize index, std::string& error) {
     return true;
 }
 
-u32 PoseBakes::want(std::string_view mesh, std::string_view clip, float time, u32 triangles, std::string& error) {
+u32 PoseBakes::want(std::string_view mesh, std::string_view clip, float time, u32 triangles, std::string& error,
+                    bool in_place) {
     if (triangles < k_min_triangles || triangles > k_max_triangles) {
         error = "triangles must be " + std::to_string(k_min_triangles) + " to " + std::to_string(k_max_triangles);
         return k_no_pose;
@@ -215,10 +252,14 @@ u32 PoseBakes::want(std::string_view mesh, std::string_view clip, float time, u3
         const u32 index = loaded->skinned->find_clip(clip);
         if (index != anim::k_no_clip) time = std::min(time, loaded->skinned->clips[index].duration);
     }
-    if (clip.empty()) time = 0.0f;
+    if (clip.empty()) {
+        time = 0.0f;
+        in_place = false; // (the rest pose has gone nowhere)
+    }
     for (usize i = 0; i < m_poses.size(); ++i) {
         const Pose& p = m_poses[i];
-        if (p.mesh != path || p.clip != clip || milliseconds(p.time) != milliseconds(time) || p.triangles != triangles) {
+        if (p.mesh != path || p.clip != clip || milliseconds(p.time) != milliseconds(time) || p.triangles != triangles ||
+            p.in_place != in_place) {
             continue;
         }
         if (p.state == State::failed) {
@@ -240,6 +281,7 @@ u32 PoseBakes::want(std::string_view mesh, std::string_view clip, float time, u3
     pose.clip = std::string(clip);
     pose.time = time;
     pose.triangles = triangles;
+    pose.in_place = in_place;
     m_poses.push_back(std::move(pose));
     m_slots.emplace_back();
     if (!begin(m_poses.size() - 1, error)) {

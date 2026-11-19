@@ -3,7 +3,9 @@
 #include "../src/editor_commands.h"
 #include "../src/mesh_library.h"
 #include "../src/people_figures.h"
+#include "../src/people_routines.h"
 #include "../src/people_state.h"
+#include "../src/people_travel.h"
 #include "../src/pose_bakes.h"
 #include "../src/scene_render.h"
 
@@ -11,8 +13,10 @@
 #include "gltf_test_files.h"
 
 #include "giant/rhi/rhi.h"
+#include "giant/world/people.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -35,6 +39,8 @@ std::string write(const char* name, const std::vector<u8>& bytes) {
     return path.generic_string();
 }
 
+Json at(double x, double y, double z) { return Json::array({x, y, z}); }
+
 struct Fixture {
     std::unique_ptr<rhi::Device> device;
     std::unique_ptr<render::Renderer> renderer;
@@ -42,6 +48,10 @@ struct Fixture {
     std::unique_ptr<PoseBakes> poses;
     PeopleState bodies;
     PeopleFigures figures;
+    PeopleTravel travel;     // (the figures know of these two once `town` is built)
+    PeopleRoutines routines;
+    double seconds = 0.0;    // simulated, of run 1
+    std::string walker;      // three joints, a triangle each: clips "idle", "walk" (1.4 m along +z in 1 s), "run", "wave"
     ai::CommandRegistry commands;
     EditorState state;
     SceneFrame frame;
@@ -88,6 +98,65 @@ struct Fixture {
             p.yaw = 90.0f;
             state.scene.people.push_back(p);
         }
+    }
+    // A road east from (0, 0, 50) to a mill 200 m along it, and a look "walker" of the walker's file
+    // that waves at work (once: held at its end) and idles at rest; people travel and keep routines.
+    void town() {
+        state.travel = &travel;
+        state.routines = &routines;
+        register_scene_commands(commands, state);
+        register_route_commands(commands, state);
+        figures.travel = &travel;
+        figures.routines = &routines;
+        routines.settings.spread_minutes = 0.0f;
+        walker = write("walker.glb", geometry::testing::skinned_walker());
+        GIANT_CHECK(meshes->load(walker).mesh != nullptr);
+        world::PersonLook look;
+        look.name = "walker";
+        look.mesh = walker;
+        look.activities.push_back({"work", "wave", 1.0f, false});
+        look.activities.push_back({"rest", "idle", 1.0f, true});
+        state.scene.person_looks.push_back(look);
+        GIANT_CHECK(run("create_route", {{"points", {at(0, 0, 50), at(200, 0, 50)}}, {"kind", "road"}}).ok);
+        GIANT_CHECK(run("create_place", {{"name", "mill"}, {"position", at(200, 0, 50)}, {"radius", 4.0}, {"tags", {"work"}}}).ok);
+    }
+    world::PersonId one(const char* look, double x, const char* routine = "") {
+        const ai::CommandResult r =
+            run("create_people", {{"people", {{{"look", look}, {"position", at(x, 0, 50)}, {"routine", routine}}}}});
+        GIANT_CHECK(r.ok);
+        return r.ok ? r.value["ids"][0].get<world::PersonId>() : 0;
+    }
+    // Frames of the town simulating: `more` seconds over them, at the hour; the figures after the people, as main has them.
+    void live(double more = 0.0, int count = 4, double hours = 3.0) {
+        for (int i = 0; i < count; ++i) {
+            seconds += more / count;
+            travel.update(state.scene, 1, seconds);
+            routines.update(state.scene, travel, hours);
+            poses->finish();
+            figures.update(state.scene, camera);
+        }
+    }
+    // The mesh of a pose baked (its first part's): k_no_mesh when there is none such.
+    render::MeshId baked(const std::string& file, const char* clip, float time, bool in_place) const {
+        for (const PoseBakes::Pose& p : poses->poses()) {
+            if (p.mesh == file && p.clip == clip && std::fabs(p.time - time) < 1e-4f && p.in_place == in_place &&
+                p.state == PoseBakes::State::ready) {
+                return p.meshes.front();
+            }
+        }
+        return render::k_no_mesh;
+    }
+    // The mesh the one figure there is is drawn with (k_no_mesh: none is, or more than one).
+    render::MeshId drawn_as() {
+        draw();
+        render::MeshId mesh = render::k_no_mesh;
+        u32 count = 0;
+        for (const render::Instance& i : frame.instances) {
+            if (i.mesh == render::k_no_mesh || !i.moves) continue;
+            mesh = i.mesh;
+            ++count;
+        }
+        return count == 1 ? mesh : render::k_no_mesh;
     }
     // Frames: the poses handed over, then the figures (as main has them); every bake waited for.
     void frames(int count) {
@@ -415,4 +484,227 @@ GIANT_TEST("figures: settings by command; another pose, or the poses forgotten, 
     f.state.scene = world::Scene{};
     f.frames(2);
     GIANT_CHECK(f.figures.stats().figures == 0 && f.figures.stats().made == 0 && f.figures.draws().slots.empty());
+}
+
+GIANT_TEST("figures: one travelling is put along its way each frame, facing along it, in the pose of the walk it has come to") {
+    Fixture f;
+    if (f.renderer == nullptr) return;
+    f.town();
+    const world::PersonId id = f.one("walker", 0.0);
+    f.live();
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_stand && f.figures.stats().walking == 0 && f.figures.stats().poses == 1);
+    GIANT_CHECK(f.drawn_as() != render::k_no_mesh && f.drawn_as() == f.baked(f.walker, "idle", 0.0f, false));
+    GIANT_CHECK(f.figures.kind_of(99) == PeopleFigures::k_no_kind && f.figures.yaw_of(99) == 0.0f);
+
+    // Sent along the road at 1.4 m/s: the walk covers 1.4 m a round, so a round a second, eight poses to it.
+    GIANT_CHECK(f.run("send_person", {{"id", id}, {"to", at(200, 0, 50)}, {"speed", 1.4}}).ok);
+    f.live();
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_first_walk && f.figures.stats().walking == 1 && f.figures.stats().moved == 1);
+    GIANT_CHECK(std::fabs(f.figures.yaw_of(id) - 90.0f) < 1e-3f); // facing east, along its way
+    f.live(0.3);
+    const world::Transform* figure = f.figures.figure_of(id);
+    GIANT_CHECK(figure != nullptr && std::fabs(figure->position.x - 0.42) < 1e-9 && figure->position.z == 50.0);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_first_walk + 2);
+    f.live();
+    GIANT_CHECK(f.drawn_as() != render::k_no_mesh && f.drawn_as() == f.baked(f.walker, "walk", 0.25f, true));
+    // Its poses: standing and the walk's eight, asked for together when it set off, each in place.
+    // Where nothing moves, nothing is sent again.
+    GIANT_CHECK(f.figures.stats().poses == 9 && f.baked(f.walker, "walk", 0.875f, true) != render::k_no_mesh);
+    const u64 still_at = f.figures.draws().versions[0];
+    f.live();
+    GIANT_CHECK(f.figures.draws().versions[0] == still_at && f.figures.stats().moved == 1);
+    f.live(0.01, 1);
+    GIANT_CHECK(f.figures.draws().versions[0] != still_at);
+    // Half a round on: the pose half a round on; a whole round more, the same again.
+    f.live(0.5 - 0.01, 1);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_first_walk + 6);
+    f.live(1.0, 8);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_first_walk + 6 && f.figures.stats().poses == 9);
+    GIANT_CHECK(f.drawn_as() == f.baked(f.walker, "walk", 0.75f, true));
+    // The command tells of it.
+    ai::CommandResult r = f.run("set_figure_settings", {{"id", id}});
+    GIANT_CHECK(r.ok && r.value["figure"]["pose"] == "walk" && r.value["figure"]["walk_pose"] == 6 && r.value["walking"] == 1);
+    GIANT_CHECK(std::fabs(r.value["figure"]["at"][0].get<double>() - 1.4 * 1.8) < 1e-9 && std::fabs(r.value["figure"]["yaw"].get<double>() - 90.0) < 1e-3);
+    GIANT_CHECK(f.run("set_figure_settings", {{"id", 99}}).value["figure"].is_null());
+    // Only so many are put on a frame, in turn.
+    const world::PersonId second = f.one("walker", 0.0), third = f.one("walker", 0.0);
+    GIANT_CHECK(f.run("send_person", {{"id", second}, {"to", at(200, 0, 50)}}).ok && f.run("send_person", {{"id", third}, {"to", at(200, 0, 50)}}).ok);
+    f.live();
+    GIANT_CHECK(f.figures.stats().walking == 3 && f.figures.stats().moved == 3);
+    f.figures.settings.moved_a_frame = 2;
+    f.figures.settings.scanned_a_frame = 1; // (the list would put them on too as it comes round)
+    const auto behind = [&] {
+        u32 count = 0;
+        for (const world::PersonId one : {id, second, third}) {
+            count += f.figures.figure_of(one)->position.x != f.travel.where(*world::find_person(f.state.scene.people, one)).position.x ? 1u : 0u;
+        }
+        return count;
+    };
+    f.live(0.1, 1);
+    GIANT_CHECK(f.figures.stats().moved == 2 && behind() == 1); // (the third waits its turn)
+    // The turn goes round: over three frames each is put on twice, the last two of them where they are now.
+    const double were[3] = {f.figures.figure_of(id)->position.x, f.figures.figure_of(second)->position.x,
+                            f.figures.figure_of(third)->position.x};
+    f.live(0.1, 1);
+    GIANT_CHECK(f.figures.stats().moved == 2 && behind() == 1);
+    f.live(0.1, 1);
+    GIANT_CHECK(behind() == 1 && f.figures.figure_of(id)->position.x != were[0] &&
+                f.figures.figure_of(second)->position.x != were[1] && f.figures.figure_of(third)->position.x != were[2]);
+    // The poses forgotten as they walk: they stand where they are, never drawn as nothing but for
+    // the frames their look has no pose at all, then step again.
+    f.figures.settings.moved_a_frame = 2048;
+    f.poses->clear();
+    f.live(0.0, 1);
+    f.draw();
+    GIANT_CHECK(f.figures.stats().poses == 0 && f.figures.stats().figures == 3 && f.drawn() == 0);
+    f.live(0.0, 8);
+    f.draw();
+    GIANT_CHECK(f.figures.stats().poses == 9 && f.figures.stats().walking == 3 && f.drawn() == 3);
+    // Its file imported again: its poses are baked again, and they walk on.
+    GIANT_CHECK(f.meshes->load(f.walker).mesh != nullptr);
+    f.live(0.5, 8);
+    f.draw();
+    GIANT_CHECK(f.figures.stats().walking == 3 && f.drawn() == 3 && f.figures.stats().poses == 9);
+    GIANT_CHECK(f.figures.kind_of(id) >= PeopleFigures::k_first_walk && f.figures.kind_of(id) < PeopleFigures::k_first_activity);
+    f.figures.settings.scanned_a_frame = 1024;
+    // Arrived: it stands where it was sent, and is not put on any more.
+    f.live(200.0);
+    figure = f.figures.figure_of(id);
+    GIANT_CHECK(figure != nullptr && figure->position.x == 200.0 && f.figures.kind_of(id) == PeopleFigures::k_stand);
+    GIANT_CHECK(f.figures.stats().walking == 0 && f.figures.stats().moved == 0);
+
+    // No clip to walk in: one travelling stands as it goes.
+    r = f.run("set_figure_settings", {{"walk_clip", ""}});
+    GIANT_CHECK(r.ok && r.value["walk_clip"] == "");
+    GIANT_CHECK(f.run("send_person", {{"id", id}, {"to", at(0, 0, 50)}, {"speed", 1.4}}).ok);
+    f.live(0.0, 6);
+    f.live(1.0);
+    figure = f.figures.figure_of(id);
+    GIANT_CHECK(figure != nullptr && std::fabs(figure->position.x - 198.6) < 1e-9 && f.figures.kind_of(id) == PeopleFigures::k_stand);
+    GIANT_CHECK(f.figures.stats().walking == 1 && std::fabs(f.figures.yaw_of(id) + 90.0f) < 1e-3f);
+    // A look whose file has no such clip: its people stand as they go too, by the stride set (a round
+    // 1.4 m at height 1: the villager is 1.1 tall).
+    GIANT_CHECK(f.run("set_figure_settings", {{"walk_clip", "walk"}, {"walk_poses", 4}, {"stride", 2.0}}).ok);
+    std::erase_if(f.state.scene.people, [](const world::Person&) { return true; });
+    f.live();
+    const world::PersonId villager = f.one("villager", 0.0);
+    f.live();
+    GIANT_CHECK(f.run("send_person", {{"id", villager}, {"to", at(200, 0, 50)}, {"speed", 1.2}}).ok);
+    f.live(0.0, 6);
+    f.live(1.0); // 1.2 m gone of a round of 2.2: past half way, the third pose of four
+    GIANT_CHECK(f.figures.kind_of(villager) == PeopleFigures::k_first_walk + 2 && f.figures.stats().figures == 1);
+    f.live(0.0, 6);
+    GIANT_CHECK(f.drawn_as() != render::k_no_mesh && f.drawn_as() == f.baked(f.person, "idle", 0.0f, false));
+    // A rig whose hips are not found by name cannot be held in place: none of its walk is baked, it stands as it goes.
+    world::PersonLook armed;
+    armed.name = "armed";
+    armed.mesh = f.arm;
+    f.state.scene.person_looks.push_back(armed);
+    GIANT_CHECK(f.run("set_figure_settings", {{"walk_clip", "bend"}}).ok);
+    const world::PersonId arm = f.one("armed", 0.0);
+    f.live(0.0, 6);
+    GIANT_CHECK(f.run("send_person", {{"id", arm}, {"to", at(200, 0, 50)}}).ok);
+    f.live(1.0, 8);
+    GIANT_CHECK(f.figures.kind_of(arm) >= PeopleFigures::k_first_walk && f.figures.figure_of(arm)->position.x > 1.0);
+    for (const PoseBakes::Pose& p : f.poses->poses()) GIANT_CHECK(p.mesh != f.arm || !p.in_place);
+    // Settings out of range are refused.
+    GIANT_CHECK(!f.run("set_figure_settings", {{"walk_poses", 1}}).ok && !f.run("set_figure_settings", {{"walk_poses", 17}}).ok);
+    GIANT_CHECK(!f.run("set_figure_settings", {{"stride", 0.0}}).ok && !f.run("set_figure_settings", {{"moved_a_frame", 0}}).ok);
+}
+
+GIANT_TEST("figures: one at what its routine has it do is held in its look's pose for it; at the hidden activity it is not drawn") {
+    Fixture f;
+    if (f.renderer == nullptr) return;
+    f.town();
+    GIANT_CHECK(f.run("set_routine", {{"name", "day"}, {"entries", {{{"from", 6}, {"activity", "work"}, {"at", "place"}, {"name", "mill"}, {"speed", 2.0}},
+                                                                    {{"from", 12}, {"activity", "rest"}},
+                                                                    {{"from", 16}, {"activity", "eat"}},
+                                                                    {{"from", 20}, {"activity", "sleep"}}}}}).ok);
+    const world::PersonId id = f.one("walker", 180.0, "day");
+    // Sent to the mill, 20 m off: it walks there, a figure in the walk's poses, not yet at work.
+    f.live(0.0, 6, 7.0);
+    GIANT_CHECK(f.travel.trip(id) != nullptr && f.figures.stats().walking == 1 && f.figures.stats().acting == 0);
+    f.live(4.0, 4, 7.0);
+    GIANT_CHECK(f.figures.kind_of(id) >= PeopleFigures::k_first_walk && f.figures.kind_of(id) < PeopleFigures::k_first_activity);
+    // There: held in the pose its look gives work, the end of a clip played once.
+    f.live(10.0, 8, 7.0);
+    GIANT_CHECK(f.travel.trip(id) == nullptr && f.figures.kind_of(id) == PeopleFigures::k_first_activity);
+    GIANT_CHECK(f.figures.stats().acting == 1 && f.figures.stats().walking == 0);
+    f.live(0.0, 4, 7.0);
+    GIANT_CHECK(f.drawn_as() != render::k_no_mesh && f.drawn_as() == f.baked(f.walker, "wave", 0.8f, false));
+    ai::CommandResult r = f.run("set_figure_settings", {{"id", id}});
+    GIANT_CHECK(r.ok && r.value["figure"]["pose"] == "activity" && r.value["figure"]["activity"] == "work" && r.value["acting"] == 1);
+    // Resting where it is: the look's pose for that (a looping clip's start).
+    f.live(0.0, 6, 13.0);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_first_activity + 1 && f.figures.stats().acting == 1);
+    GIANT_CHECK(f.drawn_as() == f.baked(f.walker, "idle", 0.0f, false));
+    // An activity the look has no clip for: it stands.
+    f.live(0.0, 6, 17.0);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_stand && f.figures.stats().acting == 0 && f.figures.stats().figures == 1);
+    // Asleep: not drawn; with no activity hidden, it stands there.
+    f.live(0.0, 6, 21.0);
+    GIANT_CHECK(f.figures.figure_of(id) == nullptr && f.figures.stats().figures == 0 && f.figures.stats().hidden == 1);
+    GIANT_CHECK(f.drawn_as() == render::k_no_mesh && f.run("set_figure_settings").value["hidden_now"] == 1);
+    GIANT_CHECK(f.run("set_figure_settings", {{"hidden", ""}}).ok);
+    f.live(0.0, 6, 21.0);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_stand && f.figures.stats().hidden == 0);
+    // The look's activities changed: one held in a pose of them is in the pose the look gives now
+    // (standing until the list has come round to it), or stands when it gives none.
+    f.live(0.0, 6, 13.0);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_first_activity + 1);
+    world::PersonLook& look = f.state.scene.person_looks[1];
+    // (A clip's speed alone shows on entities only: nobody is put again.)
+    const u64 as_was = f.figures.draws().versions[0];
+    look.activities[1].speed = 2.0f;
+    f.live(0.0, 6, 13.0);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_first_activity + 1 && f.figures.draws().versions[0] == as_was);
+    look.activities.erase(look.activities.begin()); // ("rest" is its first now)
+    f.live(0.0, 6, 13.0);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_first_activity && f.figures.stats().acting == 1);
+    GIANT_CHECK(f.drawn_as() != render::k_no_mesh && f.drawn_as() == f.baked(f.walker, "idle", 0.0f, false));
+    look.activities.clear();
+    f.live(0.0, 6, 13.0);
+    GIANT_CHECK(f.figures.kind_of(id) == PeopleFigures::k_stand && f.figures.stats().acting == 0);
+    GIANT_CHECK(f.drawn_as() == f.baked(f.walker, "idle", 0.0f, false));
+    // The simulation stopped: nobody is doing anything, everyone stands where the scene has them.
+    for (int i = 0; i < 4; ++i) {
+        f.travel.update(f.state.scene, 0, 0.0);
+        f.routines.update(f.state.scene, f.travel, 13.0);
+        f.frames(1);
+    }
+    const world::Transform* figure = f.figures.figure_of(id);
+    GIANT_CHECK(figure != nullptr && figure->position.x == 180.0 && f.figures.kind_of(id) == PeopleFigures::k_stand);
+}
+
+GIANT_TEST("figures: with the poses nearly all taken, a standing pose is had before any other and room is kept for each look's") {
+    Fixture f;
+    if (f.renderer == nullptr) return;
+    f.town(); // two looks: the villager and the walker
+    // All but six of the poses that can be kept are taken by others.
+    std::string error;
+    for (u32 i = 0; i < PoseBakes::k_max_poses - 6; ++i) {
+        GIANT_CHECK(f.poses->want(f.arm, "bend", 0.001f * static_cast<float>(i % 500 + 1), 3000 + i / 500, error) == i);
+    }
+    const world::PersonId walker = f.one("walker", 0.0);
+    f.live();
+    GIANT_CHECK(f.run("send_person", {{"id", walker}, {"to", at(200, 0, 50)}, {"speed", 1.4}}).ok);
+    f.live(1.3, 8);
+    // The walker's standing pose was had, and four of its walk's: the next would take the room kept for
+    // the villager's. With part of the round it stands as it goes (not every other step).
+    GIANT_CHECK(f.poses->poses().size() == PoseBakes::k_max_poses - 1 && f.figures.stats().poses == 5);
+    GIANT_CHECK(f.baked(f.walker, "walk", 0.25f, true) != render::k_no_mesh && f.baked(f.walker, "walk", 0.5f, true) == render::k_no_mesh);
+    GIANT_CHECK(f.figures.kind_of(walker) >= PeopleFigures::k_first_walk && f.figures.stats().walking == 1);
+    GIANT_CHECK(f.drawn_as() != render::k_no_mesh && f.drawn_as() == f.baked(f.walker, "idle", 0.0f, false));
+    // A villager comes: its standing pose takes the last room, and it is drawn.
+    const world::PersonId villager = f.one("villager", 20.0);
+    f.live();
+    f.draw();
+    GIANT_CHECK(f.poses->poses().size() == PoseBakes::k_max_poses && f.figures.stats().poses == 6 && f.figures.stats().looks_ready == 2);
+    GIANT_CHECK(f.figures.figure_of(villager) != nullptr && f.drawn() == 2);
+    // The poses cleared: there is room, and the walker steps.
+    f.poses->clear();
+    f.live(0.0, 8);
+    GIANT_CHECK(f.figures.stats().poses == 10 && f.drawn_as() == render::k_no_mesh);
+    f.draw();
+    GIANT_CHECK(f.drawn() == 2 && f.baked(f.walker, "walk", 0.0f, true) != render::k_no_mesh);
 }

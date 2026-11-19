@@ -1009,13 +1009,15 @@ void place(SceneFrame& out, SceneFrame::Cell& cell) {
 
 // The figures' cells brought up to `draws` (null: none are drawn): each
 // chunk of slots whose version is not the one it was built from is built
-// again whole (64 slots: a look's instances are made once a call and
-// copied to each of its figures, so a chunk costs a few copies), and chunks
+// again whole (64 slots: a look's instances in a pose are made once a call
+// and copied to each of its figures in it, so a chunk costs a few copies), and chunks
 // past the slots there are go. `lost`: a material lost its last user.
+// `materials`: a chunk draws with other materials than it did (one only
+// moved, or in another pose of its look, does not).
 // False: nothing changed. The chunks built are left in out.figure_rebuilt,
 // their places to be found.
 bool follow_figures(const FigureDraws* draws, const render::Renderer& renderer, const MeshLibrary& meshes,
-                    SceneFrame& out, bool& lost) {
+                    SceneFrame& out, bool& lost, bool& materials) {
     static const FigureDraws none;
     const FigureDraws& d = draws != nullptr ? *draws : none;
     const usize chunks = std::min((d.slots.size() + k_figure_chunk - 1) / k_figure_chunk, d.versions.size());
@@ -1035,6 +1037,7 @@ bool follow_figures(const FigureDraws* draws, const render::Renderer& renderer, 
     bool changed = false;
     while (out.figure_cells.size() > chunks) {
         SceneFrame::Cell& cell = out.figure_cells.back();
+        materials = materials || !cell.instances.empty();
         forget(cell);
         if (cell.placed) release(out, cell.first, cell.capacity);
         out.figure_cells.pop_back();
@@ -1048,9 +1051,9 @@ bool follow_figures(const FigureDraws* draws, const render::Renderer& renderer, 
         // (One whose first part came to nothing is not drawn: emit would draw its file, unposed.)
         return f.look != nullptr && f.meshes != nullptr && !f.meshes->empty() && f.meshes->front() != render::k_no_mesh;
     };
-    // What a look's figure draws: made once, each part with its look.
+    // What a look's figure draws in a pose: made once, each part with its look.
     const auto made = [&](const FigureDraw& f) {
-        const auto it = out.figure_looks.find(f.look);
+        const auto it = out.figure_looks.find(f.meshes);
         if (it != out.figure_looks.end()) return it->second;
         out.figure_rest.assign(f.meshes->begin() + 1, f.meshes->end());
         const u32 first = static_cast<u32>(out.figure_made.instances.size());
@@ -1063,12 +1066,21 @@ bool follow_figures(const FigureDraws* draws, const render::Renderer& renderer, 
                  f.meshes->front(), true, &out.figure_rest, &f.look->parts);
         }
         const SceneFrame::FigureLook look{first, static_cast<u32>(out.figure_made.instances.size()) - first};
-        out.figure_looks.emplace(f.look, look);
+        out.figure_looks.emplace(f.meshes, look);
         return look;
     };
     for (usize c = 0; c < chunks; ++c) {
         if (out.figure_versions[c] == d.versions[c]) continue;
         SceneFrame::Cell& cell = out.figure_cells[c];
+        const auto used = [&cell](std::vector<u32>& list) {
+            list.clear();
+            for (const render::Instance& i : cell.instances) {
+                if (i.mesh != render::k_no_mesh) list.push_back(i.material);
+            }
+            std::sort(list.begin(), list.end());
+            list.erase(std::unique(list.begin(), list.end()), list.end());
+        };
+        used(out.figure_materials_before);
         forget(cell);
         const usize first = c * k_figure_chunk, end = std::min(d.slots.size(), first + k_figure_chunk);
         u32 parts = 0;
@@ -1093,6 +1105,8 @@ bool follow_figures(const FigureDraws* draws, const render::Renderer& renderer, 
                 cell.instances[(s - first) * parts + k] = i;
             }
         }
+        used(out.figure_materials);
+        materials = materials || out.figure_materials != out.figure_materials_before;
         cell.prev_version = 0;
         cell.version = new_version();
         out.figure_versions[c] = d.versions[c];
@@ -1381,7 +1395,8 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     }
     // The figures, in their own cells.
     bool figures_lost = false;
-    bool figures_changed = follow_figures(figures, renderer, meshes, out, figures_lost);
+    bool figures_materials = false;
+    follow_figures(figures, renderer, meshes, out, figures_lost, figures_materials);
     compact = compact || figures_lost;
     // Unused entries linger (a cell streaming out must not rebuild every
     // cell): the table is made again once they outnumber the used ones and
@@ -1427,7 +1442,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
             }
         }
         layout = true;
-        figures_changed = follow_figures(figures, renderer, meshes, out, figures_lost) || figures_changed;
+        follow_figures(figures, renderer, meshes, out, figures_lost, figures_materials);
     }
     if (layout) {
         out.order.clear();
@@ -1452,7 +1467,7 @@ void scene_frame(world::Scene& scene, const render::Renderer& renderer, const Me
     const bool layer_textures = terrain_layers(scene, out);
     // The textures drawn materials use, when that may have changed: the
     // rest leave the GPU after a while.
-    if (out.textures != nullptr && (!rebuilt.empty() || compact || layer_textures || figures_changed)) {
+    if (out.textures != nullptr && (!rebuilt.empty() || compact || layer_textures || figures_materials)) {
         std::vector<u32>& used = out.scratch;
         used.clear();
         for (usize i = 0; i < out.materials.size(); ++i) {

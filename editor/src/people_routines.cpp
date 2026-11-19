@@ -706,6 +706,13 @@ bool PeopleRoutines::activity(const world::Scene& scene, world::PersonId id, Act
     return true;
 }
 
+bool PeopleRoutines::there(const Activity& doing, const DVec3& at, double slack) {
+    if (doing.anywhere) return true;
+    if (doing.place == nullptr) return false;
+    return std::hypot(at.x - doing.place->position.x, at.z - doing.place->position.z) <=
+           static_cast<double>(doing.place->radius) + slack;
+}
+
 void PeopleRoutines::ready(const world::Scene& scene, const PeopleTravel& travel) {
     follow(scene, travel);
     bool same = m_slots.size() == scene.people.size();

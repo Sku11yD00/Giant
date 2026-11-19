@@ -4835,13 +4835,13 @@ of plain data, on a worker:
   unit, the tangent kept perpendicular, a mirroring joint turning the
   bitangent, a place that is not finite left at bind). The pose is the
   clip's own, as `play_animation` shows it: a clip that moves its hips
-  through model space bakes moved (its `center` says where). Taking
-  that out is for the part that moves figures (CR3).
+  through model space bakes moved (its `center` says where), unless
+  it is asked for in place (CR3, below).
 - `build_clusters` makes it a mesh like any other, with its levels of
   detail.
 
-`PoseBakes` keeps the poses (256 at most), by file, clip, time to the
-millisecond and triangles; the same asked for again is the same pose
+`PoseBakes` keeps the poses (1,024 at most), by file, clip, time to the
+millisecond, triangles and whether in place; the same asked for again is the same pose
 (a failed one is tried again). A bake is a job on its two workers; the
 file's figure cut down to a size is made by the first bake that needs
 it (a mutex: the file's other poses wait for it) and kept for the
@@ -4873,8 +4873,9 @@ those, or waiting to be out of sight). A figure has no entity,
 skeleton, walker or senses. A look's people stand in one pose: the
 start of `clip` ("idle") of the look's file, its rest pose where the
 file has no such clip, cut to `triangles` (1,500). The pose is asked
-for once someone of the look is within `distance` (one look a frame),
-and its people are made figures once it is baked.
+for once someone of the look is within `distance` (four poses a
+frame, standing ones first), and its people are made figures once it
+is baked.
 
 A frame's work, bounded: the poses' meshes are taken as they are now
 (a pose baked again, or forgotten, takes its figures' meshes with it
@@ -4890,7 +4891,9 @@ at: one within `distance` with no entity and a pose is made a figure
 ground changed) is put there. One look of the scene's is compared with
 what its figures were made from a frame. Only an edit does more at
 once, each a pass over the slots (16,384 at most): a look changed,
-`most` lowered, a pose baked again or forgotten.
+`most` lowered. A pose baked (in play too, the first time it is
+needed), baked again or forgotten has one pass a frame point the
+figures showing it at what they show now, those alone sent again.
 
 Figures keep their slots (the lowest free first, doubled from 256 as
 more are needed), and `scene_frame` takes them as `FigureDraws`: the
@@ -4899,25 +4902,79 @@ changed is built again whole into a cell of its own, placed among the
 scene's cells like any other (as many instances a slot as the most
 parts a figure in it has; holes where one draws fewer or nothing, put
 where the chunk's first figure is, since the renderer keeps a cell's
-instances as floats about its first). A look's instances are made once
-a call by the same code as an animated entity's (its pose's meshes in
-place of the file's, each part with its look) and copied to each of
-its figures, so a chunk costs 64 copies and one coming, going or
-moving re-sends 64 slots. They are marked `render::Instance::moves`
+instances as floats about its first). A look's instances in a pose are
+made once a call by the same code as an animated entity's (the pose's
+meshes in place of the file's, each part with its look) and copied to
+each of its figures in that pose, so a chunk costs 64 copies and one
+coming, going or moving re-sends 64 slots. The textures in use are
+gathered again only when a chunk draws with other materials than it
+did, not when one in it moved or changed pose. They are marked `render::Instance::moves`
 (out of the voxel world; drawn as meshes at every distance), and their
 materials are counted like any instance's.
 
-Off by default (`set_figure_settings`): two things are left to the
-plan's next parts. A figure stands, and one travelling is only put on
-along its way when the list comes round to it (CR3: they walk). And a
-person whose entity was just taken away is a figure again only when the
-list comes round, while one given an entity loses its figure at once,
-so the change can be seen (CR4: unseen, with nothing in between).
-Other limits: changing `triangles` or `clip` leaves the poses asked
-for before in `PoseBakes` (256 in all, `bake_pose`'s too) until
-`clear_baked_poses`; a look whose pose could not be had is asked for
-again only after a file is imported; frame time with thousands of
-figures is not measured yet (CR6, the crowd gate).
+Off by default (`set_figure_settings`): a person whose entity was
+just taken away is a figure again only when the list comes round, while
+one given an entity loses its figure at once, so the change can be
+seen (CR4: unseen, with nothing in between). Other limits: changing
+`triangles` or a clip leaves the poses asked for before in `PoseBakes`
+(1,024 in all, `bake_pose`'s too) until `clear_baked_poses`; a pose
+that could not be had is asked for again only after a file is imported
+or the poses are cleared; frame time with thousands of figures is not
+measured yet (CR6, the crowd gate).
+
+### Figures walk (CR3)
+
+A look has up to 49 poses, each asked of `PoseBakes` when someone
+within `distance` first needs it (4 a frame; standing ones before any
+other, a walk's all together when its first walker sets off, and no
+other pose is had while it would take the room kept for a standing
+pose of each look that has none yet): standing, the walk's
+(`walk_poses`, 8: `walk_clip` at even times through it, baked in
+place), and one for each of the look's activities (the clip's start,
+or its end for one played once). A figure points at the meshes of the
+pose it is to show, or at the standing one's while that is not baked
+or cannot be had (no such clip in the file, no room for more poses),
+so it is never drawn as nothing for want of a pose; when a pose comes,
+goes or is baked again its look's figures are pointed again in one
+pass over the slots. `scene_frame` makes a look's instances once a
+call for each pose met (by the list of meshes a figure points at).
+
+In place: `PoseBakes` takes out of a pose what the clip has carried
+the hips over the ground by its time, as a share of the clip's whole
+travel (`PoseBakes::travel`: the hips at its end less at its start,
+found by name as motion matching finds them), so the step's sway and
+rise stay and the figure stays over its spot. That travel is also the
+ground a round of the walk covers: a figure `gone` metres along its
+trip shows pose `floor(frac(gone / (round * height)) * walk_poses)`,
+so feet keep to the ground at any speed, a trip begun again begins the
+round again, and nothing is kept for a walker but its slot. A clip that
+goes nowhere (made walking on the spot) is given `stride` for its
+round.
+
+Those travelling are kept in a list and put on in turn, `moved_a_frame`
+(2,048) a frame: where `PeopleTravel` has the trip by the clock, on the
+ground there, facing along the way, in the pose it has come to. Each
+chunk one is in is built again that frame (64 slots copied). One whose
+trip is over is put where it ended and leaves the list. Whether one
+is travelling, at an activity or hidden is seen when the list of
+people comes round to it (the same pass that makes and removes
+figures): `PeopleRoutines::activity` says what it does and where, and
+it counts as there when told to stay, or within the place's radius and
+6 m (`PeopleRoutines::there`, with the slack the entities' clips use:
+a person shows the same as a figure and as an entity).
+One at the `hidden` activity ("sleep") there is no figure.
+
+Limits: a rig whose hips are not found by name is not baked in place
+(its people stand as they go); a file imported with clips of another
+length leaves the poses of the old times in `PoseBakes` until
+`clear_baked_poses`; changing `walk_clip` or `walk_poses` makes
+everyone a figure afresh; a figure turns at once at a bend of its way
+and changes pose with no blend (far off, eight poses a round); one setting off or
+arriving shows it up to a pass of the list late (a second with 65,536
+people), jumping to where it is; with more travelling than
+`moved_a_frame` each moves every few frames; every frame with one
+moving gathers the frame's cells again and re-sends its chunks (what
+that costs with thousands is for CR6 to measure).
 
 ## Sound
 
