@@ -50,7 +50,7 @@ import sys
 import tempfile
 import time
 
-from gate_common import Editor, describe, frame_stats, slow_frames, speed_failures
+from gate_common import Editor, describe, frame_stats, leg_slow_frames, slow_frames, speed_failures
 from gate_person import write_person
 from n2_gate import ALL_ON, behind_text, set_resolution, settle
 from n3_gate import (HOUSES_X, HOUSES_Z, SPACING, STOPS, TOWN, build_valley, flight_path, leg_ends, leg_of,
@@ -396,6 +396,10 @@ def main() -> int:
         for i, name in enumerate(("low", "street", "climb")):
             leg_times[name] = frame_stats(flown[cuts[i]:cuts[i + 1]])
             print(f"characters_gate: flying {name}: {describe(leg_times[name])}")
+            told = leg_slow_frames(flown[cuts[i]:cuts[i + 1]], editor.slow, editor.typicals, editor.slow_over_ms,
+                                   lambda at, name=name: leg_of(at, STOPS) == name) if real_gpu else None
+            if told:
+                print(f"characters_gate: flying {name}: {told}")
 
         # Those struck down: made ragdolls (none left waiting), and up again after lying still.
         ragdolls = tool("get_ragdoll")

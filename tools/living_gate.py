@@ -58,7 +58,7 @@ import sys
 import tempfile
 import time
 
-from gate_common import Editor, describe, frame_stats, slow_frames, speed_failures, weighted_median
+from gate_common import Editor, describe, frame_stats, leg_slow_frames, slow_frames, speed_failures, weighted_median
 from gate_person import write_person
 from n2_gate import ALL_ON, set_resolution, settle
 from n3_gate import (HAMLET, HOUSES_X, HOUSES_Z, SPACING, STOPS, TOWN, build_valley, flight_path, hamlet_houses, leg_ends,
@@ -538,6 +538,10 @@ def main() -> int:
         for i, name in enumerate(("low", "street", "climb")):
             leg_times[name] = frame_stats(flown[cuts[i]:cuts[i + 1]])
             print(f"living_gate: flying {name}: {describe(leg_times[name])}")
+            told = leg_slow_frames(flown[cuts[i]:cuts[i + 1]], editor.slow, editor.typicals, editor.slow_over_ms,
+                                   lambda at, name=name: leg_of(at, stops) == name) if real_gpu else None
+            if told:
+                print(f"living_gate: flying {name}: {told}")
         after = tool("set_people_settings")
         routine_after = tool("set_routine_settings")
         appeared = after["appeared_in_view"] - before["appeared_in_view"]

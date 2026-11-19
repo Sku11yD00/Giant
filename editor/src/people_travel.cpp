@@ -127,6 +127,7 @@ PeopleTravel::Stats PeopleTravel::stats() const {
 
 void PeopleTravel::clear() {
     ++m_resets;
+    m_fastest = 0.0;
     m_trips.clear();
     m_index.clear();
     m_places.clear();
@@ -305,9 +306,9 @@ std::string PeopleTravel::send(const world::Scene& scene, world::PersonId id, co
         if (in_frame) return "bad place";
         return "where it is sent must be finite and within 100,000 km";
     }
-    if (!(speed >= 0.1f && speed <= 100.0f)) {
+    if (!(speed >= 0.1f && speed <= k_max_speed)) {
         if (in_frame) return "bad speed";
-        return "speed must be from 0.1 to 100 m/s";
+        return "speed must be from 0.1 to " + std::to_string(static_cast<int>(k_max_speed)) + " m/s";
     }
     // (As the command gave it: 1.4, not the float nearest it, to a few places.)
     const double pace = std::round(static_cast<double>(speed) * 1000.0) / 1000.0;
@@ -360,6 +361,7 @@ std::string PeopleTravel::send(const world::Scene& scene, world::PersonId id, co
     trip.place = place;
     trip.within = within;
     trip.speed = pace;
+    m_fastest = std::max(m_fastest, pace);
     trip.yaw = now.yaw;
     ++m_stats.searching; // (searching until it sets off)
     if (direct) {
@@ -386,6 +388,7 @@ bool PeopleTravel::put(const world::Scene& scene, world::PersonId id, const Wher
         m_on_road.reserve(room);
     }
     if (const auto had = m_index.find(id); had != m_index.end()) end(had->second, false);
+    ++m_puts;
     m_places[id] = at;
     m_on_road.insert(id); // (where it had travelled to: along a road, as far as is known)
     return true;
@@ -506,6 +509,7 @@ void PeopleTravel::update_rest(const world::Scene& scene) {
             const world::PersonId id = t.person;
             end(m_cursor, false);
             m_places.erase(id);
+            ++m_puts; // (brought back by an undo, it is where the scene has it)
             continue; // (the last trip took its place: looked at next)
         }
         if (t.phase == Phase::travelling && !t.held && gone(t) >= length(t)) {
@@ -526,6 +530,7 @@ void PeopleTravel::update_rest(const world::Scene& scene) {
         ++m_place_bucket;
     }
     for (const world::PersonId id : m_gone) m_places.erase(id);
+    if (!m_gone.empty()) ++m_puts;
 }
 
 } // namespace giant::editor

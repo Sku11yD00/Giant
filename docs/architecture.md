@@ -4534,6 +4534,26 @@ people (the list is gone through over frames), makes at most 2 entities
 and holds at most 256 (those near enough beyond that are counted as
 `waiting`); looks are compared one a frame.
 
+Most of a wide world's people are far from the camera, and asking
+where each is (its trip found, its place along its way worked out)
+every time the list comes round is the larger part of what this costs
+with the living gate's 5,000 (measured there: the pass took several
+times what the entities held and walked did). So one found more than
+16 m beyond where an entity would be made is passed over from then on,
+by a compare in a list as long as the people's: until the camera has
+moved half of the gap beyond where an entity is made (counted frame to
+frame; a camera put elsewhere counts as having moved that far) or the
+travel's clock has run long enough for the person to cover the other
+half at the fastest anyone was yet sent (`PeopleTravel::fastest`; a
+clock run fast shortens the wait as it should). Between the two nobody
+can have come within reach. What moves a person at a stroke ends the
+wait: its position edited (compared), another run or scene, a person
+put somewhere (`PeopleTravel::puts`: a loaded game's people), someone
+sent faster than anyone was, the people turned off and on, or entities
+made at another distance.
+`passed_over` (`set_people_settings`) counts those passed over in the
+last frame.
+
 An entity with `person` set is the editor's, not the world's data: scene
 text and cell files leave it out (the person is saved), and the world's
 streaming does not count it among a cell's entities (no unsaved edit, no

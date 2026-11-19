@@ -201,6 +201,16 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
     return "\n".join(lines) if lines else None
 
 
+def leg_slow_frames(times, slow, typicals, slow_over_ms, in_leg):
+    """Where the main thread's time went in the slow frames of one leg of a flight that fails its speed
+    targets by itself (slow_frames of the leg's own `times` and of those of `slow` read at a stop
+    `in_leg(stop)` holds for): a leg can be uneven while the whole flight is not, and then nothing
+    else says why. None when the leg passes, or there is nothing to tell."""
+    if not times or not speed_failures(frame_stats(times)):
+        return None
+    return slow_frames(times, [f for f in slow if in_leg(f["stop"])], typicals, slow_over_ms)
+
+
 def device_line(hitches):
     """What the GPU device did before the hitches (editors that report it).
     begin_frame waits for the frame two back, so memory made or freed in the

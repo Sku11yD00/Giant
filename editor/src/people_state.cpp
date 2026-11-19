@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -137,6 +138,7 @@ void PeopleState::take_up(world::Scene& scene) {
     m_unseen_now = 0;
     m_free_passes = 2;
     m_again.clear();
+    m_far.clear();
     m_ground_waited = false;
     m_stats = {};
     m_entities.clear();
@@ -422,6 +424,7 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         if (!m_held.empty()) release_all(scene);
         m_stats.waiting = 0;
         m_stats.unseen = 0;
+        m_stats.passed_over = 0;
         m_was_off = true;
         return;
     }
@@ -451,6 +454,29 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
         m_free_passes = 2; // (the pass under way ends, and one whole pass more)
     }
     if (most > m_most_seen) m_free_passes = 2; // (more may be held: those that had to go come back)
+    // What is known of those far off holds while nobody is put anywhere but by travelling, nobody
+    // is sent faster than anyone was, and an entity is made as far off as it was: else everyone is
+    // looked at afresh.
+    const u64 puts = travel != nullptr ? travel->puts() : 0;
+    const double fastest = travel != nullptr ? travel->fastest() : 0.0;
+    const double clock = travel != nullptr ? travel->seconds() : 0.0;
+    if (m_was_off || resets != m_resets_seen || puts != m_puts_seen || travel != m_travel_seen || far_made != m_reach_seen ||
+        fastest != m_fastest_seen || clock < m_clock_seen) { // (a clock put back: travellers went back with it)
+        m_far.clear();
+    }
+    if (m_camera_known) {
+        const double moved = std::sqrt(square_distance(camera, m_camera));
+        if (std::isfinite(moved)) {
+            m_camera_gone += moved;
+        } else { // (a camera nowhere: nothing known of it holds)
+            m_far.clear();
+        }
+    }
+    m_puts_seen = puts;
+    m_fastest_seen = fastest;
+    m_clock_seen = clock;
+    m_travel_seen = travel;
+    m_reach_seen = far_made;
     m_most_seen = most;
     m_was_off = false;
     m_resets_seen = resets;
@@ -578,13 +604,34 @@ void PeopleState::update(world::Scene& scene, const DVec3& camera, const WorldSt
     world::PersonId farthest = 0;
     double farthest_off = 0.0;
     const u32 a_frame = std::clamp<u32>(settings.made_a_frame, 1, 64);
+    if (m_far.size() != people.size()) m_far.resize(people.size());
+    m_stats.passed_over = 0;
     for (; m_cursor < end; ++m_cursor) {
         const world::Person& person = people[m_cursor];
+        Far& known = m_far[m_cursor];
+        if (known.id == person.id && known.was == person.position && clock < known.until &&
+            m_camera_gone < known.camera_until) {
+            ++m_stats.passed_over; // (far off still, wherever it has gone since)
+            continue;
+        }
+        known.id = 0;
         const PeopleTravel::Where at = where(person);
         const double off = square_distance(at.position, camera);
         const bool back = !m_again.empty() && m_again.contains(person.id);
         if (off > far_made * far_made || m_held.contains(person.id)) {
             if (back) m_again.erase(person.id); // (gone off, or made: nothing to come back to)
+            // Far beyond where one is made: it and the camera each have half of the gap beyond that
+            // to cover before it could be within it (the camera by moving; it no faster than anyone
+            // was yet sent: one sent faster, and everyone is looked at afresh. Nobody sent yet,
+            // nobody moves but by being put, which does the same).
+            // (Not one held: its entity walks it, and it is looked at each frame anyway.)
+            const double beyond = std::sqrt(off) - far_made;
+            if (beyond > k_far_slack && !m_held.contains(person.id)) {
+                known.id = person.id;
+                known.was = person.position;
+                known.until = fastest > 0.0 ? clock + 0.5 * beyond / fastest : std::numeric_limits<double>::infinity();
+                known.camera_until = m_camera_gone + 0.5 * beyond;
+            }
             continue;
         }
         const bool nearby = off <= embody * embody;
