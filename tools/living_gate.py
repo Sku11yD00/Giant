@@ -524,7 +524,8 @@ def main() -> int:
         landed = hour()
         tool("set_time", {"hours": landed, "speed": day_speed})  # (the day at its own pace again)
         times = frame_stats(flown)
-        slow = slow_frames(flown, editor.slow, editor.typicals, editor.slow_over_ms)
+        slow = slow_frames(flown, editor.slow, editor.typicals, editor.slow_over_ms,
+                           leg=lambda at: leg_of(at, stops))
         if slow:
             print(f"living_gate: {slow}")
         print(f"living_gate: frame time over the flight ({times['frames']} frames sampled, {set_out:.2f} h to "

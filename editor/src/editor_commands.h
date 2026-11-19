@@ -138,9 +138,14 @@ struct FrameTimes {
     std::array<FramePhaseMs, k_frames> phase_ms{}; // the same frames' phases
     std::array<float, k_frames> cpu_ms{};          // and the main thread's CPU time
     std::array<FrameDevice, k_frames> device{};    // and the device's
+    // Whether the window itself was handled in the frame (platform::Window::take_handled:
+    // moved, sized, minimised or restored, focus come or gone, or held): a long `events`
+    // phase is then the desktop's.
+    std::array<bool, k_frames> window{};
     usize count = 0; // frames recorded, ever
     void add(float frame_ms, const FramePhaseMs& phases = {}, float thread_cpu_ms = 0.0f,
-             const FrameDevice& device_stats = {}) {
+             const FrameDevice& device_stats = {}, bool window_handled = false) {
+        window[count % k_frames] = window_handled;
         phase_ms[count % k_frames] = phases;
         cpu_ms[count % k_frames] = thread_cpu_ms;
         device[count % k_frames] = device_stats;

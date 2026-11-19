@@ -77,6 +77,7 @@ Json frame_phases(const FrameTimes& times, usize since, float over_ms) {
             before.released += times.device[earlier].released;
         }
         slow.push_back({{"frame", f}, {"ms", ms2(times.ms[slot])}, {"cpu_ms", ms2(times.cpu_ms[slot])},
+                        {"window", times.window[slot]},
                         {"phases", std::move(phases)},
                         {"device", device_json(d.created, d.allocations, d.released, d.wait_ms, d.release_ms)},
                         {"device_before", Json{{"created", before.created},

@@ -239,6 +239,12 @@ void Window::set_cursor(Cursor cursor) {
     SDL_ShowCursor();
 }
 
+bool Window::take_handled() {
+    const bool handled = m_handled;
+    m_handled = false;
+    return handled;
+}
+
 bool Window::wait_events(i32 timeout_ms) {
     SDL_WaitEventTimeout(nullptr, timeout_ms); // wakes on any event, leaves it queued
     return poll_events();
@@ -253,8 +259,22 @@ std::vector<InputEvent> Window::take_input_events() {
 bool Window::poll_events() {
     SDL_Window* const window = m_impl->window;
     SDL_Event event;
+    u32 exposed = 0;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
+        case SDL_EVENT_WINDOW_EXPOSED:
+            // While Windows holds the window's messages (its title bar or a border held, moved or
+            // not), SDL asks for it to be drawn again every 10 ms: several in one poll is that.
+            if (is_ours(event, window) && ++exposed >= 2) {
+                m_handled = true;
+            }
+            break;
+        case SDL_EVENT_WINDOW_MOVED:
+        case SDL_EVENT_WINDOW_RESIZED:
+            if (is_ours(event, window)) {
+                m_handled = true;
+            }
+            break;
         case SDL_EVENT_MOUSE_MOTION:
             if (is_ours(event.motion.windowID, window)) {
                 InputEvent input;
@@ -312,6 +332,7 @@ bool Window::poll_events() {
         case SDL_EVENT_WINDOW_FOCUS_GAINED:
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             if (is_ours(event, window)) {
+                m_handled = true;
                 InputEvent input;
                 input.type = InputEvent::Type::focus;
                 input.down = event.type == SDL_EVENT_WINDOW_FOCUS_GAINED;
@@ -328,12 +349,14 @@ bool Window::poll_events() {
         case SDL_EVENT_WINDOW_MINIMIZED:
             if (is_ours(event, m_impl->window)) {
                 m_minimized = true;
+                m_handled = true;
             }
             break;
         case SDL_EVENT_WINDOW_RESTORED:
         case SDL_EVENT_WINDOW_MAXIMIZED:
             if (is_ours(event, m_impl->window)) {
                 m_minimized = false;
+                m_handled = true;
             }
             break;
         case SDL_EVENT_QUIT:
@@ -352,6 +375,7 @@ bool Window::poll_events() {
                     m_width = w;
                     m_height = h;
                     m_resized = true;
+                    m_handled = true;
                 }
             }
             break;

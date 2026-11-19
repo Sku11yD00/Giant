@@ -205,11 +205,15 @@ AnimationState::~AnimationState() {
     }
 }
 
-render::MeshId AnimationState::make_copy(const geometry::SkinnedClusterMesh& clusters, u32 joints) {
-    // The first of a file's part uploads its geometry; the rest share it.
+render::MeshId AnimationState::make_copy(const geometry::SkinnedClusterMesh& clusters, u32 joints,
+                                         render::MeshId source) {
+    // A copy of what the library sent with the import (MeshLibrary::Mesh::skin_sources): the
+    // file's geometry does not go up in a frame, only the copy's own small buffers. Without one, the first of a file's part uploads its geometry
+    // and the rest share it.
     std::vector<render::MeshId>& same = m_copies_of[&clusters];
-    const render::MeshId copy = same.empty() ? m_renderer->add_skinned_mesh(clusters, joints)
-                                             : m_renderer->add_skinned_copy(same.front());
+    const render::MeshId copy = source != render::k_no_mesh ? m_renderer->add_skinned_copy(source)
+                                : same.empty()              ? m_renderer->add_skinned_mesh(clusters, joints)
+                                                            : m_renderer->add_skinned_copy(same.front());
     if (copy != render::k_no_mesh) same.push_back(copy);
     if (same.empty()) m_copies_of.erase(&clusters);
     return copy;
@@ -341,10 +345,14 @@ AnimationState::Animated* AnimationState::start(const world::Scene& scene, const
         // Whole, or a copy of each of its parts (all of them, or none).
         const u32 joint_count = static_cast<u32>(a->skinned->skeleton.size());
         const std::vector<geometry::SkinnedClusterMesh>& parts = a->skinned->parts;
-        a->copy = make_copy(parts.empty() ? a->skinned->clusters : parts.front(), joint_count);
+        // (Sources of this very file: one a part, or one for the whole.)
+        const std::vector<render::MeshId>& sources = mesh->skin_sources;
+        const bool sent = sources.size() == std::max<usize>(parts.size(), 1);
+        const auto source = [&](usize p) { return sent ? sources[p] : render::k_no_mesh; };
+        a->copy = make_copy(parts.empty() ? a->skinned->clusters : parts.front(), joint_count, source(0));
         bool made = a->copy != render::k_no_mesh;
         for (usize p = 1; made && p < parts.size(); ++p) {
-            const render::MeshId part = make_copy(parts[p], joint_count);
+            const render::MeshId part = make_copy(parts[p], joint_count, source(p));
             if (part == render::k_no_mesh) {
                 made = false;
             } else {

@@ -71,6 +71,16 @@ public:
     // True once after the drawable size changed; the swap chain should resize.
     bool take_resized();
 
+    // True once after poll_events (or wait_events) saw the window itself
+    // handled: moved, sized, minimised or restored, focus come or gone, or
+    // asked to be drawn again twice or more in the one poll. While its
+    // title bar is held, or it is moved or sized, Windows runs the
+    // window's messages itself and poll_events does not return (SDL asks
+    // for a redraw every 10 ms meanwhile, which is the sign when nothing
+    // moved): a long frame with this set was the desktop's doing, not the
+    // program's.
+    bool take_handled();
+
     // Minimised (or zero-sized): skip rendering and call wait_events instead.
     bool minimized() const { return m_minimized || m_width == 0 || m_height == 0; }
 
@@ -104,6 +114,7 @@ private:
     u32 m_height = 0;
     bool m_resized = false;
     bool m_minimized = false;
+    bool m_handled = false;
     bool m_close_requested = false;
     bool m_text_input = false;
     bool m_relative_mouse = false;

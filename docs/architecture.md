@@ -603,7 +603,7 @@ an offline cooker can use it without a device.
   skeleton, capsules, hair's scalp, ragdoll) still reads the whole mesh,
   which is kept beside the parts (so such a file is clustered twice at
   import, and a character in three parts is three skinned meshes of the
-  renderer's count). Parts are simplified apart, but where two meet
+  renderer's count, beside the file's three sources). Parts are simplified apart, but where two meet
   (`geometry::part_seams`: corners at a place another part uses too)
   both keep every corner at every level of detail, locked as terrain
   tiles' edges are, so they never crack apart; a long seam therefore
@@ -1940,7 +1940,20 @@ groups, LOD tree and skin source on the GPU and the per-file skin data
 floor and place in the pool, so a crowd of one character costs its
 geometry once (its levels, about twice the original triangles alone). The
 original may go before its copies (the shared buffers go with the last).
-The editor uploads a file's first animated copy and copies the rest.
+The editor sends a skinned file's geometry with its import
+(`MeshLibrary::Mesh::skin_sources`: one skinned mesh for the file or for
+each of its parts, never drawn) and every animated entity's is a copy of
+that, so the file's geometry does not go up in a frame (a copy makes
+only its own cluster and residency buffers, and its groups stream in as
+any mesh's): before, the first of a
+character to be animated uploaded it then, 12 ms of the frame for a
+43,760 triangle person in three parts (the living-world gate's uneven
+frames on the owner's PC, each time the first of a look came near).
+Where the renderer refused the source, the first animated copy is
+uploaded as before and the rest copied from it. A source is kept for
+as long as its file is loaded, animated or not: its buffers, its
+coarsest groups in the geometry pool, one pose (at bind) and a place in
+the renderer's list of skinned meshes (`skinned_meshes` counts it).
 `set_pose` takes one skin matrix per joint and a sphere around the pose;
 in the frame after, before anything reads geometry, `skin.slang` (a
 thread group per cluster) writes the posed vertices and normals into the
@@ -3706,14 +3719,20 @@ as loud as the listener's: `AudioState::shot_loudness`), and through
 rifle) and splashes (`on_splashes`), and from `make_noise`.
 
 Cost: at most 64 noises are kept (a louder one pushes the quietest
-out); while any spreads, `looked_a_frame` (4096, at most 16,384)
-people are gone through a frame, each against the noises kept (a
+out); while any spreads, `looked_a_frame` (512, at most 16,384)
+people are gone through a frame (5,000 people in ten frames: on the
+owner's PC 4,096 a frame cost 0.6 ms a frame for as long as a shot
+spread, the living-world gate's whole budget for the people), each against the noises kept (a
 distance each; 262,144 such tests a frame at most, so fewer people
-when many noises spread at once), and none when it is quiet. Each
+when `looked_a_frame` is set over 4,096 and many noises spread at
+once), and none when it is quiet. Each
 time through the list a person hears the noises whose front reached
 it since the time before, so each hears each once whatever the list's
 length, up to two passes late (a front that arrives just after a
-pass began waits for the next: 32 frames for 65,536 people); a pass
+pass began waits for the next: 20 frames for 5,000 people, a third of
+a second at 60 fps, and 256 frames for 65,536, over four seconds:
+worlds that full want `looked_a_frame` raised, or people kept by place,
+which the crowds stage may bring); a pass
 begins only once time has passed, so the first noise after quiet is
 heard on the first pass. A noise is made by the clock as it is then:
 the commands and the physics' hooks bring the clock up first
@@ -4753,6 +4772,26 @@ shorter flight, and checks all but the speed and the people's budget.
 The gate's own arithmetic (the valley's plan, the checks of the day, of
 the people's cost and of a loaded game) is tested without an editor by
 `tools/test_living_gate.py`.
+
+What the gates set aside (all of them: `gate_common.py`): a frame held
+by the desktop handling the window. Windows runs a window's messages
+itself while its title bar is held or it is moved or sized, and the
+editor's loop stands still inside `poll_events` until it lets go (five
+seconds of one frame on the owner's first run of this gate). The window
+says when it was itself handled (`Window::take_handled`: moved, sized,
+minimised or restored, focus come or gone, or asked to be drawn again
+twice or more in one poll, which SDL does every 10 ms while Windows
+holds the messages, so a title bar held still shows), the frame's record keeps it
+(`FrameTimes::window`, `window` on a slow frame of `get_engine_info`),
+and a frame over 25 ms with that set and half or more of it in the
+`events` phase is not one of the flight's: left out of its times, and
+said with how long it was (the frames after it, catching up, still
+count). It cannot hide the engine's own work, none of which runs in
+`events`; it does set aside any stall of the desktop's that comes with
+such a sign (a display change, a window taking the focus). One with no
+sign still counts, and the report says what `events` means. With the 99th percentile over its limit the report
+also tells the frames over that limit which are no hitches (their
+phases, and the leg of the flight), whether or not there were hitches.
 
 The trips' share: each trip looked at for having arrived finds its
 person by where it was last found in the scene's list
