@@ -4,6 +4,7 @@ giant_module(geometry
     src/clusters.cpp
     src/gltf.cpp
     src/groom.cpp
+    src/pose_bake.cpp
     src/shapes.cpp
     src/vertex.cpp
   DEPENDS core anim
@@ -16,4 +17,5 @@ giant_module_tests(geometry
     tests/test_alembic.cpp
     tests/test_geometry.cpp
     tests/test_groom.cpp
+    tests/test_pose_bake.cpp
 )

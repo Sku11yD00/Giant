@@ -460,6 +460,9 @@ Open-world systems:
   runs a world as a game: a main menu (Continue, New game, Load,
   Settings, Quit) instead of the editor's panels, play from it, and the
   pause menu's Quit leads back to it.
+- Crowds part 1: baked poses. A character held in one pose becomes a
+  small plain mesh (`bake_pose`, `get_baked_poses`), cut down from the
+  file and baked on a worker: what distant people will be drawn with.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

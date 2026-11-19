@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 
+from gate_person import write_person
 from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
 
 TIMEOUT = 3000  # seconds for the whole run (the gates are heavy on the software renderer with GPU validation: 1300-1500 s on Windows CI runners by N3 part 4, whose speed varies 2x; each gate prints its time)
@@ -992,6 +993,33 @@ def gi_gate(tool, call, check):
     tool("new_scene")
 
 
+def crowd_gate(tool, call, check):
+    """Crowds part 1: a person held in a pose becomes a small plain mesh, baked on a worker."""
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "person.glb").replace("\\", "/")
+        person = write_person(path, detail=0.25)
+        tool("import_mesh", {"path": path})
+        clip = person["clips"][0]
+        begun = tool("bake_pose", {"mesh": path, "clip": clip, "time": 0.25, "triangles": 3000})
+        check(begun["pose"] == 0 and begun["state"] in ("baking", "ready"), f"a bake begins, got {begun}")
+        pose = tool("bake_pose", {"mesh": path, "clip": clip, "time": 0.25, "triangles": 3000, "wait": True})
+        check(pose["pose"] == 0 and pose["state"] == "ready", f"the same pose, baked, got {pose}")
+        check(pose["parts"] == len(person["materials"]), f"a mesh for each part of the file, got {pose}")
+        check(pose["source_triangles"] == person["triangles"] and 900 <= pose["baked_triangles"] <= 3900,
+              f"cut down to about the triangles asked for, got {pose}")
+        check(0.0 < pose["error"] < 0.05 and 0.7 < pose["radius"] < 1.6 and 0.5 < pose["center"][1] < 1.3,
+              f"still a person where it stood, got {pose}")
+        rest = tool("bake_pose", {"mesh": path, "triangles": 3000, "wait": True})
+        check(rest["pose"] == 1 and rest["clip"] == "" and rest["state"] == "ready", f"the rest pose, got {rest}")
+        listed = tool("get_baked_poses")
+        check(len(listed["poses"]) == 2 and listed["baking"] == 0 and listed["baked"] >= 2, f"both listed, got {listed}")
+        refused = call("tools/call", {"name": "bake_pose", "arguments": {"mesh": path, "clip": "no such clip"}})
+        check(refused.get("isError") is True and "no clip" in refused["content"][0]["text"], "an unknown clip is refused")
+        # Drawn frames go on with the poses in the renderer; cleared, they are gone.
+        tool("get_engine_info")
+        check(tool("clear_baked_poses")["cleared"] == 2 and tool("get_baked_poses")["poses"] == [], "cleared")
+
+
 def n1_gate(tool, call, check):
     """N1 part 6, the N1 gate scene (tools/n1_gate.py measures its speed on a real GPU): a
     kit-built town and 10,000 trees in a fixed number of draws, with every bit of detail the
@@ -1204,7 +1232,7 @@ def main() -> int:
                          "set_autosave", "get_game_ui", "set_game_ui", "show_toast", "ui_load_screen",
                          "ui_remove_screen", "ui_set_values", "ui_click", "ui_key", "get_ui_events",
                          "get_ui_screen", "ui_set_marker", "ui_remove_marker", "get_ui_markers", "ui_fade", "get_menu", "open_menu",
-                         "set_game_settings"):
+                         "set_game_settings", "bake_pose", "get_baked_poses", "clear_baked_poses"):
             check(expected in names, f"tool {expected} is listed")
 
         info = tool("get_engine_info")
@@ -1265,7 +1293,7 @@ def main() -> int:
                                      "ambient_occlusion": False, "contact_shadows": False,
                                      "subsurface_scattering": False})
         for gate in (build_scene, world_gate, lod_gate, kit_gate, voxel_gate, far_field_gate,
-                     terrain_gate, shadow_gate, weather_gate, physics_gate, player_gate, gi_gate, n1_gate):
+                     terrain_gate, shadow_gate, weather_gate, physics_gate, player_gate, gi_gate, n1_gate, crowd_gate):
             # Each gate's time, so a run near the timeout shows which one grew.
             started = time.monotonic()
             frames = tool("get_engine_info")["frames_completed"]

@@ -4797,6 +4797,71 @@ The trips' share: each trip looked at for having arrived finds its
 person by where it was last found in the scene's list
 (`Trip::person_at`), not by a search, while nobody is added or removed.
 
+## Crowds (crowds plan)
+
+Only people near the camera have a body: an entity with its own posed
+copy of the character, a walker, senses (`PeopleState`). Everyone farther
+is not drawn. The crowds stage adds a middle tier, "figures": no entity,
+no skeleton, one instance of a baked pose each.
+
+### Baked poses (CR1)
+
+A baked pose is a skinned file held in one pose as a small plain mesh
+(`giant/geometry/pose_bake.h`, `editor/src/pose_bakes.h`). Three steps
+of plain data, on a worker:
+
+- `simplify_skinned` cuts the file's bind mesh to a few thousand
+  triangles once. The simplifier only drops vertices, so each one kept
+  has its own place, normal, uv and skin weights, and the small mesh
+  poses as the original does; every pose of the file is made from it.
+  It works from the file's original triangles (its skinned clusters
+  hold the coarser levels too: those of depth 0 groups are taken), with
+  morph targets at their rest weights (`apply_morphs`). A file drawn in
+  parts is cut part by part, each to its share of the triangles by
+  size, with the corners where parts meet (`seams_between`) kept while
+  the target can be reached with them; when it cannot (more than 1.25
+  times the target left), seams and locks are let go and the smallest
+  loose pieces dropped. Shape is what the cut keeps: normals count
+  little and uvs not at all (a figure is seen small, by its outline;
+  the weights `build_clusters` uses for meshes seen close cost a person
+  several times the shape error). The pose's `error` is the
+  simplifier's own measure in metres; it grows fast below a mesh's
+  natural size, so the default 3,000 triangles is where a person of
+  about 11,000 still reads a few millimetres.
+- `bake_pose` moves that mesh into the pose: the clip sampled at the
+  time, the joints' skin matrices, and each vertex as the renderer's
+  skinning has it for a sound mesh (broken ones differ in detail: a
+  tangent or normal that vanishes or is not finite) (`skin.slang`: the weighted sum, the normal made
+  unit, the tangent kept perpendicular, a mirroring joint turning the
+  bitangent, a place that is not finite left at bind). The pose is the
+  clip's own, as `play_animation` shows it: a clip that moves its hips
+  through model space bakes moved (its `center` says where). Taking
+  that out is for the part that moves figures (CR3).
+- `build_clusters` makes it a mesh like any other, with its levels of
+  detail.
+
+`PoseBakes` keeps the poses (256 at most), by file, clip, time to the
+millisecond and triangles; the same asked for again is the same pose
+(a failed one is tried again). A bake is a job on its two workers; the
+file's figure cut down to a size is made by the first bake that needs
+it (a mutex: the file's other poses wait for it) and kept for the
+file's other poses of that size until no pose is of that file any
+more. The main thread only hands finished meshes to the renderer,
+`uploads_a_frame` (2) a frame and, after a frame's first, no more
+than `triangles_a_frame` (8,000) triangles; a command's `wait` is the exception (a
+tool's: the calling thread helps bake and everything is handed over at
+once). A file imported again has its poses baked again from the new
+file; one whose file has lost the clip or is no longer skinned fails
+and says why. A file with many small parts can come out over the
+triangles asked for (each part gets at least 16, and may stop at 1.25
+times its share); `seams_kept` says whether every part reached its
+share with its joins to the others in place. Commands: `bake_pose`, `get_baked_poses`,
+`clear_baked_poses`. Nothing draws the poses yet (CR2: figures).
+
+Known limits: a clip's morph channels are not baked; the figure is cut
+at bind, so a coarse triangle across an elbow bends as a flat one; a
+part's material is the file's part's (CR2 draws with it).
+
 ## Sound
 
 `engine/audio` (core only) hears the world. `Mixer` (mixer.h) plays a
