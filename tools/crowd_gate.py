@@ -8,14 +8,14 @@ Run it on a real GPU (the owner's PC), in a visible window (not --hidden,
 which idles between frames), and leave the window be. It builds the N3
 gate's edited valley and fills a square by the town's houses: 2,000 people
 standing in blocks, and 1,000 walking the lanes between them from one end
-to the other and back, each in its own time and each way on its own side
-(a routine a lane and a way, that sends them across every other hour of a
-clock run fast). They come in three looks of five colours each, fifteen
+to the other and back without end, each way on its own side (a behaviour
+a lane and a way: across, and arrived, home, and arrived, across again).
+They come in three looks of five colours each, fifteen
 in all. It saves that as a world and opens it again, simulating, turns
 the figures on (set_figure_settings: those with no entity drawn as baked
 poses) and, once the lanes are full:
-- looks over the square from 30 m up and, the sun held still meanwhile,
-  measures what the figures add on the GPU: them drawn and not, with the
+- looks over the square from 30 m up and measures what the figures add
+  on the GPU: them drawn and not, with the
   sun's shadows and without, in turn;
 - flies in from 460 m up the valley, down a lane at head height through
   the crowd, and once round the square rising to 80 m, at 2560x1440 where
@@ -74,11 +74,7 @@ ROW_EVERY = 0.9            # metres between its rows
 KEEP_SIDE = 0.4            # metres from a lane's middle each way's people walk, on their own side
 END_RADIUS = 0.35          # of the places at a lane's ends: each has a spot of its own within it
 WALK_SPEED = 1.4           # m/s
-HOUR_SECONDS = 55.0        # an hour of the square's clock: a lane walked (50 s) and a moment over
-START_HOUR = 8.0           # (even: everyone crosses first, the way it faces)
-FULL_HOURS = 2.0           # the lanes are full: everyone has set off in its own time
-SMALL_FULL_HOURS = 0.4     # off a real GPU: some walk, which is all that is checked there
-SPREAD_MINUTES = 120       # each keeps its hours late by its own share of this: a steady stream
+HOUR = 10.0                # of the day, by a clock at the world's own pace (the sun as good as still)
 APPROACH_END, LANE_END = 0.3, 0.6  # the legs' ends, as fractions of the flight
 APPROACH_FROM = 460.0      # metres up the valley the flight sets out: beyond where figures are drawn
 FIGURE_DISTANCE = 400.0    # metres figures are drawn out to (the default, set all the same)
@@ -132,7 +128,7 @@ def lane_ends():
 
 
 def walkers(count):
-    """`count` walkers: [(home's name, routine, x, z, yaw)], shared among the lanes, half of each
+    """`count` walkers: [(home's name, behaviour, x, z, yaw)], shared among the lanes, half of each
     lane's at home at either end, set out along their side of it to begin with, facing their way."""
     made = []
     per_end = (count + 2 * LANES - 1) // (2 * LANES)  # of a lane's, at home at one end
@@ -146,12 +142,15 @@ def walkers(count):
     return made
 
 
-def routines():
-    """The walkers' days, one a lane and a way: across to its end on the even hours, home on the odd."""
-    def day(place):
-        return [({"from": hour, "activity": "stroll", "at": "place", "name": place, "speed": WALK_SPEED} if hour % 2 == 0 else
-                 {"from": hour, "activity": "stroll", "at": "home", "speed": WALK_SPEED}) for hour in range(24)]
-    return {f"lane_{lane}_to_{way}": day(f"Lane {lane} end {way}") for lane in range(LANES) for way in ("a", "b")}
+def behaviours():
+    """What the walkers do, one a lane and a way, {name: states}: across to its end and, arrived, home
+    and, arrived, across again. By what happens, not by the clock: the stream never thins."""
+    def states(place):
+        return [{"name": "across", "activity": "stroll", "at": "place", "place": place, "speed": WALK_SPEED,
+                 "transitions": [{"to": "back", "when": [{"is": "arrived"}]}]},
+                {"name": "back", "activity": "stroll", "at": "home", "speed": WALK_SPEED,
+                 "transitions": [{"to": "across", "when": [{"is": "arrived"}]}]}]
+    return {f"lane_{lane}_to_{way}": states(f"Lane {lane} end {way}") for lane in range(LANES) for way in ("a", "b")}
 
 
 def leg_of(stop, steps):
@@ -209,15 +208,16 @@ def flight_path(steps, ground):
 
 def added_cost(rounds):
     """What the figures add on the GPU, from `rounds` of the timed passes ({state: {pass: ms}}, a state
-    each of STATES): (the ms they add with the shadows on, over every pass all four timed; what of it
-    is their shadows: that less what they add with the shadows off; the passes that change by 0.05 ms
-    or more with the shadows on, most first), each the median over the rounds. None when nothing was timed."""
-    names = set.intersection(*(set(r[state]) for r in rounds for state in STATES)) if rounds else set()
+    each of STATES): (the ms they add with the shadows on, over every pass timed with them and without;
+    what of it is their shadows: that less what they add with the shadows off, where a pass not timed
+    takes no time (the shadows' own is not run at all); the passes that change by 0.05 ms or more with
+    the shadows on, most first), each the median over the rounds. None when nothing was timed."""
+    names = set.intersection(*(set(r[state]) for r in rounds for state in ("both", "no_figures"))) if rounds else set()
     if not names:
         return None
 
     def over(r, with_, without, which=names):
-        return sum(r[with_][name] - r[without][name] for name in which)
+        return sum(r[with_].get(name, 0.0) - r[without].get(name, 0.0) for name in which)
 
     total = median([over(r, "both", "no_figures") for r in rounds])
     shadows = median([over(r, "both", "no_figures") - over(r, "no_shadows", "neither") for r in rounds])
@@ -274,8 +274,8 @@ def sample(editor, frames):
 
 
 def fill_square(tool, whole, standing, walking):
-    """Fills the square in the valley build_valley made: the lanes' ends, the looks, the routines and
-    the people, and sets the clock. Returns the people's ids."""
+    """Fills the square in the valley build_valley made: the lanes' ends, the looks, the behaviours
+    and the people, and sets the clock. Returns the people's ids."""
     def ground(points):
         return [round(h, 3) for h in ground_heights(tool, points)]
 
@@ -285,20 +285,22 @@ def fill_square(tool, whole, standing, walking):
     town_h = ground([SQUARE])[0]
     for i, (name, tints) in enumerate(LOOKS):
         keep_look(tool, name, whole, tints[0], [SQUARE[0] + 40.0 + i, town_h, SQUARE[1]], list(tints))
-    for name, entries in routines().items():
-        tool("set_routine", {"name": name, "entries": entries})
+    for name, states in behaviours().items():
+        tool("set_behaviour", {"name": name, "states": states})
     people = []
     stood = standing_spots(standing)
     for k, ((x, z, yaw), h) in enumerate(zip(stood, ground([(x, z) for x, z, _ in stood]))):
         people.append({"look": LOOKS[k % len(LOOKS)][0], "position": [x, h, z], "yaw": yaw, "seed": k + 1})
     walk = walkers(walking)
-    for k, ((home, routine, x, z, yaw), h) in enumerate(zip(walk, ground([(x, z) for _, _, x, z, _ in walk]))):
-        people.append({"look": LOOKS[k % len(LOOKS)][0], "home": home, "routine": routine, "position": [x, h, z],
+    for k, ((home, behaviour, x, z, yaw), h) in enumerate(zip(walk, ground([(x, z) for _, _, x, z, _ in walk]))):
+        people.append({"look": LOOKS[k % len(LOOKS)][0], "home": home, "behaviour": behaviour, "position": [x, h, z],
                        "yaw": yaw, "seed": standing + k + 1})
     ids = []
     for i in range(0, len(people), 4096):
         ids += tool("create_people", {"people": people[i:i + 4096]})["ids"]
-    tool("set_time", {"on": True, "hours": START_HOUR, "day": 172, "latitude": 48, "speed": 3600.0 / HOUR_SECONDS})
+    # (At the world's own pace: the sun turns a quarter degree, at which every shadow page is drawn
+    # again, once a minute. A day run fast would have the gate measure that, not the crowd.)
+    tool("set_time", {"on": True, "hours": HOUR, "day": 172, "latitude": 48, "speed": 1.0})
     return ids
 
 
@@ -355,14 +357,10 @@ def main() -> int:
         if tool("get_people", {"limit": 0})["total"] != total:
             failures.append(f"opened, the world has {tool('get_people', {'limit': 0})['total']} people, not {total}")
         tool("set_render_settings", {"voxel_ms_per_frame": 1.0})
-        tool("set_routine_settings", {"spread_minutes": SPREAD_MINUTES})
         tool("set_figure_settings", {"on": True, "distance": FIGURE_DISTANCE, "keep": FIGURE_KEEP})
         started = tool("simulate", {"on": True, "clock": True})
         if not started.get("clock"):
             failures.append("the clock does not run while simulating")
-
-        def hour():
-            return tool("get_time")["shown"]["hours"]
 
         def drawn():
             """(The figures' counts, the people's, how many are drawn: a figure or an entity each.)"""
@@ -376,24 +374,18 @@ def main() -> int:
                 editor.hover(20)
             return drawn()
 
-        # The lanes fill: everyone sets off in its own time over two hours of the square's clock.
-        full = START_HOUR + (FULL_HOURS if real_gpu else SMALL_FULL_HOURS)
-        end = time.monotonic() + 600.0
-        while hour() < full and time.monotonic() < end:
+        # Everyone sets off (a share of the people are looked at a frame).
+        end = time.monotonic() + 120.0
+        while tool("get_travel")["trips"] < walking * 3 // 4 and time.monotonic() < end:
             editor.hover(30)
         figures, held, there = wait_drawn()
         settings = {k: held[k] for k in ("embody_distance", "release_distance", "view_distance", "most")}
-        print(f"crowd_gate: {hour():.2f} h, over the square: {there} of {total} drawn ({figures['figures']} figures, "
+        print(f"crowd_gate: over the square: {there} of {total} drawn ({figures['figures']} figures, "
               f"{figures['walking']} of them walking; {held['embodied']} entities, {held['walking']} walking); "
               f"entities as set: {settings}; figures out to {figures['distance']:.0f} m, at most {figures['most']}")
 
         # What the figures add on the GPU, the whole square in view: drawn and not, with the sun's
-        # shadows and without, in turn. The sun is held meanwhile (it turns fast with this clock, and
-        # every shadow page is drawn again each quarter degree: that would be what is measured). The
-        # walkers walk on: trips go by the simulation's seconds.
-        clock_speed = tool("get_time")["clock"]["speed"]
-        tool("set_time", {"speed": 0.0})
-        editor.hover(120)
+        # shadows and without, in turn.
         rounds, pages = [], {state: [] for state in STATES}
         remade = True
         for _ in range(3):
@@ -412,7 +404,6 @@ def main() -> int:
             rounds.append(timed)
         tool("set_figure_settings", {"on": True})
         tool("set_render_settings", {"shadows": True})
-        tool("set_time", {"speed": clock_speed})
         if not remade:
             failures.append("turned on again, the figures were not all made again in two minutes")
         pages = {state: {key: median([p[key] for p in found]) for key in ("drawn", "waiting", "behind")}
@@ -489,7 +480,12 @@ def main() -> int:
         failures += over
         routine = tool("set_routine_settings")
         if routine["failed"]:
-            failures.append(f"{routine['failed']} people's routines could not send them")
+            failures.append(f"{routine['failed']} people could not be sent where their behaviour has them go")
+        # (The figures' count of poses is of those asked for: one that failed would have its people slide.)
+        baked = tool("get_baked_poses")
+        unbaked = sum(1 for pose in baked["poses"] if pose["state"] != "ready")
+        if unbaked:
+            failures.append(f"{unbaked} of the {len(baked['poses'])} poses asked for are not baked ({baked['baking']} still baking)")
         if overflow:
             failures.append(f"a list or pool overflowed at stops {overflow[:5]}")
         if real_gpu:
