@@ -2,7 +2,10 @@
 // plan, CR1; giant/geometry/pose_bake.h). A distant person needs no
 // skeleton: it will be drawn as an instance of one of these. A pose is
 // asked for by its file, a clip and a time in it ("" the rest pose), and
-// is baked on a worker: the file's skinned mesh cut down once to a few
+// whether it stays in place (a walk's poses: what the clip has carried the
+// hips over the ground by that time is taken out, so a figure put along
+// its way steps where it is; the sway and the rise and fall of a step
+// stay), and is baked on a worker: the file's skinned mesh cut down once to a few
 // thousand triangles (kept for the file's other poses of that size), moved
 // into the pose, built into clusters; the main thread then only hands the
 // result to the renderer, a few meshes a frame (`finish`, a command's
@@ -41,7 +44,7 @@ namespace giant::editor {
 
 class PoseBakes {
 public:
-    static constexpr usize k_max_poses = 256;
+    static constexpr usize k_max_poses = 1024;
     static constexpr u32 k_min_triangles = 64;
     static constexpr u32 k_max_triangles = 20000;
     static constexpr u32 k_default_triangles = 3000;
@@ -60,6 +63,7 @@ public:
         std::string mesh;  // the file, as entities name it
         std::string clip;  // "": the rest pose
         float time = 0.0f; // seconds into the clip (within it)
+        bool in_place = false; // the clip's travel over the ground up to `time` taken out
         u32 triangles = k_default_triangles; // the whole figure is cut to about this
         State state = State::baking;
         std::string problem; // failed: why
@@ -83,11 +87,18 @@ public:
     PoseBakes& operator=(const PoseBakes&) = delete;
 
     // The pose's index, baking begun unless it is kept already (the same
-    // file, clip, time to the millisecond and triangles; a failed one is
-    // begun again). k_no_pose with
+    // file, clip, time to the millisecond, triangles and `in_place`; a
+    // failed one is begun again). k_no_pose with
     // `error`: the file is not loaded or not skinned, it has no such clip,
     // numbers out of range, or k_max_poses are kept.
-    u32 want(std::string_view mesh, std::string_view clip, float time, u32 triangles, std::string& error);
+    u32 want(std::string_view mesh, std::string_view clip, float time, u32 triangles, std::string& error,
+             bool in_place = false);
+    // How far a clip carries the hips over the ground from its start to
+    // its end, in the file's space (y is 0): what a walk's one round
+    // covers. Nothing for a rig whose hips are not found by name
+    // (anim::find_motion_joints), or a clip that stays where it is.
+    // Samples the clip twice: not for every frame.
+    static Vec3 travel(const MeshLibrary::Skinned& skinned, u32 clip);
     // Each frame: finished bakes' meshes go to the renderer, and poses of
     // files imported again are baked again.
     void update();
@@ -122,6 +133,7 @@ private:
         std::shared_ptr<Figure> figure;
         u32 clip = 0; // anim::k_no_clip: the rest pose
         float time = 0.0f;
+        bool in_place = false;
         std::atomic<bool> done{false};
         std::vector<geometry::ClusterMesh> parts; // the job's result
         u32 baked_triangles = 0;

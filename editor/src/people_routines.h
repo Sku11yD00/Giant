@@ -159,6 +159,10 @@ public:
         bool anywhere = false;               // it does it where it stands (`stay`)
     };
     bool activity(const world::Scene& scene, world::PersonId id, Activity& out) const;
+    // Whether one at `at` is where what it does has it be: told to stay
+    // where it is, or within the place it was sent to and `slack` metres
+    // past its edge.
+    static bool there(const Activity& doing, const DVec3& at, double slack);
 
     // What a game save keeps of a person's routine and behaviour: what it
     // last acted on, so that a loaded game does not send everyone again,

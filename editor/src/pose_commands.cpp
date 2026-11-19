@@ -25,6 +25,7 @@ Json pose_json(const PoseBakes::Pose& p, usize index) {
                 {"mesh", p.mesh},
                 {"clip", p.clip},
                 {"time", rounded(p.time, 1000.0)},
+                {"in_place", p.in_place},
                 {"triangles", p.triangles},
                 {"state", PoseBakes::to_string(p.state)}};
     if (p.state == PoseBakes::State::failed) out["problem"] = p.problem;
@@ -49,7 +50,9 @@ void register_pose_commands(ai::CommandRegistry& registry, EditorState& state) {
          "Bakes a skinned mesh file (loaded: import_mesh) held in one pose into a small plain mesh, what a "
          "crowd's distant people are drawn with (they need no skeleton of their own): `mesh` the file, `clip` "
          "one of its clips (\"\" or left out: the rest pose), `time` seconds into the clip (default 0; past its "
-         "end is its last pose), `triangles` what the whole figure is cut down to (64 to 20000, default 3000; "
+         "end is its last pose), `in_place` true takes out what the clip has carried the hips over the ground by "
+         "then (a walk cycle's poses, for figures put along their way: the share of the clip's whole travel "
+         "the time is of its length; the hips are found by name, and a clip that goes nowhere is left as it is), `triangles` what the whole figure is cut down to (64 to 20000, default 3000; "
          "a file drawn in parts shares them out by their triangles, at least 16 each, the parts still meeting "
          "where they met while each can be cut that far so: `seams_kept`). The bake runs on a worker (the "
          "file is cut down once for a size, kept for its other poses of that size; then each pose takes a "
@@ -57,7 +60,7 @@ void register_pose_commands(ai::CommandRegistry& registry, EditorState& state) {
          "`ready` (or `failed` with `problem`); `wait` true waits for it (this thread then helps bake, and "
          "everything is handed over at once: for tools, not for a running game). Returns the pose (as "
          "get_baked_poses lists it), the same one when asked for again (a failed one is tried again). Morph targets stay at their rest weights (a clip's morph "
-         "channels are not baked). At most 256 poses are kept (clear_baked_poses). View state: not saved, not "
+         "channels are not baked). At most 1024 poses are kept (clear_baked_poses). View state: not saved, not "
          "undone.",
          Json{{"type", "object"},
               {"additionalProperties", false},
@@ -68,6 +71,7 @@ void register_pose_commands(ai::CommandRegistry& registry, EditorState& state) {
                 {"time", {{"type", "number"}, {"minimum", 0}, {"maximum", anim::k_max_clip_seconds}}},
                 {"triangles",
                  {{"type", "integer"}, {"minimum", PoseBakes::k_min_triangles}, {"maximum", PoseBakes::k_max_triangles}}},
+                {"in_place", {{"type", "boolean"}}},
                 {"wait", {{"type", "boolean"}}}}}},
          false, // view state
          [&state](const Json& args, CommandContext&) {
@@ -75,7 +79,8 @@ void register_pose_commands(ai::CommandRegistry& registry, EditorState& state) {
              std::string error;
              const u32 index = state.poses->want(args["mesh"].get<std::string>(), args.value("clip", std::string()),
                                                  args.value("time", 0.0f),
-                                                 args.value("triangles", PoseBakes::k_default_triangles), error);
+                                                 args.value("triangles", PoseBakes::k_default_triangles), error,
+                                                 args.value("in_place", false));
              if (index == PoseBakes::k_no_pose) return CommandResult::failure(error);
              if (args.value("wait", false)) state.poses->finish();
              return CommandResult::success(pose_json(state.poses->poses()[index], index));
@@ -83,7 +88,7 @@ void register_pose_commands(ai::CommandRegistry& registry, EditorState& state) {
     GIANT_ASSERT(added, "pose command could not be registered");
     added = registry.add(
         {"get_baked_poses",
-         "The poses baked (bake_pose): `poses`, each with its index `pose`, `mesh`, `clip`, `time`, `triangles` "
+         "The poses baked (bake_pose): `poses`, each with its index `pose`, `mesh`, `clip`, `time`, `in_place`, `triangles` "
          "(asked for), `state` (`baking`, `ready`, `failed` with `problem`) and when ready `parts` (its meshes: "
          "one, or one for each part the file is drawn in), `baked_triangles`, `source_triangles` (the file's), "
          "`error` (metres the cut moved the surface as the simplifier measured it, at bind, the worst part's), "

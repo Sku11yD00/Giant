@@ -369,9 +369,7 @@ void PeopleState::act(const world::Scene& scene) {
             (ragdolls == nullptr || ragdolls->find(entity) == nullptr) && routines->activity(scene, id, doing)) {
             // There: told to stay where it is, or within reach of the place it was sent to (one stopped
             // by those standing there has arrived up to 2 k_walk_end short of its spot: walk).
-            const double reach = doing.place != nullptr ? static_cast<double>(doing.place->radius) + 2.0 * k_walk_end : 0.0;
-            const bool there = doing.anywhere || (doing.place != nullptr && std::hypot(held.at.position.x - doing.place->position.x,
-                                                                                    held.at.position.z - doing.place->position.z) <= reach);
+            const bool there = PeopleRoutines::there(doing, held.at.position, 2.0 * k_walk_end);
             for (usize i = 0; i < shown.size() && there; ++i) {
                 if (shown[i].activity == doing.activity) {
                     wanted = static_cast<u8>(i + 1);
