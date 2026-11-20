@@ -1585,6 +1585,122 @@ GIANT_TEST("rhi: d3d12 UI samples a texture rendered earlier in the frame") {
     GIANT_CHECK(device->validation_errors() == 0);
 }
 
+GIANT_TEST("rhi: d3d12 buffers made with data between frames hold it for the next frame and for a read before it") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    const std::array<u32, 4> ones{1, 2, 3, 4};
+    const std::array<u32, 4> others{9, 8, 7, 6};
+    const std::span<const u8> one_bytes{reinterpret_cast<const u8*>(ones.data()), 16};
+    const std::span<const u8> other_bytes{reinterpret_cast<const u8*>(others.data()), 16};
+    BufferDesc readback_desc;
+    readback_desc.size = 16;
+    readback_desc.usage = BufferUsage::none;
+    readback_desc.memory = Memory::readback;
+    const BufferHandle readback = device->create_buffer(readback_desc);
+    BufferDesc desc;
+    desc.size = 16; // (placed: its room is another buffer's once it is destroyed and the GPU is done)
+    desc.usage = BufferUsage::shader_read;
+    // Frames run from here: what is made between them is copied with the next (no wait for the GPU).
+    for (u32 i = 0; i <= Device::k_frames_in_flight; ++i) {
+        const bool begun = device->begin_frame(nullptr) != nullptr;
+        GIANT_CHECK(begun);
+        if (!begun) {
+            return;
+        }
+        device->end_frame();
+    }
+    // Read back before any frame: the copy is done first.
+    const BufferHandle read_first = device->create_buffer(desc, one_bytes);
+    GIANT_CHECK(as_u32(device->read_buffer(read_first)) == (std::vector<u32>{1, 2, 3, 4}));
+    // Used by the next frame: copied before that frame's own list. One destroyed before its copy
+    // is let go with it.
+    for (u32 round = 0; round < 4; ++round) {
+        const BufferHandle gone = device->create_buffer(desc, one_bytes);
+        device->destroy(gone);
+        const BufferHandle used = device->create_buffer(desc, other_bytes);
+        const BufferHandle kept = device->create_buffer(desc, one_bytes);
+        CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd == nullptr) {
+            return;
+        }
+        cmd->barrier(used, ResourceState::copy_source);
+        cmd->copy_buffer(readback, 0, used, 0, 16);
+        device->end_frame();
+        GIANT_CHECK(as_u32(device->read_buffer(readback)) == (std::vector<u32>{9, 8, 7, 6}));
+        GIANT_CHECK(as_u32(device->read_buffer(kept)) == (std::vector<u32>{1, 2, 3, 4})); // frames later, still
+        device->destroy(used);
+        device->destroy(kept);
+    }
+    // Data larger than the staging the small ones share, between small ones, of a size that is no
+    // multiple of anything: each holds its own.
+    {
+        std::vector<u8> large((3u << 20) + 4);
+        for (usize i = 0; i < large.size(); ++i) {
+            large[i] = static_cast<u8>(i * 31 + (i >> 11));
+        }
+        BufferDesc large_desc = desc;
+        large_desc.size = large.size();
+        BufferDesc odd_desc = desc;
+        odd_desc.size = 20;
+        const std::array<u8, 20> odd{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+        const BufferHandle before = device->create_buffer(odd_desc, odd);
+        const BufferHandle big = device->create_buffer(large_desc, large);
+        const BufferHandle after = device->create_buffer(desc, other_bytes);
+        GIANT_CHECK(before.valid() && big.valid() && after.valid());
+        GIANT_CHECK(device->begin_frame(nullptr) != nullptr);
+        device->end_frame();
+        GIANT_CHECK(device->read_buffer(big) == large);
+        GIANT_CHECK(device->read_buffer(before) == std::vector<u8>(odd.begin(), odd.end()));
+        GIANT_CHECK(as_u32(device->read_buffer(after)) == (std::vector<u32>{9, 8, 7, 6}));
+        device->destroy(before);
+        device->destroy(big);
+        device->destroy(after);
+    }
+    // Made and destroyed before any frame, over and over, nothing kept: their staging goes with
+    // them (it is not held for a copy that never comes).
+    {
+        std::vector<u8> large(2u << 20, u8{7});
+        BufferDesc large_desc = desc;
+        large_desc.size = large.size();
+        const DeviceCounts start = device->counts();
+        for (u32 i = 0; i < 40; ++i) {
+            device->destroy(device->create_buffer(large_desc, large));
+        }
+        const DeviceCounts end = device->counts();
+        GIANT_CHECK(end.created - start.created >= 40);
+        // (Each one's staging is let go at once; the buffers themselves wait for the GPU.)
+        GIANT_CHECK(end.released - start.released >= 40);
+        const BufferHandle still = device->create_buffer(desc, one_bytes); // (deferred still: room was not used up)
+        GIANT_CHECK(device->begin_frame(nullptr) != nullptr);
+        device->end_frame();
+        GIANT_CHECK(as_u32(device->read_buffer(still)) == (std::vector<u32>{1, 2, 3, 4}));
+        device->destroy(still);
+    }
+    // More at once than is held for a frame (a world opened by a command): the rest are waited
+    // for, as at load time, and every one holds its data.
+    std::vector<BufferHandle> many;
+    for (u32 i = 0; i < 300; ++i) {
+        const std::array<u32, 4> own{i, i + 1, i + 2, i + 3};
+        many.push_back(device->create_buffer(desc, {reinterpret_cast<const u8*>(own.data()), 16}));
+    }
+    GIANT_CHECK(device->begin_frame(nullptr) != nullptr);
+    device->end_frame();
+    bool all = true;
+    for (u32 i = 0; i < 300; ++i) {
+        all = all && as_u32(device->read_buffer(many[i])) == (std::vector<u32>{i, i + 1, i + 2, i + 3});
+        device->destroy(many[i]);
+    }
+    GIANT_CHECK(all);
+    device->destroy(read_first);
+    device->destroy(readback);
+    device->wait_idle();
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
 GIANT_TEST("rhi: d3d12 uploads initial data inside a frame, used in that frame, without waiting") {
     auto device = warp_device();
     if (device == nullptr) {

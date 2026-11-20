@@ -79,7 +79,28 @@ follow without touching the renderer.
   120 frames; buffer data is split across chunks, so only a texture larger
   than a chunk needs one of its own) and is copied by the frame's upload list,
   submitted on its own just before the frame's list on the same queue.
-  Outside a frame (load time) the copy is still waited for.
+  Outside a frame, before any frame has run (load time), the copy is
+  waited for. Between frames once frames run (what an update before
+  `begin_frame` makes: a character's skinned copy, a cloth's mesh, an
+  imported mesh), a buffer's data is staged in chunks of 1 MiB the
+  copies share (people coming near make a hundred small buffers in one
+  update: one allocation, not one each; larger data has a chunk of its
+  own) and copied by the next frame's upload list, first, so the main
+  thread does not wait for the GPU while it is busy with the frame before
+  (D3D12 `m_deferred`; this wait was the living gate's slow frames, 9 ms
+  whenever people came near, as read from the code: the gate on a real
+  GPU is the proof). The chunks are held until that frame, and none may
+  begin for a long while (a minimised window, a broken swap chain), so
+  at most 256 copies and 64 MiB are held: past that (a world opened or
+  many meshes imported by a command) a copy is waited for as at load
+  time. An immediate submit before that frame (a read-back, a waited
+  write) submits the held copies first, on their own, so what is done to
+  a buffer keeps its order and the buffers are back in their common state
+  for what follows; a buffer destroyed before its copy is not copied
+  into. The chunks count in `DeviceCounts` (created, allocations,
+  released), not in `upload_bytes`. A texture made with its contents
+  between frames is still waited for (only the textures `wait` command
+  and load time do that; streamed textures upload inside the frame).
   `FrameStats::upload_bytes` counts what a frame staged; the caller keeps
   it within its budget.
 - **Texture formats, mips and layers (photoreal part 3a-1).** Besides the
@@ -6242,8 +6263,9 @@ over the target frame time). Where it stands:
   all their metadata (clusters, groups, LOD tree) in that frame (the
   world's cell streaming spreads it, N3); the streamer's zero-filled usage
   table, when it grows, is uploaded outside the streaming budget (rare: on
-  doubling, and small); the editor's mesh import runs between frames, so
-  its `add_mesh` still takes the load-time path that waits for the GPU, and
+  doubling, and small); the editor's mesh import runs between frames (its
+  buffers no longer wait for the GPU once frames run, see Uploads; a
+  texture made there still does), and
   it reads and clusters files on the main thread (editor only today; a
   streamed world imports every mesh it lists when it opens, so cells never
   import while streaming; moving imports onto jobs is still to come).

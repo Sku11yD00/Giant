@@ -87,7 +87,11 @@ enum class FramePhase : u8 {
     ui,          // panels
     weather,     // weather and the player's input
     physics,     // bodies following the scene, stepping
-    animation,   // skinned entities' clips moving on, their poses; cloth
+    animation,   // skinned entities' clips moving on, their poses, what bullets meet of them
+    cloth,       // cloth, hair and hanging things in the wind
+    effects,     // particles: the scene's, those events throw up, the weather's
+    nav,         // nav tiles taken and started, searches moved on
+    audio,       // what is heard: the weather, the water, the mix's orders
     begin_frame, // waiting for a frame in flight to finish
     travel,      // the people's trips: ways looked for, those arrived
     senses,      // what the people hear and see
@@ -106,7 +110,7 @@ enum class FramePhase : u8 {
     count
 };
 inline constexpr std::array<const char*, static_cast<usize>(FramePhase::count)> k_frame_phase_names = {
-    "events",     "mcp",     "scripts", "ui",     "weather", "physics",   "animation", "begin_frame", "travel",
+    "events",     "mcp",     "scripts", "ui",     "weather", "physics",   "animation", "cloth", "effects", "nav", "audio", "begin_frame", "travel",
     "senses",     "routines", "people", "terrain",
     "far_ground", "scatter", "scene",   "render", "ui_draw", "end_frame", "streaming", "tail",        "other"};
 static_assert(k_frame_phase_names.back() != nullptr, "a name for every phase");
