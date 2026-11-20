@@ -81,6 +81,8 @@ def weighted_median(pairs):
 
 
 # Waiting on the GPU or the display, not work of the main thread's own.
+# (A wait in any other phase, as an upload waited for between frames was,
+# shows as stalled too: the phase blamed says where.)
 WAIT_PHASES = ("begin_frame", "end_frame", "tail")
 # A hitch with this much wall time unaccounted for by CPU work and those
 # waits was stalled (not busy).
@@ -118,8 +120,9 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
     Editor.fly gives them, `slow` its slow frames' phases and `typicals` each
     sample's typical frame (Editor.fly's self.slow, self.typicals). Lines
     naming the phase most over its typical time in each hitch, and how much
-    of a hitch the thread spent neither working nor waiting on the GPU
-    (preempted, or blocked on a lock or the disk). With the 99th percentile
+    of a hitch the thread spent neither working nor waiting at a frame's
+    begin or end (preempted, blocked on a lock or the disk, or waiting on
+    the GPU elsewhere). With the 99th percentile
     over its limit (uneven pacing), the same of the frames over that limit
     that are no hitches, when `slow` holds every frame over it
     (`slow_over_ms`, Editor.fly's self.slow_over_ms) and the typical frame is
@@ -175,8 +178,8 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
         if inner_blamed:
             lines.append(f"  inside render, most over: {counts(inner_blamed)}")
         stalls = sum(1 for t in stalled if t > STALL_MS)
-        lines.append(f"  the main thread neither working nor waiting on the GPU (preempted, or blocked on a lock or "
-                     f"the disk) over {STALL_MS:.0f} ms in {stalls} of the {len(frames)}, worst {max(stalled):.1f} ms; "
+        lines.append(f"  the main thread neither working nor waiting at a frame's begin or end (preempted, blocked on a "
+                     f"lock or the disk, or waiting on the GPU elsewhere) over {STALL_MS:.0f} ms in {stalls} of the {len(frames)}, worst {max(stalled):.1f} ms; "
                      f"a typical frame's CPU time {typical_cpu:.1f} ms")
         if any(blamed.get(n) for n in ("begin_frame", "end_frame")):
             lines.append("  (begin_frame or end_frame: waiting on the GPU, the driver or the display, "

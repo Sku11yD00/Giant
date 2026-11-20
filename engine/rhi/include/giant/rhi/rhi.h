@@ -519,8 +519,12 @@ public:
     // handle. Destroying is deferred until the GPU no longer uses the
     // resource, so it is safe at any time, even mid-frame.
     virtual std::unique_ptr<SwapChain> create_swap_chain(const SwapChainDesc& desc) = 0;
-    // `initial` (optional) fills the start of the buffer. Outside a frame
-    // (load time) the copy is waited for. Inside a frame (streaming) nothing
+    // `initial` (optional) fills the start of the buffer. Outside a frame,
+    // before any frame has run (load time), the copy is waited for; between
+    // frames a device may leave it to the next frame (D3D12 does, up to a
+    // limit, so an update before begin_frame does not wait for the GPU):
+    // the buffer is ready for anything that frame records, and for a
+    // read-back before it. Inside a frame (streaming) nothing
     // waits: the data is staged in per-frame memory and copied on the GPU
     // before the frame's work, so the buffer is ready for anything the frame
     // records. Uploads inside a frame are counted in FrameStats::upload_bytes;

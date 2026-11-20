@@ -300,6 +300,10 @@ GIANT_TEST("editor: frame phases name the slow frames' parts") {
     GIANT_CHECK(last["slow"][1]["window"] == true && last["slow"][2]["window"] == false);
     GIANT_CHECK(frame_phase_name(at(FramePhase::count)) == "render/cells");
     GIANT_CHECK(frame_phase_name(at(FramePhase::tail)) == "tail");
+    // (What runs before a frame begins, each its own so a slow frame names one of them.)
+    GIANT_CHECK(frame_phase_name(at(FramePhase::animation)) == "animation" && frame_phase_name(at(FramePhase::cloth)) == "cloth" &&
+                frame_phase_name(at(FramePhase::effects)) == "effects" && frame_phase_name(at(FramePhase::nav)) == "nav" &&
+                frame_phase_name(at(FramePhase::audio)) == "audio");
     // (The people's four, which the living-world gate sums by name.)
     GIANT_CHECK(frame_phase_name(at(FramePhase::travel)) == "travel" && frame_phase_name(at(FramePhase::senses)) == "senses" &&
                 frame_phase_name(at(FramePhase::routines)) == "routines" && frame_phase_name(at(FramePhase::people)) == "people" &&

@@ -528,6 +528,12 @@ private:
     // the GPU finished it.
     ID3D12GraphicsCommandList* begin_immediate();
     bool submit_immediate();
+    struct DeferredCopy;
+    // The copies of m_deferred recorded on `list` (a frame's upload list, or the immediate one).
+    void record_deferred(ID3D12GraphicsCommandList* list, bool in_frame);
+    // Where to write `size` bytes to be copied by the next frame, `copy` filled in but for its
+    // buffer; null when too much is held already (or no memory): wait for the copy instead.
+    u8* stage_deferred(u64 size, DeferredCopy& copy);
     ComPtr<ID3D12Resource> create_committed_buffer(D3D12_HEAP_TYPE heap, u64 size,
                                                    D3D12_RESOURCE_STATES state,
                                                    D3D12_RESOURCE_FLAGS flags, const char* name);
@@ -580,7 +586,7 @@ private:
     std::vector<Retired> m_retired_this_frame;
 
     std::array<Frame, k_frames> m_frame_slots;
-    u64 m_frame_index = 0; // frames begun
+    u64 m_frame_index = 0; // frames ended
     ComPtr<ID3D12GraphicsCommandList> m_list;
     D3D12CommandList m_commands;
     D3D12SwapChain* m_swap_chain = nullptr; // of the frame being recorded
@@ -595,6 +601,40 @@ private:
     // recorded (open while m_upload_open), on the slot's upload allocator.
     ComPtr<ID3D12GraphicsCommandList> m_upload_list;
     bool m_upload_open = false;
+    // Initial data of buffers created between frames once frames run (a
+    // character's copy, a cloth's mesh made by an update before
+    // begin_frame): staged in chunks of their own and copied by the next
+    // frame's upload list, before that frame's own list, so the main thread
+    // does not wait for the GPU, which is busy with the frame before. An
+    // immediate submit before then (a read-back, a write) submits them
+    // first, so the order of what is done to a buffer holds.
+    struct DeferredCopy {
+        ComPtr<ID3D12Resource> to;
+        ID3D12Resource* staging = nullptr; // of m_deferred_chunks
+        u64 offset = 0;
+        u64 size = 0;
+    };
+    // Shared by the copies (people coming near make a hundred small buffers in one update: one
+    // allocation, not one each), mapped while held.
+    struct DeferredChunk {
+        ComPtr<ID3D12Resource> resource;
+        u8* mapped = nullptr;
+        u64 size = 0;
+        u64 used = 0;
+    };
+    std::vector<DeferredCopy> m_deferred;
+    std::vector<DeferredChunk> m_deferred_chunks;
+    // The chunks are held until that frame (or the next immediate submit), and no frame may begin
+    // for a long while (a minimised window): past this much or this many (a world opened or a big
+    // mesh imported by a command between frames) the copy is waited for as at load time, which
+    // copies and frees them all.
+    static constexpr u64 k_deferred_max_bytes = 64ull << 20;
+    static constexpr usize k_deferred_max_count = 256;
+    static constexpr u64 k_deferred_chunk_bytes = 1ull << 20;
+    static constexpr u64 k_deferred_alignment = 16;
+    u64 m_deferred_bytes = 0; // of the chunks
+    // Staging of copies an immediate submit recorded: let go once it has run.
+    std::vector<ComPtr<ID3D12Resource>> m_immediate_staging;
 
     u64 m_timestamp_frequency = 0; // ticks per second; 0: no GPU timing
     std::vector<GpuTiming> m_gpu_timings; // of the newest finished frame
@@ -1072,7 +1112,78 @@ ID3D12GraphicsCommandList* D3D12Device::begin_immediate() {
     m_immediate_allocator->Reset();
     m_immediate_list->Reset(m_immediate_allocator.Get(), nullptr);
     bind_globals(m_immediate_list.Get());
+    if (!m_deferred.empty()) {
+        // What was to be copied before this, first, in a submission of its own: the buffers copied
+        // into decay back to COMMON when it ends, so this list may read them (a copy's source)
+        // without a barrier, as their tracked state says. Same queue, so in order; the caller's
+        // submit waits for both. (The list is reset on the same allocator: only the allocator must
+        // not be reset while the GPU runs what it holds.)
+        record_deferred(m_immediate_list.Get(), false);
+        if (check_gpu(m_immediate_list->Close(), "Close(deferred copies)")) {
+            ID3D12CommandList* lists[] = {m_immediate_list.Get()};
+            m_queue->ExecuteCommandLists(1, lists);
+        } else if (!m_lost) {
+            // Buffers would be left without their contents: nothing drawn from here on can be trusted.
+            log_error("rhi", "d3d12: buffers' contents could not be copied; treating the device as lost");
+            m_lost = true;
+        }
+        m_immediate_list->Reset(m_immediate_allocator.Get(), nullptr);
+        bind_globals(m_immediate_list.Get());
+    }
     return m_immediate_list.Get();
+}
+
+void D3D12Device::record_deferred(ID3D12GraphicsCommandList* list, bool in_frame) {
+    for (const DeferredCopy& copy : m_deferred) {
+        // Buffers are in COMMON, which promotes to COPY_DEST for the copy and decays when the
+        // list's submission ends (the frame's own list runs after its upload list's).
+        list->CopyBufferRegion(copy.to.Get(), 0, copy.staging, copy.offset, copy.size);
+    }
+    for (DeferredChunk& chunk : m_deferred_chunks) {
+        if (in_frame) {
+            Retired r; // (freed once this frame's fence is reached)
+            r.resource = std::move(chunk.resource);
+            retire(std::move(r));
+        } else {
+            m_immediate_staging.push_back(std::move(chunk.resource));
+        }
+    }
+    m_deferred.clear();
+    m_deferred_chunks.clear();
+    m_deferred_bytes = 0;
+}
+
+u8* D3D12Device::stage_deferred(u64 size, DeferredCopy& copy) {
+    if (m_deferred.size() >= k_deferred_max_count) {
+        return nullptr;
+    }
+    const u64 aligned = (size + k_deferred_alignment - 1) / k_deferred_alignment * k_deferred_alignment;
+    if (m_deferred_chunks.empty() || m_deferred_chunks.back().size - m_deferred_chunks.back().used < aligned) {
+        DeferredChunk chunk;
+        chunk.size = std::max(aligned, k_deferred_chunk_bytes);
+        if (m_deferred_bytes + chunk.size > k_deferred_max_bytes) {
+            return nullptr;
+        }
+        chunk.resource = create_committed_buffer(D3D12_HEAP_TYPE_UPLOAD, chunk.size, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                 D3D12_RESOURCE_FLAG_NONE, "between-frames staging");
+        void* mapped = nullptr;
+        const D3D12_RANGE no_read{0, 0};
+        if (chunk.resource == nullptr || !check(chunk.resource->Map(0, &no_read, &mapped), "Map(between-frames staging)")) {
+            return nullptr;
+        }
+        chunk.mapped = static_cast<u8*>(mapped);
+        m_deferred_bytes += chunk.size;
+        ++m_counts.created; // (memory made on the frame's thread, as a frame's chunk is counted)
+        ++m_counts.allocations;
+        m_deferred_chunks.push_back(std::move(chunk));
+    }
+    DeferredChunk& chunk = m_deferred_chunks.back();
+    copy.staging = chunk.resource.Get();
+    copy.offset = chunk.used;
+    copy.size = size;
+    u8* const at = chunk.mapped + chunk.used;
+    chunk.used += aligned;
+    return at;
 }
 
 void D3D12Device::decay_buffer_states() {
@@ -1085,14 +1196,23 @@ void D3D12Device::decay_buffer_states() {
 }
 
 bool D3D12Device::submit_immediate() {
-    if (!check_gpu(m_immediate_list->Close(), "Close(immediate)")) {
+    const bool closed = check_gpu(m_immediate_list->Close(), "Close(immediate)");
+    if (closed) {
+        ID3D12CommandList* lists[] = {m_immediate_list.Get()};
+        m_queue->ExecuteCommandLists(1, lists);
+    } else if (m_immediate_staging.empty()) {
         return false;
     }
-    ID3D12CommandList* lists[] = {m_immediate_list.Get()};
-    m_queue->ExecuteCommandLists(1, lists);
+    // (With the list not closed, still for the held copies begin_immediate submitted: their
+    // staging and the allocator are not to be touched while the GPU runs them.)
     wait_for(signal());
+    if (!m_lost) {
+        // (The GPU is done with them; a lost device's are kept, as all it holds.)
+        m_counts.released += static_cast<u32>(m_immediate_staging.size());
+        m_immediate_staging.clear();
+    }
     free_retired();
-    return !m_lost;
+    return closed && !m_lost;
 }
 
 StagingChunk* D3D12Device::add_staging_chunk(Frame& frame, u64 size, bool kept) {
@@ -1427,22 +1547,32 @@ BufferHandle D3D12Device::create_buffer(const BufferDesc& desc, std::span<const 
                 m_stats.upload_bytes += initial.size();
             }
         } else {
-            // Load time: a staging buffer of its own, and wait for the copy.
-            ComPtr<ID3D12Resource> staging =
-                create_committed_buffer(D3D12_HEAP_TYPE_UPLOAD, initial.size(),
-                                        D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE,
-                                        "staging");
-            void* mapped = nullptr;
-            const D3D12_RANGE no_read{0, 0};
-            ok = staging != nullptr && check(staging->Map(0, &no_read, &mapped), "Map(staging)");
-            if (ok) {
-                std::memcpy(mapped, initial.data(), initial.size());
-                staging->Unmap(0, nullptr);
-                ID3D12GraphicsCommandList* list = begin_immediate();
-                // Buffers start in COMMON, which decays to COPY_DEST for a copy.
-                list->CopyBufferRegion(b.resource.Get(), 0, staging.Get(), 0, initial.size());
-                // Back in COMMON after the queue finished: that is our state.
-                ok = submit_immediate();
+            DeferredCopy copy;
+            u8* const held = m_frame_index > 0 ? stage_deferred(initial.size(), copy) : nullptr;
+            if (held != nullptr) {
+                // Between frames: copied by the next frame's upload list (m_deferred). Nothing waits.
+                std::memcpy(held, initial.data(), initial.size());
+                copy.to = b.resource;
+                m_deferred.push_back(std::move(copy));
+            } else {
+                // Load time (no frame yet), or too much held already: a staging buffer of its
+                // own, and wait for the copy (and for those held, which begin_immediate submits
+                // first).
+                ComPtr<ID3D12Resource> staging =
+                    create_committed_buffer(D3D12_HEAP_TYPE_UPLOAD, initial.size(), D3D12_RESOURCE_STATE_GENERIC_READ,
+                                            D3D12_RESOURCE_FLAG_NONE, "staging");
+                void* mapped = nullptr;
+                const D3D12_RANGE no_read{0, 0};
+                ok = staging != nullptr && check(staging->Map(0, &no_read, &mapped), "Map(staging)");
+                if (ok) {
+                    std::memcpy(mapped, initial.data(), initial.size());
+                    staging->Unmap(0, nullptr);
+                    ID3D12GraphicsCommandList* list = begin_immediate();
+                    // Buffers start in COMMON, which promotes to COPY_DEST for a copy.
+                    list->CopyBufferRegion(b.resource.Get(), 0, staging.Get(), 0, initial.size());
+                    // Back in COMMON after the queue finished: that is our state.
+                    ok = submit_immediate();
+                }
             }
         }
     }
@@ -1459,6 +1589,19 @@ void D3D12Device::destroy(BufferHandle handle) {
         return;
     }
     DxBuffer b = m_buffers.take(handle);
+    // (Never copied into after all: its memory may be another buffer's by the next frame.)
+    const auto pending = std::find_if(m_deferred.begin(), m_deferred.end(),
+                                      [&b](const DeferredCopy& copy) { return copy.to.Get() == b.resource.Get(); });
+    if (pending != m_deferred.end()) {
+        m_deferred.erase(pending); // (its place in the chunk goes with the chunk)
+        if (m_deferred.empty()) {
+            // Nothing left to copy: the chunks, which the GPU never saw, go now (nothing else
+            // would let them go until a copy came that was kept).
+            m_counts.released += m_deferred_chunks.size();
+            m_deferred_chunks.clear();
+            m_deferred_bytes = 0;
+        }
+    }
     Retired r;
     r.resource = std::move(b.resource);
     r.placed = b.placed;
@@ -2121,6 +2264,13 @@ CommandList* D3D12Device::begin_frame(SwapChain* swap_chain) {
     m_recording = true;
     m_stats = {};
     m_commands.begin(m_list.Get(), &frame);
+    // What was created with data since the last frame, copied before this frame's own list
+    // (kept for the next frame if the upload list cannot be had).
+    if (!m_deferred.empty()) {
+        if (ID3D12GraphicsCommandList* list = upload_list()) {
+            record_deferred(list, true);
+        }
+    }
     return &m_commands;
 }
 

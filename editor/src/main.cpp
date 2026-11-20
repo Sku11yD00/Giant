@@ -1108,9 +1108,11 @@ int run(const Options& options) {
         }
         animation.update(state.scene, meshes, scene_frame.take_for_animation(), game_delta);
         hit_targets.update(state.scene, meshes, animation); // bullets meet this pose next frame
+        mark(editor::FramePhase::animation);
         cloth.update(weather.wind(), state.camera.position, game_delta); // drawn as it moved next frame
         hair.update(weather.wind(), state.camera.position, game_delta);  // likewise
         swing.update(weather.wind(), state.camera.position, game_delta);
+        mark(editor::FramePhase::cloth);
         editor::event_effects_frame(state, game_delta); // this frame's dust thrown up, running feet
         effects.follow(state.scene, state.scene.untaken_changes());
         particle_seconds += game_delta; // (a frame not drawn: carried to the next)
@@ -1127,7 +1129,9 @@ int run(const Options& options) {
                 },
                 [&pw](const DVec3& p) { return editor::WeatherEffects::sheltered_in(pw, p); });
         }
+        mark(editor::FramePhase::effects);
         nav.update(state.scene); // tiles taken and started, searches moved on (bounded)
+        mark(editor::FramePhase::nav);
         audio.set_weather(weather.shown() ? &*weather.shown() : nullptr, weather.ground());
         {
             // The water heard round the camera (as the physics has it: the sea with its swell).
@@ -1140,7 +1144,7 @@ int run(const Options& options) {
                 wind, [&pw, &state](double level) { return pw.water_reaches(state.camera.position, level); }));
         }
         audio.update(state.camera, delta); // heard from the camera (where the player's eyes are in play)
-        mark(editor::FramePhase::animation);
+        mark(editor::FramePhase::audio);
         // The game's UI from this frame's camera (the player's eyes, in play): markers meet the scene drawn.
         game_ui.update(state, delta, static_cast<float>(window->pixel_width()),
                        static_cast<float>(window->pixel_height())); // (counted with the panels)
