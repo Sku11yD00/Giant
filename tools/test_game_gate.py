@@ -23,7 +23,8 @@ def main():
     # A loading screen: stood once more, gone, its bar full, in time on a real GPU.
     def loading(**changed):
         return {"loading": {"shown": 2, "on": False, "progress": 1.0, "game": False, "cells": 0, "textures": 0,
-                            "ground": 0, **changed}}
+                            "ground": 0, "scatter": 0, "far_ground": 0, "poses": 0, "voxels": 0, "shadows": 0, "geometry": 0,
+                            **changed}}
 
     good, world = loading(), {"loaded": 9, "reading": 0, "waiting": 0, "ground_building": 0}
     check(len(loading_failures("x", good, dict(world, reading=2), 5.0, 2, True)) == 1, "cells being read as play begins fails")
@@ -33,6 +34,10 @@ def main():
     check(len(loading_failures("x", loading(on=True), world, 5.0, 2, True)) == 1, "still standing fails")
     check(len(loading_failures("x", loading(progress=0.7), world, 5.0, 2, True)) == 1, "ended by its longest wait fails")
     check(len(loading_failures("x", loading(cells=3), world, 5.0, 2, True)) == 1, "cells still to come fails")
+    check(len(loading_failures("x", loading(scatter=2, poses=1), world, 5.0, 2, True)) == 1, "scatter or poses still to come fails")
+    check(len(loading_failures("x", loading(far_ground=4), world, 5.0, 2, True)) == 1, "far ground still to come fails")
+    check(not loading_failures("x", loading(shadows=3, voxels=9), world, 5.0, 2, True),
+          "the GPU still at it (waited for no longer than its most) passes")
     check(len(loading_failures("x", good, dict(world, loaded=0), 5.0, 2, True)) == 1, "no cell in fails")
     check(len(loading_failures("x", good, world, 500.0, 2, True)) == 1, "too long on a real GPU fails")
     check(not loading_failures("x", good, world, 500.0, 2, False), "how long means nothing without one")

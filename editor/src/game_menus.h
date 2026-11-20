@@ -120,23 +120,38 @@ public:
     // A game being loaded or about to be played, while it and the world round the player come in
     // (the loading screen): what is still to come, and how far along it is. Play begins (a game
     // loaded in play: goes on) once nothing has been coming for k_quiet_frames frames, or after
-    // k_most_loading_seconds of frames whatever is still to come (logged).
+    // k_most_loading_seconds of frames whatever is still to come (logged). What the GPU still has
+    // to do of it (`voxels`, `light`, `shadows`, `geometry`) and the bodies are waited for only once the
+    // rest is in, and each for no longer than its own most (some may never be done: a pool full).
     struct Loading {
         bool on = false;
         bool game = false;   // the saved game itself is still being read and put in
         u32 cells = 0;       // the world's cells streaming is still bringing (WorldStreaming::coming)
         u32 textures = 0;    // waiting to cook, cooking, waiting to upload, finer levels being read
         u32 ground = 0;      // terrain tiles whose mesh is still to build
+        u32 scatter = 0;     // cells whose scatter (grass, trees, rocks) is waiting to be placed, or being placed
+        u32 far_ground = 0;  // far ground chunks being read or built
+        u32 poses = 0;       // poses being baked (those far-off people are drawn in)
         bool bodies = false; // what the player would stand on or in is still being made (entities' bodies, ground, trunks)
+        // The last frame's, of the renderer: voxel bricks to build (the far world) and not lit yet
+        // (`light`; neither while the voxel world is off), sun shadow pages never drawn or long behind,
+        // cluster groups of geometry asked for and not loaded with the ground's tiles waiting for room.
+        u32 voxels = 0;
+        u32 light = 0;
+        u32 shadows = 0;
+        u32 geometry = 0;
         float progress = 0.0f; // 0 to 1, never back: the share of all that was to come that is in
         u32 shown = 0;       // how many times the screen has stood since the program began
     };
     const Loading& loading() const { return m_arriving; }
     static constexpr u32 k_quiet_frames = 10;
     static constexpr double k_most_loading_seconds = 120.0;
+    static constexpr double k_most_gpu_seconds = 10.0; // the GPU's own (voxels, shadows, geometry), once the rest is in
     // (The bodies alone are waited for no longer than play itself waits for them, PlayState::k_most_placing_seconds: some never come.)
     // Tests: the loading screen as if `seconds` more of frames had passed.
     void loading_waited(double seconds) { m_arriving_seconds += seconds; }
+    // Tests: as if the GPU's own had been waited for `seconds` more.
+    void loading_gpu_waited(double seconds) { m_arriving_gpu += seconds; }
     // The slot list still being read; wait() blocks until it is in (tests).
     bool reading() const { return m_reading; }
     void wait();
@@ -173,10 +188,11 @@ private:
     u64 m_arriving_done = 0;
     u32 m_arriving_quiet = 0;
     u64 m_arriving_streamed = 0; // WorldStreaming::updates when last looked at
-    double m_arriving_seconds = 0.0, m_arriving_bodies = 0.0;
+    double m_arriving_seconds = 0.0, m_arriving_bodies = 0.0, m_arriving_gpu = 0.0;
     std::chrono::steady_clock::time_point m_arriving_frame;
     void show_loading();  // the screen stands from now
     void arrive();        // each frame while it is on
+    std::string gpu_left() const; // what the GPU still had to do, for the log
     bool start_play();    // play itself, from where the camera is
     Settings m_written; // as the file has them (or will, once the job under way is done)
     std::string m_file;

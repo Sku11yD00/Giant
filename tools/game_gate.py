@@ -28,8 +28,8 @@ runs back the way it came. It passes when:
   ground, and the game taken up again is where it was saved;
 - streaming never failed.
 How long each loading took and what was still behind when play began
-(the voxel world, its light, the shadows: not waited for by the loading
-screen yet, so the first run may show them as slow frames) is printed.
+(the voxel world, its light, the shadows: waited for by the loading
+screen for at most 10 s) is printed.
 Do not touch the mouse or the keys while it runs: they are the player's.
 
 On CI (the null device) it checks all but the speed.
@@ -122,7 +122,7 @@ def loading_failures(name, menu, world, seconds, shown, real_gpu):
     """What is wrong with a loading that ended (`menu`: get_menu and `world`: get_world as play began)."""
     loading = menu["loading"]
     failures = []
-    still = {k: loading[k] for k in ("game", "cells", "textures", "ground") if loading[k]}
+    still = {k: loading[k] for k in ("game", "cells", "textures", "ground", "scatter", "far_ground", "poses") if loading[k]}
     if still:
         failures.append(f"{name}: play began with what the loading screen counts still to come: {still}")
     if world["loaded"] == 0:

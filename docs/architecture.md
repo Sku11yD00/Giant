@@ -4962,9 +4962,9 @@ that could not be had is asked for again only after a file is imported
 or the poses are cleared; poses are not cleared when another scene
 or world is opened, so a long session over many worlds with other
 looks creeps towards the 1,024 (past it a new look's far people are
-not drawn: `looks_without`); and a game's loading screen does not
-wait for poses being baked, so far people may appear a moment after
-play begins.
+not drawn: `looks_without`). A game's loading screen waits for the
+poses being baked (`poses`), but a look's walk and activity poses are
+first asked for when someone of it walks or acts, in play.
 
 ### Figures walk (CR3)
 
@@ -5732,14 +5732,28 @@ and load, settings), which also route the real mouse and keys to screens.
   edit, and not read yet, being read, or read and waiting for their
   frame's budget; not one whose file failed); the `textures` waiting to cook, cooking, waiting
   to upload or reading finer levels (`TextureLibrary::pending`); the
-  `ground` tiles whose mesh is still to build (a loaded game's dented
+  `ground` tiles whose mesh is still to build (not those built and
+  waiting for room in the renderer's geometry pool: those are the
+  GPU's own, below; a loaded game's dented
   tiles are put in as their cells come and built then; those waiting
-  for cells far off, which never come, are not counted); and, once all
-  of those are in and unless the game is playing already, the `bodies`
-  the player would stand on or in (entities' bodies, ground, trunks:
-  `PlayState::world_waits`), for at most
+  for cells far off, which never come, are not counted); the cells
+  whose `scatter` is waiting to be placed or being placed
+  (`ScatterStats::building`); the `far_ground` chunks to be read, being read or
+  built (the same); the `poses` being baked (`PoseBakes::baking`: those the
+  far-off people are drawn in, asked for once someone of a look is
+  near); and, once all of those are in and unless the game is playing
+  already, the `bodies` the player would stand on or in (entities'
+  bodies, ground, trunks: `PlayState::world_waits`), for at most
   `PlayState::k_most_placing_seconds` (5, as play itself waits for
-  them). (`busy` saves count as `game` too: one being written while
+  them), and the GPU's own as the last frame's `RenderStats` say it:
+  `voxels` (`voxel_pending`: the far world) and `light` (`gi_waiting`;
+  neither while the voxel world is off, whose counts stay as they
+  were), `shadows` (`shadow_behind`: pages never drawn or long behind,
+  not the backlog of what moves on them, which may never end) and
+  `geometry` (cluster groups asked for and not loaded, `waiting`, and
+  the ground's tiles waiting for room), for at most `k_most_gpu_seconds` (10: a pool too
+  small may never let them all be done; play then begins with a line
+  in the log saying what was left, and the bar still ends full). (`busy` saves count as `game` too: one being written while
   the screen stands.) So a game starts with ground to stand on
   and with its first cells and textures already in, not arriving over
   the first seconds of play (rule 9). A loaded game that was saved in
@@ -5761,8 +5775,8 @@ and load, settings), which also route the real mouse and keys to screens.
   keeps its screen through the play it stops and starts, and gets it
   again over a menu opened meanwhile once it is in: it is to be
   played). `loading.shown` counts the times the screen was put up; the
-  other fields keep what they last said once it is gone. Not waited for: the far ground's chunks, scatter,
-  the nav tiles, people, sounds. Toasts and `fade_to` still draw over
+  other fields keep what they last said once it is gone. Not waited for: the nav tiles, people's
+  entities, sounds. Toasts and `fade_to` still draw over
   the screen. No loading screen: the editor (play there begins at once,
   as before), the `play` command, and a game loaded by the `load_game`
   command or a script. Tested by `editor/tests/test_game_menus.cpp`
@@ -5789,7 +5803,8 @@ and load, settings), which also route the real mouse and keys to screens.
   the river's bed; `PlayState::start` stands a player whose view is
   under the terrain on the ground over it, not left to fall.) It prints how long each loading
   took and what was behind when play began (the voxel world, its light
-  and the shadows are not waited for by the loading screen). On CI
+  and the shadows are waited for by the loading screen for at most
+  10 s). On CI
   (null device, optimised builds: ctest `editor_game_gate`) all but the
   speed; its own arithmetic by `tools/test_game_gate.py`.
 - **A game as a folder (N7 part 3).** `package_game` writes the open

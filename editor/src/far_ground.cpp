@@ -441,7 +441,9 @@ FarGroundStats FarGround::stats() const {
         const TerrainMeshStats m = level.meshes->stats();
         s.meshes[l] = m.tiles;
         s.building[l] = m.building;
+        s.waiting[l] = m.waiting;
         s.reading += static_cast<u32>(level.reading.size());
+        s.wanted += static_cast<u32>(level.wanted.size());
         s.failed += static_cast<u32>(m_failed[l].size());
     }
     for (const auto& [chunk, mode] : m_mode) {

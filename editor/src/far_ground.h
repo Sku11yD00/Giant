@@ -57,6 +57,8 @@ struct FarGroundStats {
     u32 hidden = 0;               // level-1 chunks under a level-2 chunk drawing
     std::array<u32, 2> meshes{};  // chunks with a mesh built
     std::array<u32, 2> building{};
+    std::array<u32, 2> waiting{}; // of `building`: waiting for room in the renderer's geometry pool (TerrainMeshStats::waiting)
+    u32 wanted = 0;               // chunk files still to be read (not yet begun)
     u32 reading = 0;
     u32 failed = 0; // chunk files that could not be read (see the log)
 };
