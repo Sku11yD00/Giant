@@ -5915,10 +5915,29 @@ Done in N2 part 2:
   counts them. Big searches (coarse bricks, whole windows) look through
   the grid's 512 m coarse cells, not every 32 m cell.
 - All the work is queues worked through under
-  `RenderSettings::voxel_ms_per_frame` (1 ms, at least one step and one
-  brick a frame): finding bricks in resumable steps (a time check every
-  256 marks), then building, coarse levels first, a few instances at a
-  time, so a coarse brick over thousands of instances spreads over frames.
+  `RenderSettings::voxel_ms_per_frame` (1 ms, at least one step a frame):
+  finding bricks in resumable steps (a time check every 256 marks), then
+  building, bricks never built first (coarse levels first), then those
+  built already whose contents changed, oldest first whatever their level
+  (else a 2 km brick that scatter streaming in keeps changing goes back
+  before everything nearer, again and again). Bricks are built on worker
+  threads (a quarter of the cores, two to four), up to 16 at once: the
+  main thread copies what is over a brick (its instances' places, colours,
+  meshes and LOD cuts, held so a mesh removed meanwhile stays until the
+  build is done; its water's triangles), a few hundred instances between
+  looks at the clock, and copies the finished brick into the pool. A
+  change over a brick under way builds it again once it is done (waiting
+  its turn with the other rebuilds); builds not yet taken by a worker
+  whose bricks leave the window are dropped. With a budget of 4 ms or
+  more (a game's loading screen gives it 12 ms) the main thread builds
+  bricks too (the smallest waiting, in the first half of the budget) and
+  otherwise waits on the workers' (yielding) for the rest of the budget,
+  which `cpu_ms` counts. Something far smaller than a voxel (its sphere at
+  most a quarter of one: a grass tuft at 4 m voxels, a tree at 64 m) is
+  added as one point where its middle is, as its triangles would have
+  added it (`BrickBuilder::add_point`), not triangle by triangle: by the
+  brick its middle is in, its area from its largest scale, its facing its
+  triangles' summed (a canopy's shortened, not bent out per triangle).
   Until a brick is rebuilt the old one stays; a slab that just came into
   view reads "unbuilt" and the next coarser level stands in. Bricks live in
   a fixed GPU pool (`RendererDesc::voxel_bricks`, 32768 = 68 MiB) with one
@@ -5929,7 +5948,7 @@ Done in N2 part 2:
   time over about 2,100 frames (the coarsest bricks lie under every
   instance); in release builds its frames stay near the
   1 ms budget, at worst a few ms (a search over a whole window, or the
-  start of a coarse brick, is not split), even with every tree moving each
+  search over a coarse brick and the water over it, is not split), even with every tree moving each
   frame, except the first (copying the instances and opening every
   window, about 7 ms; a teleport costs the same).
 - Known costs left: comparing the instances is a pass over all of them each
@@ -5937,9 +5956,9 @@ Done in N2 part 2:
   frame; world streaming (N3) will hand over changes instead.
 - The voxels debug view marches each pixel's ray through the levels,
   skipping empty space with per-level bounds and empty occupancy words.
-- Not yet: `world` owning edits (destruction carving it, N4); building on
-  worker threads (with cell streaming, N3); textures (colour is the
-  material's base colour); GI and reflections that read it (part 5).
+- Not yet: `world` owning edits (destruction carving it, N4); textures
+  (colour is the material's base colour); GI and reflections that read it
+  (part 5). (Building on worker threads came later, with big worlds.)
 
 Done in N2 part 3, the far field:
 

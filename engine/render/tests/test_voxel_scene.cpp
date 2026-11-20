@@ -8,9 +8,11 @@
 #include "gpu_layout.h"
 #include "voxel_scene.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <thread>
 #include <vector>
 
 using namespace giant;
@@ -39,8 +41,9 @@ u32 triangles_of(const geometry::ClusterMesh& m, const std::vector<u32>& cluster
 
 struct Bench {
     std::unique_ptr<rhi::Device> device;
-    std::unique_ptr<VoxelScene> voxels;
     geometry::ClusterMesh cube = geometry::build_clusters(geometry::make_cube());
+    std::shared_ptr<const geometry::ClusterMesh> held; // mesh 1, when set
+    std::unique_ptr<VoxelScene> voxels; // after cube: its workers' builds may still read it
     std::vector<Instance> instances;
     std::vector<Material> materials;
     u64 version = 1;
@@ -60,8 +63,18 @@ struct Bench {
     void step(float budget_ms = 1000.0f) {
         rhi::CommandList* cmd = device->begin_frame(nullptr);
         voxels->update(*cmd, camera, instances, cells, materials, version,
-                       [this](MeshId id) { return id == 0 ? &cube : nullptr; }, budget_ms);
+                       [this](MeshId id) {
+                           return id == 0   ? std::shared_ptr<const geometry::ClusterMesh>(std::shared_ptr<void>(), &cube)
+                                  : id == 1 ? held
+                                            : nullptr;
+                       },
+                       budget_ms);
         device->end_frame();
+        if (budget_ms < 4.0f) {
+            // Bricks are built on workers: a frame's worth of time for them (a frame of a tight
+            // budget is otherwise microseconds, and a test counting frames would race them).
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
     }
     // A voxel of the brick holding world point `p` at level 0, read back
     // from the GPU copy: occupied, and its packed value.
@@ -95,14 +108,19 @@ struct Bench {
 
 GIANT_TEST("voxel scene: LOD cuts cover the whole surface at every error") {
     const geometry::ClusterMesh sphere = geometry::build_clusters(geometry::make_sphere(128, 64));
-    const std::vector<u32> finest = VoxelScene::cut(sphere, 0.0f);
+    const VoxelScene::Cut whole = VoxelScene::cut(sphere, 0.0f);
+    const std::vector<u32>& finest = whole.clusters;
     GIANT_CHECK(triangles_of(sphere, finest) == sphere.source_triangles);
     const float area = area_of(sphere, finest);
+    // What a point stands for: its triangles, their area, and their facings summed (a closed
+    // surface's: about none).
+    GIANT_CHECK(whole.triangles == sphere.source_triangles && std::fabs(whole.area - area) < area * 1e-3f);
+    GIANT_CHECK(length(whole.normals) < 0.01f * static_cast<float>(whole.triangles));
     u32 previous = triangles_of(sphere, finest);
     bool covers = true;
     bool fewer = true;
     for (float e = 1e-4f; e < 10.0f; e *= 2.0f) {
-        const std::vector<u32> c = VoxelScene::cut(sphere, e);
+        const std::vector<u32> c = VoxelScene::cut(sphere, e).clusters;
         covers = covers && !c.empty() && std::fabs(area_of(sphere, c) - area) < area * 0.1f;
         const u32 t = triangles_of(sphere, c);
         fewer = fewer && t <= previous;
@@ -305,12 +323,13 @@ GIANT_TEST("voxel scene: building keeps to its budget and coarse levels go first
         cube.position = {static_cast<double>(i) * 2.5 - 6.0, 1.1, 0.0};
         b.instances.push_back(cube);
     }
-    // A zero budget still makes progress: one step of finding bricks and
-    // one brick a frame, coarse level first; the fine level reads
+    // A zero budget still makes progress: one step of finding bricks, and
+    // a brick started and one built copied to the pool a frame (they are
+    // built on workers), coarse level first; the fine level reads
     // "building" until its bricks are done (the coarse one stands in).
     const DVec3 face{-5.5, 1.0, 0.0};
     b.step(0.0f);
-    GIANT_CHECK(b.voxels->stats().built == 1);
+    GIANT_CHECK(b.voxels->stats().built <= 1);
     GIANT_CHECK(b.voxels->stats().pending > 1);
     GIANT_CHECK(b.voxels->probe(0, face) == VoxelProbe::building);
     const voxel::BrickCoord coarse = b.voxels->clipmap().brick_at(1, {-6.0, 1.1, 0.0});
@@ -330,6 +349,57 @@ GIANT_TEST("voxel scene: building keeps to its budget and coarse levels go first
     GIANT_CHECK(b.voxels->probe(0, face) == VoxelProbe::solid);
     GIANT_CHECK(b.voxels->probe(0, {-6.0, 1.1, 0.0}) == VoxelProbe::empty); // inside the cube
     GIANT_CHECK(b.voxels->probe(0, {500.0, 1.0, 0.0}) == VoxelProbe::outside);
+}
+
+GIANT_TEST("voxel scene: a mesh removed while bricks are built from it is kept until they are done") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    b.held = std::make_shared<const geometry::ClusterMesh>(geometry::build_clusters(geometry::make_sphere(64, 32)));
+    const std::weak_ptr<const geometry::ClusterMesh> watch = b.held;
+    for (int i = 0; i < 8; ++i) {
+        Instance in;
+        in.mesh = 1;
+        in.scale = {1.5f, 1.5f, 1.5f};
+        in.position = {static_cast<double>(i) * 2.0 - 8.0, 1.0, 0.0};
+        b.instances.push_back(in);
+    }
+    // Under way: bricks being built (on the workers) from the mesh when the renderer drops it.
+    for (int frame = 0; frame < 4; ++frame) {
+        b.step(0.0f);
+    }
+    GIANT_CHECK(b.voxels->stats().pending > 0);
+    b.held.reset();
+    b.voxels->forget_mesh(1);
+    ++b.version;
+    // The builds finish from their own hold on it (the address sanitizer would see it freed
+    // under them), then let it go; with it gone, nothing is left in the voxels.
+    for (int frame = 0; frame < 200 && b.voxels->stats().pending > 0; ++frame) {
+        b.step();
+    }
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(watch.expired());
+    GIANT_CHECK(b.voxels->probe(0, {-8.0, 1.0, 0.75}) != VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->stats().bricks == 0);
+}
+
+GIANT_TEST("voxel scene: something far smaller than a voxel on a brick's face is in one brick") {
+    // A 0.1 m cube is a point at level 1 (0.5 m voxels, 4 m bricks), its middle a hair under
+    // the face at y = 0: in the brick under it, though in that brick's frame (a float) it
+    // rounds to the top face, just outside.
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    Instance in;
+    in.mesh = 0;
+    in.scale = {0.1f, 0.1f, 0.1f};
+    in.position = {4.25, -1e-7, 1.25};
+    b.instances.push_back(in);
+    for (int frame = 0; frame < 200 && b.voxels->stats().pending > 0; ++frame) {
+        b.step();
+    }
+    b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(b.voxels->probe(1, {4.25, -0.25, 1.25}) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(1, {4.25, 0.25, 1.25}) != VoxelProbe::solid);
 }
 
 GIANT_TEST("voxel scene: a full pool says so, keeps what it has and fills as room frees up") {
@@ -956,7 +1026,7 @@ GIANT_TEST("voxel scene: a lake of thousands of slivers is built a few at a time
         GIANT_CHECK(b.voxels->init());
         std::vector<WaterLook> looks(2);
         int frames = 0;
-        bool spread = false; // a frame that built nothing while bricks waited: a brick over frames
+        bool spread = false; // a frame that built nothing while bricks waited: work spread over frames
         for (; frames < 20000; ++frames) {
             std::vector<WaterVertex> all = v;
             std::vector<u32> all_idx = idx;

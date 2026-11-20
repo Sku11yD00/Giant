@@ -24,8 +24,8 @@ namespace {
 
 struct Bench {
     std::unique_ptr<rhi::Device> device;
-    std::unique_ptr<VoxelScene> voxels;
     geometry::ClusterMesh cube = geometry::build_clusters(geometry::make_cube());
+    std::unique_ptr<VoxelScene> voxels; // after cube: its workers' builds may still read it
     std::vector<Instance> instances;
     std::vector<Material> materials;
     DVec3 camera{0.0, 1.0, 0.0};
@@ -43,7 +43,7 @@ struct Bench {
     void step() {
         rhi::CommandList* cmd = device->begin_frame(nullptr);
         voxels->update(*cmd, camera, instances, {}, materials, 1,
-                       [this](MeshId id) { return id == 0 ? &cube : nullptr; }, 1000.0f);
+                       [this](MeshId id) { return id == 0 ? std::shared_ptr<const geometry::ClusterMesh>(std::shared_ptr<void>(), &cube) : nullptr; }, 1000.0f);
         device->end_frame();
     }
     std::set<u32> owned() const {

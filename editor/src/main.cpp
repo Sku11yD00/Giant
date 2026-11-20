@@ -826,6 +826,10 @@ int run(const Options& options) {
                                         weather.time());
         editor::clock_sky(input.sky, time_of_day.shown());
         input.settings = state.render_settings;
+        // Behind a game's loading screen nothing is played: the voxel world (the far land and its
+        // light) is built with far more of each frame, so play does not begin with it still filling in.
+        if (state.menus != nullptr && state.menus->loading().on)
+            input.settings.voxel_ms_per_frame = std::max(input.settings.voxel_ms_per_frame, editor::GameMenus::k_loading_voxel_ms);
         input.instances = scene_frame.instances;
         input.cells = scene_frame.cells;
         input.materials = scene_frame.materials;

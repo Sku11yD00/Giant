@@ -108,6 +108,12 @@ public:
     // its valley), water only where nothing else is (a voxel it only
     // touches, at its edge, is not water).
     u32 add_water_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color);
+    // A whole object far smaller than a voxel, at `at` (outside the brick: nothing), as its
+    // `triangles` would add were each wholly in that voxel: their `area` in all (cut-outs' cover),
+    // the sum of their unit `normals` (its facing; zero: +Y), `color` and `coverage` as
+    // add_triangle's. One voxel looked at, not every triangle's.
+    u32 add_point(const Vec3& at, u32 triangles, float area, const Vec3& normals, const Vec3& color,
+                  bool stand_in = false, float coverage = 1.0f);
     bool empty() const { return m_touched == 0; }
     Brick build() const;
     // The dither threshold of voxel `index` under the current seed, in (0, 1].
