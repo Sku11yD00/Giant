@@ -5751,7 +5751,8 @@ and load, settings), which also route the real mouse and keys to screens.
   were), `shadows` (`shadow_behind`: pages never drawn or long behind,
   not the backlog of what moves on them, which may never end) and
   `geometry` (cluster groups asked for and not loaded, `waiting`, and
-  the ground's tiles waiting for room), for at most `k_most_gpu_seconds` (10: a pool too
+  the ground's tiles waiting for room), for at most `k_most_gpu_seconds` (5, of the clock rather than of
+  frames: on a software device a frame takes seconds; a pool too
   small may never let them all be done; play then begins with a line
   in the log saying what was left, and the bar still ends full). (`busy` saves count as `game` too: one being written while
   the screen stands.) So a game starts with ground to stand on
@@ -5804,7 +5805,7 @@ and load, settings), which also route the real mouse and keys to screens.
   under the terrain on the ground over it, not left to fall.) It prints how long each loading
   took and what was behind when play began (the voxel world, its light
   and the shadows are waited for by the loading screen for at most
-  10 s). On CI
+  5 s). On CI
   (null device, optimised builds: ctest `editor_game_gate`) all but the
   speed; its own arithmetic by `tools/test_game_gate.py`.
 - **A game as a folder (N7 part 3).** `package_game` writes the open

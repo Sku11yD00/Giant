@@ -590,7 +590,8 @@ bool GameMenus::start_play() {
 void GameMenus::arrive() {
     // The frame's seconds, as the frames have them: a window put away (no frames) is no time passed.
     const auto now = std::chrono::steady_clock::now();
-    const double frame = std::clamp(std::chrono::duration<double>(now - m_arriving_frame).count(), 0.0, 0.1);
+    const double real = std::max(std::chrono::duration<double>(now - m_arriving_frame).count(), 0.0);
+    const double frame = std::min(real, 0.1);
     m_arriving_frame = now;
     const WorldStreaming* streaming = m_state.world;
     const bool streamed = streaming != nullptr && streaming->active(m_state.scene_generation);
@@ -633,7 +634,9 @@ void GameMenus::arrive() {
         m_arriving_bodies += frame;
         bodies = m_arriving_bodies <= PlayState::k_most_placing_seconds;
     }
-    // The GPU's own, the same: once the rest is in, for no longer than k_most_gpu_seconds.
+    // The GPU's own, the same: once the rest is in, for no longer than k_most_gpu_seconds, of the clock:
+    // on a slow device (a software one: seconds a frame) what is behind is not worth waiting for
+    // frame by frame, and a window put away does nothing for it either.
     const render::RenderStats& drawn = m_state.scene_stats;
     // (The voxel world's count is kept as it was when it is turned off: not counted then. Shadow pages:
     // those never drawn or long behind, not the backlog of what moves on them, which may never end.)
@@ -645,7 +648,7 @@ void GameMenus::arrive() {
     const u32 gpu = m_arriving.voxels + m_arriving.light + m_arriving.shadows + m_arriving.geometry;
     bool gpu_waited = false;
     if (counted == 0 && gpu != 0) {
-        m_arriving_gpu += frame;
+        m_arriving_gpu += real;
         gpu_waited = m_arriving_gpu <= k_most_gpu_seconds;
     }
     const u32 coming = counted + (bodies ? 1u : 0u) + (gpu_waited ? 1u : 0u);

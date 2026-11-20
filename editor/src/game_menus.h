@@ -146,7 +146,7 @@ public:
     const Loading& loading() const { return m_arriving; }
     static constexpr u32 k_quiet_frames = 10;
     static constexpr double k_most_loading_seconds = 120.0;
-    static constexpr double k_most_gpu_seconds = 10.0; // the GPU's own (voxels, shadows, geometry), once the rest is in
+    static constexpr double k_most_gpu_seconds = 5.0; // the GPU's own (voxels, light, shadows, geometry), once the rest is in: of the clock, not of frames
     // (The bodies alone are waited for no longer than play itself waits for them, PlayState::k_most_placing_seconds: some never come.)
     // Tests: the loading screen as if `seconds` more of frames had passed.
     void loading_waited(double seconds) { m_arriving_seconds += seconds; }

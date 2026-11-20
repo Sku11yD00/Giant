@@ -477,7 +477,7 @@ Open-world systems:
   as a game, that game begun behind its loading screen, run through,
   saved and taken up again, timed from the first frame of play.
 - The loading screen also waits for scatter, the far ground and the
-  far-off people's poses, and (for at most 10 s, once the rest is in)
+  far-off people's poses, and (for at most 5 s, once the rest is in)
   for the GPU's own: the voxel world, sun shadows and geometry.
 - Crowds part 1: baked poses. A character held in one pose becomes a
   small plain mesh (`bake_pose`, `get_baked_poses`), cut down from the

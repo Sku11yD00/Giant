@@ -29,7 +29,7 @@ runs back the way it came. It passes when:
 - streaming never failed.
 How long each loading took and what was still behind when play began
 (the voxel world, its light, the shadows: waited for by the loading
-screen for at most 10 s) is printed.
+screen for at most 5 s) is printed.
 Do not touch the mouse or the keys while it runs: they are the player's.
 
 On CI (the null device) it checks all but the speed.
