@@ -5906,9 +5906,13 @@ Done in N2 part 2:
   or removed mesh counts as a change to the instances using it. Changes
   wait gathered by 64 m square (a box wider than two squares waits on its
   own): each square becomes one job per level over its boxes' bricks (the
-  old boxes' built bricks, every brick under the changed instances), so
-  thousands of scatter placements arriving are a few hundred jobs, not a
-  rebuild. More than 256 changes in a frame (or an eighth of the
+  old boxes' built bricks, every brick under the changed instances; at a
+  level whose bricks are 128 m or wider, where the box around the whole
+  region is 8 bricks or fewer, each of those once, not once per instance), so thousands of scatter placements arriving are a
+  few hundred jobs, not a rebuild. When the renderer's meshes change
+  (streaming adds some most frames), only meshes it had found missing are
+  looked up again: a removed one is reported by `forget_mesh`, and a mesh
+  never changes once added. More than 256 changes in a frame (or an eighth of the
   instances), over 4,096 squares waiting, or any other removal rebuild
   every window, one rebuild at a time (another waits for it rather than
   restarting it, so constant changes still settle); `voxels.rebuilds`

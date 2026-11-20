@@ -508,6 +508,9 @@ Open-world systems:
   worker threads, small things far off are added as single points rather
   than triangle by triangle, bricks never built go before ones that only
   changed, and behind a loading screen it gets 12 ms a frame.
+- The voxel world catches up while plants stream in: it no longer
+  re-checks every mesh it knows each time one is added, and marks a
+  far-off brick once per batch of changes rather than once per plant.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and

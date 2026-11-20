@@ -213,6 +213,7 @@ VoxelScene::MeshCache* VoxelScene::mesh_cache(MeshId id, const MeshLookup& meshe
         }
     } else {
         cache.mesh = nullptr; // remembered as missing until the meshes change
+        m_missing.insert(id);
     }
     MeshCache& stored = m_meshes.emplace(id, std::move(cache)).first->second;
     return stored.mesh != nullptr ? &stored : nullptr;
@@ -321,6 +322,7 @@ float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale) {
 
 void VoxelScene::forget_mesh(MeshId mesh) {
     m_meshes.erase(mesh);
+    m_missing.erase(mesh);
     m_forgotten.push_back(mesh);
 }
 
@@ -919,14 +921,13 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
         m_meshes_version = meshes_version;
         std::unordered_set<MeshId> stale(m_forgotten.begin(), m_forgotten.end());
         m_forgotten.clear();
-        for (auto it = m_meshes.begin(); it != m_meshes.end();) {
-            std::shared_ptr<const geometry::ClusterMesh> now = meshes ? meshes(it->first) : nullptr;
-            if (now != nullptr && now->empty()) {
-                now = nullptr;
-            }
-            if (now != it->second.mesh) {
-                stale.insert(it->first);
-                it = m_meshes.erase(it);
+        // Those missing that came (the rest are as they were; removed ones were forgotten).
+        for (auto it = m_missing.begin(); it != m_missing.end();) {
+            const std::shared_ptr<const geometry::ClusterMesh> now = meshes ? meshes(*it) : nullptr;
+            if (now != nullptr && !now->empty()) {
+                stale.insert(*it);
+                m_meshes.erase(*it);
+                it = m_missing.erase(it);
             } else {
                 ++it;
             }
@@ -1174,6 +1175,16 @@ bool VoxelScene::run_job(Job& job, const OutOfTime& out_of_time) {
         // changed instance where it is now (within the job's box).
         // (Fresh boxes first: every brick under them, as under a changed instance.)
         const Region& r = *job.region;
+        if (count <= 8 && m_clipmap.brick_size(level) >= 2.0 * k_region) {
+            // A coarse level (bricks at least as wide as a region's widest box) and the box around
+            // the whole region (old, fresh and changed) a few bricks: each of them once, not once
+            // per instance (the same few bricks thousands of times over). One only an old box
+            // touched is built again even if not in the pool (it builds empty).
+            for (u64 i = 0; i < count; ++i) {
+                mark(level, brick_of(box, i));
+            }
+            return true;
+        }
         const usize fresh = r.fresh.size();
         const usize total = fresh + r.old.size() + r.changed.size();
         while (job.next < total) {
@@ -1858,10 +1869,11 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         }
     }
 
-    // Finding bricks takes up to half the budget while bricks wait to be
-    // built (at least one step a frame), then building the rest (at least
-    // one brick), coarse levels first.
-    const double jobs_budget = m_pending.empty() ? budget : budget * 0.5;
+    // Finding bricks takes up to half of what is left of the budget while
+    // bricks wait to be built (at least one step a frame), then building
+    // the rest.
+    const double seen = elapsed();
+    const double jobs_budget = m_pending.empty() ? budget : seen + std::max(0.0, budget - seen) * 0.5;
     const auto jobs_out_of_time = [&] { return elapsed() >= jobs_budget; };
     for (bool first = true; !m_jobs.empty() && (first || !jobs_out_of_time()); first = false) {
         if (!run_job(m_jobs.front(), jobs_out_of_time)) {

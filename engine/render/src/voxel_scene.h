@@ -84,9 +84,11 @@ float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale);
 
 class VoxelScene {
 public:
-    // A mesh by id, or null when it does not exist (any more). A mesh never
-    // changes once added (an id freed may come back as another mesh: the
-    // meshes' version changes then). Shared: a brick being built holds it.
+    // A mesh by id, or null when it does not exist (yet). A mesh never changes
+    // once added. Removing one (and so before its id is used again) must be
+    // told with forget_mesh: a mesh cached is kept until then. When meshes
+    // are added the version passed to update changes, and only ids found
+    // missing are looked up again. Shared: a brick being built holds it.
     using MeshLookup = std::function<std::shared_ptr<const geometry::ClusterMesh>(MeshId)>;
 
     VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u32 brick_capacity);
@@ -275,6 +277,7 @@ private:
         all,     // mark every brick of the box
         region,  // within the box: the bricks in the pool under the region's
                  // old boxes, and every brick under its changed instances
+                 // (at a coarse level with a small box: every brick of it, once)
     };
     // Changes not turned into jobs yet, gathered by region (k_region
     // metres square, so a scatter cell's thousands of placements are a few
@@ -457,6 +460,10 @@ private:
     u64 m_meshes_version = ~u64{0};
     std::unordered_map<MeshId, MeshCache> m_meshes;
     std::vector<MeshId> m_forgotten; // by forget_mesh, for the next see_changes
+    // Cached as missing: looked up again when the meshes change (the rest stay as they are until
+    // forget_mesh: a mesh never changes once added, so the cache is not walked every time one is
+    // added, which streaming does every frame).
+    std::unordered_set<MeshId> m_missing;
 
     // Bricks being built, on m_build_jobs' workers (or, with time to spare, the main thread),
     // each from what was over it when it started (so changes meanwhile cannot touch it: they set
