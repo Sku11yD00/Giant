@@ -8,7 +8,8 @@ commands, a frame each.
 A flight with hitches prints where the main thread's time went in them
 (their phases, from get_engine_info's phases_since). With
 GIANT_GATE_FRAMES set to a file, each flight's frame times, slow frames
-and typical frames are added to it as a line of JSON, for a closer look.
+and typical frames are added to it as a line of JSON, for a closer look
+(GIANT_GATE_SLOW_MS: how slow a frame is kept in full there, in ms).
 """
 import json
 import os
@@ -243,6 +244,21 @@ def describe(times):
             f"worst {times['worst_ms']:.2f} ms, {times['hitches']} hitches")
 
 
+def slow_over(asked, usual):
+    """How slow a frame (ms) is kept in full: `usual`, or what GIANT_GATE_SLOW_MS asks (`asked`)
+    when that is less (more frames for a closer look; never fewer, which would change what a gate
+    sets aside and says)."""
+    if not asked:
+        return usual
+    try:
+        value = float(asked)
+    except ValueError:
+        raise RuntimeError(f"GIANT_GATE_SLOW_MS is not a number: {asked}") from None
+    if not 0.0 < value < float("inf"):
+        raise RuntimeError(f"GIANT_GATE_SLOW_MS must be over 0: {asked}")
+    return min(value, usual)
+
+
 class Editor:
     """giant_editor --mcp as a child process, killed after `timeout` seconds."""
 
@@ -303,43 +319,59 @@ class Editor:
         stops (two commands a stop, a frame each, plus the read; room for a few
         more each_stop makes). Also read at each stop in `marks`: then
         self.marked[stop] is how many of the times came before it ended."""
-        self.marked = {}
-        # The slow frames' phases (with the stop sampled after them) and
-        # each sample's typical frame: (frames, phase medians, CPU ms).
-        self.slow = []
-        self.typicals = []
-        self.held = []  # the times (ms) of frames the window's handling held: not among those returned
         # Hover first so the 240 recorded frame times hold none of what
         # came before (a scene build is one long frame).
         self.tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
         self.hover(240)
-        # Frames over the 99th percentile's limit kept in full on a real GPU
-        # (uneven pacing explained too); else only those near a hitch.
-        over_ms = P99_LIMIT_MS if self.real_gpu() else 25.0
-        self.slow_over_ms = over_ms
+        # The slow frames' phases (self.slow, with the stop sampled after them: frames over the 99th
+        # percentile's limit kept in full on a real GPU, uneven pacing explained too; else only
+        # those near a hitch), each sample's typical frame (self.typicals: frames, phase medians,
+        # CPU ms) and the times (ms) of frames the window's handling held (self.held: not among
+        # those returned).
         times = []
-        recorded = self.tool("get_engine_info")["frame_times"]["recorded"]
+        recorded = self.begin_frames()
         for stop, (position, look_at) in enumerate(path):
             self.tool("set_camera", {"position": position, "look_at": look_at})
             each_stop(stop, self.last_frame())
             if stop % 100 == 99 or stop == len(path) - 1 or stop in marks:
-                now = self.tool("get_engine_info", {"phases_since": recorded, "phases_over_ms": over_ms})["frame_times"]
-                new = now["recorded"] - recorded
-                recorded = now["recorded"]
-                if new > len(now["recent_ms"]):
-                    raise RuntimeError(f"{new} frames passed between samples: some were not timed")
-                if new > 0:
-                    times += now["recent_ms"][-new:]
-                phases = now.get("phases")
-                if phases and phases["frames"] > 0:
-                    # Frames the desktop held by handling the window are no frames of the flight's:
-                    # set aside (self.held), neither timed nor told among the slow.
-                    times, held, slow = without_held(times, phases["slow"], now["recorded"])
-                    self.held += held
-                    self.slow += [dict(frame, stop=stop, typical_device=phases.get("typical_device")) for frame in slow]
-                    self.typicals.append((phases["frames"], phases["typical"], phases["typical_cpu_ms"]))
+                times, recorded = self.read_frames(times, recorded, stop)
                 if stop in marks:
                     self.marked[stop] = len(times)
+        self.end_frames(times)
+        return times
+
+    def begin_frames(self):
+        """Before frames are timed (read_frames): nothing slow, typical or held yet. Returns the
+        editor's count of frames recorded so far, to read on from."""
+        self.marked = {}
+        self.slow = []
+        self.typicals = []
+        self.held = []
+        self.slow_over_ms = slow_over(os.environ.get("GIANT_GATE_SLOW_MS"), P99_LIMIT_MS if self.real_gpu() else 25.0)
+        return self.tool("get_engine_info")["frame_times"]["recorded"]
+
+    def read_frames(self, times, recorded, stop=0):
+        """The frames since the editor's count `recorded` (it keeps its last 240: read at least that
+        often) added to `times`, with the slow ones' phases (self.slow, named by `stop`) and the
+        sample's typical frame (self.typicals); those the desktop held by handling the window are no
+        frames of the run's: set aside (self.held), neither timed nor told among the slow. Returns
+        (times, the count to read on from)."""
+        now = self.tool("get_engine_info", {"phases_since": recorded, "phases_over_ms": self.slow_over_ms})["frame_times"]
+        new = now["recorded"] - recorded
+        if new > len(now["recent_ms"]):
+            raise RuntimeError(f"{new} frames passed between samples: some were not timed")
+        if new > 0:
+            times = times + now["recent_ms"][-new:]
+        phases = now.get("phases")
+        if phases and phases["frames"] > 0:
+            times, held, slow = without_held(times, phases["slow"], now["recorded"])
+            self.held += held
+            self.slow += [dict(frame, stop=stop, typical_device=phases.get("typical_device")) for frame in slow]
+            self.typicals.append((phases["frames"], phases["typical"], phases["typical_cpu_ms"]))
+        return times, now["recorded"]
+
+    def end_frames(self, times):
+        """After the last read_frames: says what was held, and writes the frames out where asked."""
         if self.held:
             print(f"{self.name}: {len(self.held)} frames were held by the window being handled (moved, sized, its "
                   f"title bar held or its focus changed, or the desktop's own doing: {sum(self.held) / 1000.0:.1f} s in all, the longest "
@@ -349,7 +381,6 @@ class Editor:
             with open(dump, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"times": times, "marked": self.marked, "slow": self.slow,
                                     "typicals": self.typicals, "held": self.held}) + "\n")
-        return times
 
     def gpu_passes(self, frames):
         """Median GPU milliseconds of each timed pass over `frames` frames."""

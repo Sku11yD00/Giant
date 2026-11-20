@@ -29,6 +29,7 @@ struct Fixture {
         register_scene_commands(commands, state);
         register_physics_commands(commands, state);
         register_water_commands(commands, state);
+        register_terrain_commands(commands, state);
     }
     ai::CommandResult run(const char* name, const Json& args = Json::object()) {
         return commands.execute(name, args, {});
@@ -190,6 +191,34 @@ GIANT_TEST("play commands: the player stands under the camera, walks where it lo
     GIANT_CHECK(f.state.camera.position == DVec3(6.0, 3.0, 0.0) && f.state.camera.pitch_degrees == before.pitch_degrees);
     GIANT_CHECK(f.at(crate) == DVec3(0.0, 0.5, -20.0) && f.physics.world().characters() == 0);
     GIANT_CHECK(f.run("get_player").value["playing"] == false);
+}
+
+GIANT_TEST("play commands: begun from a view under the ground, the player stands on the ground over it") {
+    Fixture f;
+    GIANT_CHECK(f.run("create_terrain", {{"from", {-60, -60}}, {"to", {60, 60}}, {"height", 20}}).ok);
+    f.state.camera.position = {3.0, 2.0, 8.0}; // 18 m under it (a view never set for this world)
+    ai::CommandResult r = f.run("play", {{"on", true}});
+    GIANT_CHECK(r.ok && r.value["playing"] == true);
+    for (int i = 0; i < 8 && r.value["waiting_for_ground"] == true; ++i) r = f.run("step_player", {{"seconds", 1.0}});
+    r = f.run("step_player", {{"seconds", 1.0}});
+    const DVec3 p = triple(r.value["position"]);
+    GIANT_CHECK(std::fabs(p.y - 20.0) < 0.1 && std::fabs(p.x - 3.0) < 0.05 && std::fabs(p.z - 8.0) < 0.05);
+    GIANT_CHECK(r.value["on_ground"] == true);
+    // A view over the ground is as it was: the player under it, on the ground.
+    GIANT_CHECK(f.run("play", {{"on", false}}).ok);
+    f.state.camera.position = {3.0, 60.0, 8.0};
+    r = f.run("play", {{"on", true}});
+    for (int i = 0; i < 8 && r.value["waiting_for_ground"] == true; ++i) r = f.run("step_player", {{"seconds", 1.0}});
+    r = f.run("step_player", {{"seconds", 1.0}});
+    GIANT_CHECK(std::fabs(triple(r.value["position"]).y - 20.0) < 0.1 && r.value["on_ground"] == true);
+    // A view under the ground with a floor under it (a cellar): the player stands on that floor, as ever.
+    GIANT_CHECK(f.run("play", {{"on", false}}).ok);
+    f.create({{"shape", "cube"}, {"position", {3, 4.5, 8}}, {"scale", {6, 1, 6}}}); // its top at 5 m
+    f.state.camera.position = {3.0, 7.0, 8.0};
+    r = f.run("play", {{"on", true}});
+    for (int i = 0; i < 8 && r.value["waiting_for_ground"] == true; ++i) r = f.run("step_player", {{"seconds", 1.0}});
+    r = f.run("step_player", {{"seconds", 1.0}});
+    GIANT_CHECK(std::fabs(triple(r.value["position"]).y - 5.0) < 0.1 && r.value["on_ground"] == true);
 }
 
 GIANT_TEST("play commands: the player climbs a wall and onto its top; an entity carries it; crates are pushed, not climbed") {

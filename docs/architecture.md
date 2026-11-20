@@ -5741,6 +5741,29 @@ and load, settings), which also route the real mouse and keys to screens.
   (cells that stream in while the screen stands and the bar's way
   there, the longest wait, a cell that cannot be read, a game loaded in
   and outside play) and in `tools/game_smoke.py`.
+- **The game gate (N7 part 5).** `tools/game_gate.py` builds the N3
+  gate's valley in the editor, saves it and packages it (`package_game`),
+  then runs the packaged program from another folder as anyone handed it
+  would: New game from the main menu, the loading screen, the player
+  running towards the town for 1200 frames (`set_player_input`), the
+  game saved, left for the main menu and taken up again with Continue,
+  and 1200 frames more, running back the way it came. The frames are counted from just before the
+  loading screen went (`Editor.begin_frames`, `read_frames` and
+  `end_frames` in `gate_common.py`, which `fly` is made of), so what the
+  screen should have waited for shows as hitches at the start of play.
+  It passes when the package is whole with nothing of the chat or a key
+  in it, each run holds 60 fps without micro stutter (the gates' own
+  limits), each loading stood once and ended with its bar full in under
+  a minute with nothing it counts still to come, the player ran 50 m or
+  more and ended on the ground, the game taken up again is where it was
+  saved, and streaming never failed. (A world names no player start
+  yet, so a new game begins under the view the program opens with, here
+  the river's bed; `PlayState::start` stands a player whose view is
+  under the terrain on the ground over it, not left to fall.) It prints how long each loading
+  took and what was behind when play began (the voxel world, its light
+  and the shadows are not waited for by the loading screen). On CI
+  (null device, optimised builds: ctest `editor_game_gate`) all but the
+  speed; its own arithmetic by `tools/test_game_gate.py`.
 - **A game as a folder (N7 part 3).** `package_game` writes the open
   world, as saved, as a game into a new folder (`editor/src/game_package.h`;
   never over anything: the folder must not be there, or be empty): the

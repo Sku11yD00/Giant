@@ -139,6 +139,8 @@ if(GIANT_BUILD_TESTS)
     add_test(NAME gate_person COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_gate_person.py)
     # The living-world gate's own arithmetic: the valley's plan and its checks of the people (no editor).
     add_test(NAME living_gate_checks COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_living_gate.py)
+    # The game gate's own arithmetic: its checks of the package and of a loading (no editor).
+    add_test(NAME game_gate_checks COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_game_gate.py)
     # The crowd gate's own arithmetic: the square's plan, its flight and its checks (no editor).
     add_test(NAME crowd_gate_checks COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/test_crowd_gate.py)
     # The N2 gate's scene and flight, on the null device (the software
@@ -187,6 +189,15 @@ if(GIANT_BUILD_TESTS)
         COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/crowd_gate.py
                 $<TARGET_FILE:giant_editor> --hidden --backend null)
       set_tests_properties(editor_crowd_gate PROPERTIES TIMEOUT 1800 ENVIRONMENT "${gate_env}")
+      # The game gate (standalone game part 5): the valley packaged as a game, that game begun, run through, saved and taken up again.
+      add_test(NAME editor_game_gate
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/game_gate.py
+                $<TARGET_FILE:giant_editor> --hidden --backend null)
+      set(game_gate_env "${gate_env}")
+      if(NOT WIN32)
+        list(APPEND game_gate_env "SDL_AUDIO_DRIVER=dummy")
+      endif()
+      set_tests_properties(editor_game_gate PROPERTIES TIMEOUT 1800 ENVIRONMENT "${game_gate_env}")
     endif()
   else()
     message(WARNING "Python 3 not found: the editor_mcp test is skipped")
