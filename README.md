@@ -460,15 +460,19 @@ Open-world systems:
   runs a world as a game: a main menu (Continue, New game, Load,
   Settings, Quit) instead of the editor's panels, play from it, and the
   pause menu's Quit leads back to it.
+- N7 part 2: a game's settings last. UI scale, field of view, mouse
+  speed, fullscreen, vsync and the window's size are kept as text
+  (`game_settings.json` in the person's settings folder) and are there
+  the next time the game runs.
 - N7 part 3: a game as a folder. `package_game` writes the open world as
   a game into a new folder: the program under the game's name, the world,
   the files it uses, the scripts and `game.json`. That folder runs on its
   own, from anywhere, as the game: no editor panels, and no chat or key
   in it.
-- N7 part 2: a game's settings last. UI scale, field of view, mouse
-  speed, fullscreen, vsync and the window's size are kept as text
-  (`game_settings.json` in the person's settings folder) and are there
-  the next time the game runs.
+- N7 part 4: a game's loading screen. A new game, or one loaded from a
+  menu, begins only once the world round the player is in (cells,
+  textures, ground), behind a loading screen with a bar, so the first
+  cells do not arrive during the first seconds of play.
 - Crowds part 1: baked poses. A character held in one pose becomes a
   small plain mesh (`bake_pose`, `get_baked_poses`), cut down from the
   file and baked on a worker: what distant people will be drawn with.

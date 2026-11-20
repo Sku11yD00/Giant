@@ -1048,7 +1048,7 @@ int run(const Options& options) {
                                            : 1.0f;
         const bool menu_took = menus.update(input, pixels_per_point);
         // While a menu is open over play, the game stands still.
-        const float game_delta = static_cast<float>(menus.game_seconds(delta));
+        float game_delta = static_cast<float>(menus.game_seconds(delta));
         if (play.playing()) {
             // The player's keys and mouse, not the editor camera's.
             if (!menu_took) play.handle_input(input, ui->wants_keyboard());
@@ -1062,6 +1062,9 @@ int run(const Options& options) {
         ui->end_frame();
         mark(editor::FramePhase::ui);
         saves.update(state, game_delta); // a save or load's result, a load's cells a share a frame (before play)
+        // (A game loaded behind the loading screen that was saved in play plays from here: held still
+        // from this, its first frame, as it is by a menu over play.)
+        if (menus.paused()) game_delta = 0.0f;
         // The player's wanted motion (or play stopped: Esc, a new scene).
         const bool playing = play.before_step(state.scene, state.camera, state.scene_generation, game_delta);
         window->set_relative_mouse(playing && !menus.paused()); // mouse look (a menu: the pointer is free)

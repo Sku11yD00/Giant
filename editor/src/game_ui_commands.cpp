@@ -10,6 +10,7 @@
 #include "giant/core/assert.h"
 #include "giant/platform/window.h"
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -488,6 +489,15 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
                     {"slots", slots},
                     {"message", m.message()},
                     {"notice", m.notice()},
+                    {"loading",
+                     {{"on", m.loading().on},
+                      {"game", m.loading().game},
+                      {"cells", m.loading().cells},
+                      {"textures", m.loading().textures},
+                      {"ground", m.loading().ground},
+                      {"bodies", m.loading().bodies},
+                      {"progress", std::round(static_cast<double>(m.loading().progress) * 1000.0) / 1000.0},
+                      {"shown", m.loading().shown}}},
                     {"settings",
                      {{"ui_scale", s.ui_scale},
                       {"fov", s.fov_degrees},
@@ -502,7 +512,13 @@ void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state
 
     add(registry,
         {"get_menu",
-         "The game's menus over play: `menu` open (none, pause, saves, settings, main; Esc in play opens pause), "
+         "The game's menus over play: `menu` open (none, pause, saves, settings, main, loading; Esc in play opens pause), "
+         "`loading` (a game being loaded from a menu or about to be played, one loaded in play held still, while it and the "
+         "world round the player come in behind the screen menu.loading: `on`, `game` the saved game itself still being read, "
+         "the `cells` streaming is still bringing, the `textures` cooking, uploading or reading finer levels, the `ground` "
+         "tiles whose mesh is still to build, `bodies` what the player would stand on still being made, `progress` 0 to 1 and "
+         "never back, `shown` how many times the screen has stood; play begins once nothing has been coming for some frames, "
+         "or after 120 s of frames whatever is; the editor, the play command and load_game have none), "
          "`game` (the program runs as a game, started with --game <world folder>: outside play its main menu "
          "stands, `menu` main, with the buttons continue (the newest save of this world that can be loaded, shown "
          "when there is one), new (the world as authored, played from the view the program opened with), load, "

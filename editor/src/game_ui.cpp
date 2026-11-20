@@ -71,7 +71,7 @@ bool GameUi::load_screen(const std::string& name, std::string_view json, int lay
         error = "a screen's name is 1 to 64 bytes";
         return false;
     }
-    if (layer < -k_max_layer || layer > k_max_layer) {
+    if (layer < -k_max_layer || layer > (reserved(name) ? k_top_layer : k_max_layer)) {
         error = "a layer is from -" + std::to_string(k_max_layer) + " to " + std::to_string(k_max_layer);
         return false;
     }

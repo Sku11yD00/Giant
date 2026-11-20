@@ -126,6 +126,12 @@ public:
     // Whether the cell's file holds a tile not in the scene yet that streaming
     // will bring (on disk, being read or waiting; not one that failed).
     bool ground_coming(world::CellCoord cell) const;
+    // The cells streaming is bringing: those within the load radius of where the camera last was
+    // (and any an edit touched) not read yet, being read, or read and waiting for their frame (as
+    // of the last update; not those that failed).
+    u32 coming() const;
+    // How many times update has looked at the world (it does not when not active or not followed).
+    u64 updates() const { return m_updates; }
     // The far ground chunks (world/far_ground.h) with a file, by level (1, 2).
     const std::unordered_set<world::CellCoord, world::CellCoordHash>& far_chunks(u32 level) const;
     std::filesystem::path far_chunk_path(u32 level, world::CellCoord chunk) const;
@@ -162,6 +168,7 @@ public:
     StreamingSettings settings;
 
 private:
+    u64 m_updates = 0;
     enum class State { on_disk, reading, ready, loaded, failed };
     struct Cell {
         State state = State::on_disk;

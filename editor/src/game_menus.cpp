@@ -4,6 +4,8 @@
 #include "game_saves.h"
 #include "game_ui.h"
 #include "play_state.h"
+#include "terrain_meshes.h"
+#include "texture_library.h"
 #include "world_streaming.h"
 
 #include "giant/ai/json.h"
@@ -77,12 +79,36 @@ Json main_screen() {
                                      button("quit", "Quit")});
 }
 
+// Over everything while the world round the player comes in: nothing of the half-made world shows.
+Json loading_screen() {
+    return {{"type", "panel"},
+            {"visible", "menu.loading"},
+            {"background", "#07090cff"},
+            {"children",
+             {{{"type", "panel"},
+               {"anchor", {0.5, 0.5}},
+               {"layout", "column"},
+               {"gap", 18},
+               {"children",
+                {title("{menu.title}"),
+                 {{"type", "text"}, {"text", "Loading..."}, {"font_size", 26}, {"anchor", {0.5, 0}}},
+                 {{"type", "bar"},
+                  {"id", "progress"},
+                  {"value", "loading.progress"},
+                  {"max", 1},
+                  {"size", {480, 10}},
+                  {"anchor", {0.5, 0}},
+                  {"background", k_button},
+                  {"color", "#c9d4e0ff"}}}}}}}};
+}
+
 const char* screen_of(GameMenus::Menu menu) {
     switch (menu) {
     case GameMenus::Menu::pause: return "menu.pause";
     case GameMenus::Menu::saves: return "menu.saves";
     case GameMenus::Menu::settings: return "menu.settings";
     case GameMenus::Menu::main: return "menu.main";
+    case GameMenus::Menu::loading: return "menu.loading";
     case GameMenus::Menu::none: break;
     }
     return "";
@@ -202,6 +228,7 @@ const char* GameMenus::to_string(Menu menu) {
     case Menu::saves: return "saves";
     case Menu::settings: return "settings";
     case Menu::main: return "main";
+    case Menu::loading: return "loading";
     }
     return "none";
 }
@@ -221,9 +248,12 @@ void GameMenus::wait() {
 void GameMenus::load_screens() {
     if (m_state.game_ui == nullptr) return;
     for (const auto& [name, screen] : {std::pair{"menu.pause", pause_screen()}, std::pair{"menu.saves", saves_screen()},
-                                       std::pair{"menu.settings", settings_screen()}, std::pair{"menu.main", main_screen()}}) {
+                                       std::pair{"menu.settings", settings_screen()}, std::pair{"menu.main", main_screen()},
+                                       std::pair{"menu.loading", loading_screen()}}) {
         std::string error;
-        if (!m_state.game_ui->load_screen(name, screen.dump(), k_layer, error))
+        // (The loading screen over every screen a game may load: nothing of the half-made world shows.)
+        const int layer = std::string_view(name) == "menu.loading" ? GameUi::k_top_layer : k_layer;
+        if (!m_state.game_ui->load_screen(name, screen.dump(), layer, error))
             log_error("editor", std::string("the game's menu ") + name + ": " + error);
     }
     show_values();
@@ -377,6 +407,7 @@ bool GameMenus::paused() const { return m_menu != Menu::none && m_state.play != 
 
 void GameMenus::open(Menu menu, bool saving) {
     if (menu == Menu::main && !m_state.game_mode) menu = Menu::none; // (the editor has none: its Quit would end the program)
+    if (menu == Menu::loading && !m_arriving.on) menu = Menu::none;   // (the menus' own to show: nothing else would end it)
     if (menu != Menu::none && m_menu == Menu::none && m_state.play != nullptr) m_state.play->release_keys();
     m_menu = menu;
     m_saving = saving;
@@ -464,6 +495,8 @@ void GameMenus::show_values() {
     v.set("menu.saves", m_menu == Menu::saves);
     v.set("menu.settings", m_menu == Menu::settings);
     v.set("menu.main", m_menu == Menu::main);
+    v.set("menu.loading", m_menu == Menu::loading);
+    v.set("loading.progress", static_cast<double>(m_arriving.progress));
     // The main menu: the world's name over it, Continue when a game of this world can be loaded, and
     // what went wrong (not the saves' own "Reading saves...").
     const std::string world = m_state.world != nullptr ? path_to_utf8(m_state.world->folder().filename()) : std::string();
@@ -504,7 +537,10 @@ bool GameMenus::load(const std::string& slot) {
     }
     m_loading = true;
     m_failures_before = m_state.saves->status().failures;
-    close(); // the game it was
+    // The game it was is gone from here. A game: the loading screen stands from now, over the game
+    // being read and then over its world coming in (in play too: that game is held still).
+    if (m_state.game_mode && m_state.game_ui != nullptr) show_loading();
+    else close();
     return true;
 }
 
@@ -514,14 +550,98 @@ void GameMenus::lead(std::string notice) {
     show_values();
 }
 
+void GameMenus::show_loading() {
+    const u32 shown = m_arriving.shown + 1;
+    m_arriving = Loading{};
+    m_arriving.on = true;
+    m_arriving.shown = shown;
+    m_arriving_before = 0;
+    m_arriving_done = 0;
+    m_arriving_quiet = 0;
+    m_arriving_seconds = m_arriving_bodies = 0.0;
+    m_arriving_frame = std::chrono::steady_clock::now();
+    m_arriving_streamed = 0;
+    open(Menu::loading);
+}
+
 bool GameMenus::begin_play() {
     m_state.follow.person = 0; // the camera is the player's eyes from here
+    // A game: first the world round the player comes in, behind the loading screen (play then
+    // begins without the hitches of its arriving, and with ground to stand on).
+    if (m_state.game_mode && m_state.game_ui != nullptr) {
+        if (!m_arriving.on) show_loading();
+        return true;
+    }
+    return start_play();
+}
+
+bool GameMenus::start_play() {
     if (m_state.play != nullptr && m_state.play->start(m_state.scene, m_state.camera, m_state.scene_generation)) {
         close();
         return true;
     }
     lead("The game could not start here: there is no ground to stand on.");
     return false;
+}
+
+void GameMenus::arrive() {
+    // The frame's seconds, as the frames have them: a window put away (no frames) is no time passed.
+    const auto now = std::chrono::steady_clock::now();
+    const double frame = std::clamp(std::chrono::duration<double>(now - m_arriving_frame).count(), 0.0, 0.1);
+    m_arriving_frame = now;
+    const WorldStreaming* streaming = m_state.world;
+    const bool streamed = streaming != nullptr && streaming->active(m_state.scene_generation);
+    const bool playing = m_state.play != nullptr && m_state.play->playing();
+    m_arriving.game = m_state.saves != nullptr && m_state.saves->busy(); // (the game being read; a save being written too)
+    // (A frame streaming has not looked at the world in, as when nothing could be drawn, says nothing of what is to come.)
+    const bool looked = !streamed || streaming->updates() != m_arriving_streamed;
+    if (streamed) m_arriving_streamed = streaming->updates();
+    m_arriving.cells = streamed ? streaming->coming() : 0;
+    m_arriving.textures = m_state.textures != nullptr ? static_cast<u32>(std::min<usize>(m_state.textures->pending(), 1u << 30)) : 0;
+    // (A loaded game's dented tiles are put in as their cells come, and built then: not counted while they
+    // wait, since those of cells far from the player never come.)
+    m_arriving.ground = m_state.terrain_meshes != nullptr ? m_state.terrain_meshes->stats().building : 0u;
+    const u32 counted = m_arriving.cells + m_arriving.textures + m_arriving.ground + (m_arriving.game ? 1u : 0u);
+    // The bodies, once the rest is in, and for no longer than play itself would wait for them.
+    // (A player already put down by a loaded game waits for its own, held still.)
+    m_arriving.bodies = !playing && m_state.play != nullptr && m_state.play->world_waits(m_state.scene, m_state.camera.position);
+    bool bodies = false;
+    if (counted == 0 && m_arriving.bodies) {
+        m_arriving_bodies += frame;
+        bodies = m_arriving_bodies <= PlayState::k_most_placing_seconds;
+    }
+    const u32 coming = counted + (bodies ? 1u : 0u);
+    // What has come in since the screen stood, of all that was ever to come: more found to come
+    // later (a cell in brings its textures) holds the bar where it is, never back.
+    if (coming < m_arriving_before) m_arriving_done += m_arriving_before - coming;
+    m_arriving_before = coming;
+    if (coming != 0) m_arriving_quiet = 0;
+    else if (looked) ++m_arriving_quiet;
+    const double all = static_cast<double>(m_arriving_done) + static_cast<double>(coming);
+    const float in = all > 0.0 ? static_cast<float>(static_cast<double>(m_arriving_done) / all) : 1.0f;
+    // (The bar's last tenth is the quiet frames, but the first two: what a cell just in asks for is asked a
+    // frame later, and nothing is known to come in the first frames the screen stands.)
+    const u32 held = 2;
+    const float quiet = static_cast<float>(std::clamp(m_arriving_quiet, held, k_quiet_frames) - held) / static_cast<float>(k_quiet_frames - held);
+    // (Rounded: a value the screen and get_menu show.)
+    const float progress = std::max(m_arriving.progress, std::round((coming != 0 ? 0.9f * in : quiet > 0.0f || m_arriving_done != 0 ? 0.9f + 0.1f * quiet : 0.0f) * 1000.0f) / 1000.0f);
+    if (progress != m_arriving.progress) {
+        m_arriving.progress = progress;
+        if (m_state.game_ui != nullptr) m_state.game_ui->values.set("loading.progress", static_cast<double>(progress));
+    }
+    if (m_arriving.game) return; // (the game itself still being read: its own end, counted as no time of the world's)
+    m_arriving_seconds += frame;
+    const bool in_time = m_arriving_quiet >= k_quiet_frames;
+    if (!in_time && m_arriving_seconds <= k_most_loading_seconds) return;
+    if (!in_time)
+        log_warning("game", "the world was still coming in after " + std::to_string(static_cast<int>(k_most_loading_seconds)) + " s (" +
+                                std::to_string(m_arriving.cells) + " cells, " + std::to_string(m_arriving.textures) + " textures, " +
+                                std::to_string(m_arriving.ground) + " ground tiles" + (m_arriving.bodies ? ", bodies" : "") +
+                                "): play begins without them");
+    m_arriving.on = false;
+    // (A loaded game that was saved in play is playing already, held still behind the screen: it goes on.)
+    if (playing) close();
+    else start_play();
 }
 
 void GameMenus::press(const std::string& screen, const std::string& id) {
@@ -612,7 +732,9 @@ bool GameMenus::update(const std::vector<platform::InputEvent>& events, float pi
     const bool playing = play != nullptr && play->playing();
     take_read();
     // Play stopped (Quit, a load, a new scene, MCP) or started: a menu open goes.
-    if (m_was_playing != playing && m_menu != Menu::none) close();
+    // (Not the loading screen over a game being loaded: the load itself stops the play there was and
+    // may begin the loaded game's.)
+    if (m_was_playing != playing && m_menu != Menu::none && !(m_menu == Menu::loading && m_loading)) close();
     m_was_playing = playing;
     if (m_state.game_mode && m_start == nullptr) m_start = std::make_unique<EditorCamera>(m_state.camera);
     if (playing) m_state.camera.vertical_fov_degrees = m_settings.fov_degrees;
@@ -631,10 +753,22 @@ bool GameMenus::update(const std::vector<platform::InputEvent>& events, float pi
     if (m_loading && !busy) {
         m_loading = false;
         const bool failed = m_state.saves == nullptr || m_state.saves->status().failures != m_failures_before;
-        if (m_state.game_mode && !(play != nullptr && play->playing())) {
-            if (failed) lead("That game could not be loaded: " + (m_state.saves != nullptr ? m_state.saves->status().error : std::string()));
-            else begin_play();
+        if (m_state.game_mode) {
+            // (In play the game there was goes on, and the saves' own toast says what failed.)
+            if (failed && playing) close();
+            else if (failed) lead("That game could not be loaded: " + (m_state.saves != nullptr ? m_state.saves->status().error : std::string()));
+            else {
+                // (The loading screen stands on, now for the game's world: then it is played, or goes on. Over
+                // another menu a command opened meanwhile too: the game that is in is to be played.)
+                if (m_menu != Menu::loading) m_arriving.on = false;
+                begin_play();
+            }
         }
+    }
+    // A game about to be played: the world round the player comes in behind the loading screen.
+    if (m_arriving.on) {
+        if (m_menu != Menu::loading) m_arriving.on = false; // (another menu opened, or play begun or ended, by a command)
+        else arrive();
     }
     // A game, outside play (and not while a game is being loaded): the main menu stands.
     if (m_state.game_mode && !(play != nullptr && play->playing()) && m_menu == Menu::none && can_show && !busy) open(Menu::main);
@@ -666,7 +800,8 @@ bool GameMenus::update(const std::vector<platform::InputEvent>& events, float pi
                 case platform::Key::space: ui->activate(screen); break;
                 case platform::Key::escape:
                     if (m_menu == Menu::pause) close();
-                    else if (m_menu != Menu::main) open(before()); // (the main menu is left by its buttons only)
+                    // (The main menu is left by its buttons only; the loading screen when the world is in.)
+                    else if (m_menu != Menu::main && m_menu != Menu::loading) open(before());
                     break;
                 default: break;
                 }

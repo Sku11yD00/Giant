@@ -64,6 +64,7 @@ struct Stage {
     PlayState play{physics};
     WeatherState weather;
     WorldStreaming streaming;
+    bool streams = true; // (false: the world streams only when the test says)
     GameSaves saves;
     std::unique_ptr<GameUi> game_ui;
     EditorState state;
@@ -108,6 +109,7 @@ struct Stage {
     // One frame as the program runs it. True: a menu took its input.
     bool frame(float pixels_per_point = 1.0f) {
         const bool took = menus->update(input, pixels_per_point);
+        if (streams) streaming.update(state.scene, state.scene_generation, state.camera.position, SceneFrame{});
         if (!took) play.handle_input(input, false);
         input.clear();
         const double dt = menus->game_seconds(1.0 / 60.0);
@@ -338,6 +340,11 @@ GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to men
             menus.wait();
             stage.frame();
         };
+        // (Through the loading screen: a few frames more than its quiet ones.)
+        const auto into_play = [&] {
+            for (u32 i = 0; i < GameMenus::k_quiet_frames + 4 && !play.playing(); ++i) stage.frame();
+            stage.frame(); // (the frame the menus see play begun in)
+        };
         // From the first frame the main menu stands, named for the world, and its input is the menu's.
         GIANT_CHECK(stage.frame() && menus.menu() == GameMenus::Menu::main && !play.playing() && !menus.paused());
         settle();
@@ -368,8 +375,19 @@ GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to men
         GIANT_CHECK(ui.screen("menu.main")->focused() == "new");
         stage.input.push_back(key(platform::Key::enter));
         stage.frame();
-        stage.frame();
-        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none);
+        // First the loading screen, over everything, while the world round the player comes in: here it
+        // is all in, so it stands for the quiet frames and no longer. Esc does not leave it, and it is not play.
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().on && !play.playing() && !menus.paused());
+        GIANT_CHECK(stage.run("get_menu").value["menu"] == "loading" && stage.run("get_menu").value["loading"]["on"] == true);
+        stage.input.push_back(key(platform::Key::escape));
+        GIANT_CHECK(stage.frame()); // (its input is the screen's, not play's)
+        GIANT_CHECK(ui.values.truthy("menu.loading") && !ui.values.truthy("menu.main") && ui.screen("menu.loading") != nullptr);
+        for (u32 i = 3; i < GameMenus::k_quiet_frames; ++i) stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && !play.playing());
+        GIANT_CHECK(ui.values.number("loading.progress") > 0.5 && ui.values.number("loading.progress") < 1.0);
+        into_play();
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none && !menus.loading().on);
+        GIANT_CHECK(!ui.values.truthy("menu.loading"));
         for (int i = 0; i < 30; ++i) stage.frame();
         // Esc pauses; the pause menu's Quit says where it leads, and leads there: play over, the main menu again.
         stage.input.push_back(key(platform::Key::escape));
@@ -397,11 +415,21 @@ GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to men
         GIANT_CHECK(ui.values.truthy("menu.continue") && ui.screen("menu.main")->shown("continue"));
         GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "continue"}}).ok);
         stage.frame();
-        GIANT_CHECK(menus.menu() == GameMenus::Menu::none); // (no menu over the game being loaded)
+        // The loading screen at once, over the game being read (not the world it is about to replace).
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().on && menus.loading().shown == 2);
         stage.saves.wait();
-        for (int i = 0; i < 8 && !play.playing(); ++i) stage.frame();
+        // The loaded game was saved in play, so it plays as soon as it is in, held still behind the
+        // loading screen until its world is in too: then it goes on.
+        for (int i = 0; i < 8 && !play.playing(); ++i) {
+            stage.frame();
+            GIANT_CHECK(menus.menu() == GameMenus::Menu::loading);
+        }
+        stage.frame(); // (the frame the menus see it playing in: the screen stays)
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().on && play.playing() && menus.paused());
+        GIANT_CHECK(menus.game_seconds(1.0) == 0.0);
+        for (u32 i = 0; i < GameMenus::k_quiet_frames + 4 && menus.menu() != GameMenus::Menu::none; ++i) stage.frame();
         stage.frame();
-        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none);
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none && !menus.paused() && !menus.loading().on);
         // Play stopped by anything else (a command) leads to the main menu too, never to nothing.
         GIANT_CHECK(stage.run("play", {{"on", false}}).ok);
         stage.saves.wait();
@@ -412,8 +440,7 @@ GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to men
         GIANT_CHECK(!stage.saves.status().base_slot.empty()); // (the loaded game's)
         stage.state.camera.position = {9.0, 2.0, 9.0};        // (wherever the last game left the view)
         GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
-        stage.frame();
-        stage.frame();
+        into_play();
         GIANT_CHECK(play.playing() && stage.saves.status().base_slot.empty());
         GIANT_CHECK(play.player() && std::abs(play.player()->position.x) < 0.5); // from where the program opened, not from there
         const auto to_the_menu = [&] {
@@ -430,8 +457,7 @@ GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to men
         // the load stops the play it was begun in, and the menus start the loaded game.
         GIANT_CHECK(stage.run("save_game", {{"slot", "outside"}, {"wait", true}}).ok);
         GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
-        stage.frame();
-        stage.frame();
+        into_play();
         GIANT_CHECK(play.playing());
         GIANT_CHECK(stage.run("open_menu", {{"menu", "pause"}}).ok);
         stage.frame();
@@ -448,9 +474,13 @@ GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to men
         settle();
         GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.saves"}, {"id", "slot.0"}}).ok);
         stage.frame();
-        stage.frame(); // (play still goes on: the load is on its job)
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.paused()); // (the game played is held still under it)
+        stage.frame();
         stage.saves.wait();
-        for (int i = 0; i < 64 && (stage.saves.busy() || !play.playing()); ++i) stage.frame();
+        for (int i = 0; i < 64 && (stage.saves.busy() || !play.playing()); ++i) {
+            GIANT_CHECK(menus.menu() == GameMenus::Menu::loading); // (through the load stopping the play it was begun in)
+            stage.frame();
+        }
         stage.frame();
         GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none && menus.notice().empty());
         to_the_menu();
@@ -462,6 +492,7 @@ GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to men
         }
         GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "continue"}}).ok); // (the newest: that one)
         stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading);
         stage.saves.wait();
         for (int i = 0; i < 64 && (stage.saves.busy() || menus.menu() != GameMenus::Menu::main); ++i) stage.frame();
         GIANT_CHECK(!play.playing() && menus.menu() == GameMenus::Menu::main);
@@ -488,6 +519,149 @@ GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to men
     std::error_code ec;
     std::filesystem::remove_all(folder, ec);
     std::filesystem::remove_all(other, ec);
+}
+
+GIANT_TEST("game menus: the loading screen stands while the world round the player comes in, and no longer than it may") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        Stage stage(folder, true);
+        GIANT_CHECK(stage.device != nullptr);
+        if (stage.device == nullptr) return;
+        GameMenus& menus = *stage.menus;
+        PlayState& play = stage.play;
+        GameUi& ui = *stage.game_ui;
+        SceneFrame frame;
+        stage.streams = false;
+        const auto stream = [&] { stage.streaming.update(stage.state.scene, stage.state.scene_generation, stage.state.camera.position, frame); };
+        // The world as authored and opened again: nothing of it in the scene (and nothing streams here
+        // but when the test says so), the main menu standing.
+        const auto reopened = [&](bool first) {
+            if (!first) GIANT_CHECK(stage.run("play", {{"on", false}}).ok);
+            GIANT_CHECK(stage.run("open_world", {{"folder", path_to_utf8(folder)}, {"discard_unsaved", true}}).ok);
+            GIANT_CHECK(stage.state.scene.size() == 0);
+            for (int i = 0; i < 4; ++i) stage.frame();
+            menus.wait();
+            stage.frame();
+            GIANT_CHECK(menus.menu() == GameMenus::Menu::main);
+        };
+        // Two cells: the floor's, and one beside it with a thing in it.
+        world::Entity thing;
+        thing.shape = world::Shape::cube;
+        thing.transform.position = {world::k_cell_size + 8.0, 1.0, 8.0};
+        stage.state.scene.add(thing);
+        GIANT_CHECK(stage.run("save_world").ok);
+        reopened(true);
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
+        stage.frame();
+        // The screen is over every other (a layer no screen a game loads can have), and the bar starts empty.
+        GIANT_CHECK(ui.layer("menu.loading") == GameUi::k_top_layer && menus.loading().shown == 1);
+        std::string refused;
+        GIANT_CHECK(!ui.load_screen("over", R"({"type": "panel"})", GameUi::k_top_layer, refused) && !refused.empty());
+        GIANT_CHECK(ui.load_screen("over", R"({"type": "panel"})", GameUi::k_max_layer, refused) && ui.screen_names().back() == "menu.loading");
+        // Frames in which streaming has not looked at the world are not quiet ones: the screen stands.
+        for (u32 i = 0; i < GameMenus::k_quiet_frames * 2; ++i) stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().cells == 0 && menus.loading().progress == 0.0f);
+        // Its cells being read, not yet taken: the screen stands, however many frames pass, and says what is to come.
+        stream();
+        for (u32 i = 0; i < GameMenus::k_quiet_frames * 4; ++i) stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().on && !play.playing());
+        GIANT_CHECK(menus.loading().cells == 2 && menus.loading().progress == 0.0f && !menus.loading().game);
+        Json told = stage.run("get_menu").value;
+        GIANT_CHECK(told["menu"] == "loading" && told["loading"]["on"] == true && told["loading"]["cells"] == 2);
+        GIANT_CHECK(told["loading"]["game"] == false && told["loading"]["textures"] == 0 && told["loading"]["ground"] == 0);
+        GIANT_CHECK(told["loading"]["progress"] == 0.0 && told["loading"]["shown"] == 1);
+        // The cells stream in: the bar goes forward and never back, and a few quiet frames after the
+        // last, play begins, on the ground that came.
+        float before = 0.0f;
+        bool between = false, forward = true;
+        for (int i = 0; i < 400 && !play.playing(); ++i) {
+            stage.streaming.finish_reads();
+            stream();
+            stage.frame();
+            forward = forward && menus.loading().progress >= before;
+            before = menus.loading().progress;
+            between = between || (before > 0.0f && before < 1.0f && menus.loading().on);
+            if (menus.loading().on && menus.loading().cells != 0) GIANT_CHECK(before <= 0.9f);
+        }
+        GIANT_CHECK(forward && between && menus.loading().progress == 1.0f);
+        GIANT_CHECK(ui.values.number("loading.progress") == 1.0);
+        stage.frame();
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none && !menus.loading().on && stage.state.scene.size() == 2);
+        GIANT_CHECK(menus.notice().empty() && stage.streaming.coming() == 0);
+        told = stage.run("get_menu").value;
+        GIANT_CHECK(told["menu"] == "none" && told["loading"]["on"] == false && told["loading"]["shown"] == 1);
+
+        // A world that never comes in (read, never taken): the screen stands up to the longest it may,
+        // in seconds of frames, and then play is begun anyway.
+        reopened(false);
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
+        stage.frame();
+        stream();
+        for (u32 i = 0; i < GameMenus::k_quiet_frames * 2; ++i) stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().cells == 2 && menus.loading().shown == 2);
+        menus.loading_waited(GameMenus::k_most_loading_seconds - 5.0);
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && !play.playing());
+        menus.loading_waited(6.0);
+        stage.frame();
+        stage.frame();
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none && !menus.loading().on && menus.loading().progress < 1.0f);
+
+        // Another menu opened by a command while it loads: the loading is off, and play does not begin behind it.
+        reopened(false);
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
+        stage.frame();
+        GIANT_CHECK(menus.loading().on && menus.loading().shown == 3);
+        GIANT_CHECK(stage.run("open_menu", {{"menu", "settings"}}).ok);
+        for (u32 i = 0; i < GameMenus::k_quiet_frames * 2; ++i) {
+            stage.streaming.finish_reads();
+            stream();
+            stage.frame();
+        }
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::settings && !menus.loading().on && !play.playing());
+        menus.open(GameMenus::Menu::main);
+        stage.frame();
+
+        // Play begun by a command while it loads: the screen goes, the game is played.
+        reopened(false);
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading);
+        GIANT_CHECK(stage.run("play", {{"on", true}}).ok);
+        stage.frame();
+        stage.frame();
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none && !menus.loading().on);
+
+        // A cell whose file cannot be read is not waited for: play begins with the rest.
+        std::filesystem::path damaged;
+        for (const auto& entry : std::filesystem::directory_iterator(folder / "cells")) {
+            const auto text = read_text_file(entry.path());
+            if (text && text->find("cube") != std::string::npos) damaged = entry.path();
+        }
+        GIANT_CHECK(!damaged.empty());
+        std::ofstream(damaged, std::ios::binary | std::ios::trunc) << "{ not a cell";
+        reopened(false);
+        GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
+        for (int i = 0; i < 400 && !play.playing(); ++i) {
+            stage.streaming.finish_reads();
+            stream();
+            stage.frame();
+        }
+        GIANT_CHECK(play.playing() && stage.streaming.stats().failed == 1 && stage.state.scene.size() == 1);
+    }
+    {
+        // The loading screen is the menus' own to show: it cannot be opened by name (nothing would end it).
+        Stage stage(folder / "editor", false);
+        GIANT_CHECK(stage.device != nullptr);
+        if (stage.device != nullptr) {
+            stage.frame();
+            stage.menus->open(GameMenus::Menu::loading);
+            stage.frame();
+            GIANT_CHECK(stage.menus->menu() == GameMenus::Menu::none && !stage.menus->loading().on && stage.menus->loading().shown == 0);
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
 }
 
 GIANT_TEST("game menus: a game's settings as text and back; what is wrong in the text is named and left at its default") {

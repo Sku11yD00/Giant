@@ -72,6 +72,7 @@ public:
     static constexpr usize k_max_screens = 32;
     static constexpr usize k_max_widgets = 16384;
     static constexpr int k_max_layer = 1000;
+    static constexpr int k_top_layer = k_max_layer + 1; // the reserved screens' alone: over every screen a game loads
 
     // What the screens show ("{ammo}", a bar's "health"), set by the game.
     ui::Values values;

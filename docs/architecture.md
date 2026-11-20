@@ -5646,16 +5646,16 @@ and load, settings), which also route the real mouse and keys to screens.
   Quit reads "Quit to menu" and leads there, as does play stopped any
   other way; Back and Esc from the saves and the settings lead to the
   main menu (to the pause menu in play), and Esc does nothing on it. A
-  game loaded from a menu is watched until it is in (`m_loading`): one
-  saved in play goes on by itself, one saved outside play is started,
+  game loaded from a menu is watched until it is in (`m_loading`), behind
+  the loading screen (below): one saved in play goes on when its world
+  is in, one saved outside play is started then,
   and one that fails on its job leads back to the main menu, which says
   why (`notice`, `menu.message`; in play the game goes on and the saves'
   toast says it). The editor has no main menu (asking for it there closes
   the menus). Nobody can be asked a question in a game (the editor's
   question windows are its panels'), so script files and mods' scripts are
   treated as with no window at all: not loaded unless allowed on the
-  command line. Not yet: a player start in the world, a loading screen;
-  the game's own
+  command line. Not yet: a player start in the world; the game's own
   screens show behind the main menu, and scripts run there too. Tested by
   `editor/tests/test_game_menus.cpp` and end to end by
   `tools/game_smoke.py` (ctest `editor_game`).
@@ -5688,6 +5688,59 @@ and load, settings), which also route the real mouse and keys to screens.
   (`platform::Window::request_fullscreen`): no display mode is changed,
   so there is no resolution to choose. The editor itself keeps none of
   this (`kept_in` empty): its menus' settings last while it runs.
+- **A game's loading screen (N7 part 4).** A game does not begin play
+  into a world still arriving. `GameMenus::begin_play` (a new game) and
+  `GameMenus::load` (a game loaded from a menu, from the moment it is
+  asked for, so the world it replaces is never shown half gone) show the
+  screen `menu.loading` on a layer of the game UI no screen a game
+  loads can have (`GameUi::k_top_layer`; the world's name,
+  "Loading...", a bar; opaque from its first frame), and play begins
+  when nothing has been coming for `k_quiet_frames` (10) frames in
+  which streaming looked at the world (`WorldStreaming::updates`: a
+  frame that could not be drawn says nothing of what is to come). What is coming is counted each frame (`GameMenus::Loading`,
+  `get_menu`'s `loading`): the saved `game` itself while it is read and
+  put in; the `cells` streaming is bringing for where the camera is
+  (`WorldStreaming::coming`: within the load radius, or touched by an
+  edit, and not read yet, being read, or read and waiting for their
+  frame's budget; not one whose file failed); the `textures` waiting to cook, cooking, waiting
+  to upload or reading finer levels (`TextureLibrary::pending`); the
+  `ground` tiles whose mesh is still to build (a loaded game's dented
+  tiles are put in as their cells come and built then; those waiting
+  for cells far off, which never come, are not counted); and, once all
+  of those are in and unless the game is playing already, the `bodies`
+  the player would stand on or in (entities' bodies, ground, trunks:
+  `PlayState::world_waits`), for at most
+  `PlayState::k_most_placing_seconds` (5, as play itself waits for
+  them). (`busy` saves count as `game` too: one being written while
+  the screen stands.) So a game starts with ground to stand on
+  and with its first cells and textures already in, not arriving over
+  the first seconds of play (rule 9). A loaded game that was saved in
+  play is playing the moment it is in: the screen stands over play as a
+  menu does, so the game is held still (`paused`, and `main` gives the
+  frame the load lands in no game time either) and goes on when its
+  world is in. The bar is the share of all that was ever to come that
+  has come (`progress`, never back: more found to come, as a cell in
+  brings its textures, holds it where it is); the last tenth is the
+  quiet frames after the first two. After `k_most_loading_seconds` (120) seconds of frames
+  (each counted as at most a tenth of a second, so a window put away
+  costs none, and not while the game itself is read: a read that never
+  returns, as from a drive gone away, holds the screen as it would have
+  held the load) play begins
+  whatever is still to come, with a warning in the log saying what was
+  (a world that cannot come in must not hold the game for ever). Esc
+  does not leave the screen; another menu opened by a command, or play
+  begun or ended by one, ends a new game's loading (a game being read
+  keeps its screen through the play it stops and starts, and gets it
+  again over a menu opened meanwhile once it is in: it is to be
+  played). `loading.shown` counts the times the screen was put up; the
+  other fields keep what they last said once it is gone. Not waited for: the far ground's chunks, scatter,
+  the nav tiles, people, sounds. Toasts and `fade_to` still draw over
+  the screen. No loading screen: the editor (play there begins at once,
+  as before), the `play` command, and a game loaded by the `load_game`
+  command or a script. Tested by `editor/tests/test_game_menus.cpp`
+  (cells that stream in while the screen stands and the bar's way
+  there, the longest wait, a cell that cannot be read, a game loaded in
+  and outside play) and in `tools/game_smoke.py`.
 - **A game as a folder (N7 part 3).** `package_game` writes the open
   world, as saved, as a game into a new folder (`editor/src/game_package.h`;
   never over anything: the folder must not be there, or be empty): the
