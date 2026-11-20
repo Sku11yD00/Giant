@@ -5654,8 +5654,8 @@ and load, settings), which also route the real mouse and keys to screens.
   the menus). Nobody can be asked a question in a game (the editor's
   question windows are its panels'), so script files and mods' scripts are
   treated as with no window at all: not loaded unless allowed on the
-  command line. Not yet: a player start in the world, a loading screen,
-  a packaged folder; the game's own
+  command line. Not yet: a player start in the world, a loading screen;
+  the game's own
   screens show behind the main menu, and scripts run there too. Tested by
   `editor/tests/test_game_menus.cpp` and end to end by
   `tools/game_smoke.py` (ctest `editor_game`).
@@ -5688,6 +5688,61 @@ and load, settings), which also route the real mouse and keys to screens.
   (`platform::Window::request_fullscreen`): no display mode is changed,
   so there is no resolution to choose. The editor itself keeps none of
   this (`kept_in` empty): its menus' settings last while it runs.
+- **A game as a folder (N7 part 3).** `package_game` writes the open
+  world, as saved, as a game into a new folder (`editor/src/game_package.h`;
+  never over anything: the folder must not be there, or be empty): the
+  program copied under the game's name, the `D3D12` folder and
+  `d3d10warp.dll` beside it where they are, `managed/` with the C# API
+  alone, `world/` (the world's folder with its mods, without its saves),
+  every file the world names at the path it names it by, `scripts/` (the
+  scripts' assembly, its `.deps.json` and `.runtimeconfig.json`, the
+  libraries beside it) and `game.json` (text: `giant_game` 1, `name`,
+  `version`, `world`, `scripts`). The program started with a game's
+  `game.json` beside it is that game (`take_packaged_game` in `main`):
+  its working folder becomes its own, so the world's paths, which are
+  from the working folder, hold wherever it is started from (paths on its
+  command line are made whole first: they are from where it was started);
+  it opens the world as `--game` does, loads the scripts as `--scripts`
+  does, unasked, takes the game's name as its window's title and keeps
+  its settings in `games/<name>/game_settings.json` of the person's
+  settings folder. `--game` on its command line wins; a `game.json`
+  without `"giant_game": 1` is some other program's and is let be; a
+  game's with something wrong in it ends the program with an error. As
+  it runs the game writes into its own folder: `world/saves/` and
+  `giant_cache/` (it must be able to write there). The files a world
+  uses are found in its text (`world_files`): every string in its JSON
+  files that names a file under the working folder is one, read as the
+  program reads a name (`MeshLibrary::normalize`), and a `.gltf` is read
+  for the files it names in turn. That needs no list of the fields that
+  hold paths, which would fall behind; the price is that a name that
+  happens to be a file's path is copied for nothing. A file named by an
+  absolute path or one outside the working folder cannot go in at its
+  path: the command refuses and names them. A name on another machine
+  (`//server/...`) is never looked for: text from a world or a mod must
+  not make the editor call out. What scripts load by name as they run is
+  not in the world's text: `include` names it. Everything that goes in
+  is planned before anything is written, so every refusal leaves nothing
+  made: two files for one place (two spellings of a path, on Windows two
+  cases; one file twice is once), a file under what would be a file, a
+  name that is the package's own (`world`, `managed`, `scripts`, `D3D12`,
+  `giant_cache`, a Windows device), a world's JSON that cannot be read.
+  Never in it, refused by name wherever found: the chat's library and
+  what it brings, and any file named as the chat's key is (names ending
+  in a dot or space, or with `~`, are refused too: Windows reads them as
+  other files'). Not taken along: the saves, the textures' cache,
+  symbols beside the program and the scripts, the editor's own files.
+  `notes` says what one might miss: links not followed, a mod's scripts
+  (they do not run in a game yet: no one is there to allow them), how
+  many files came from the scripts' folder, that scripts need .NET. It
+  waits on the disk for as long as the world is large, as `save_world`
+  does: a command the person asked for, not while playing, with no
+  progress shown yet. Not yet: the textures' cache (a game cooks its
+  textures the first time it runs), .NET itself, what a `.glb` names
+  outside itself, a `.gltf`'s names written with percent signs, an
+  install folder that cannot be written to. Tested by
+  `editor/tests/test_game_package.cpp` and end to end by
+  `tools/game_smoke.py`, which runs the packaged folder, moved, from
+  another working folder.
 
 Known limits: one font, no scripts beyond Latin (no CJK, Arabic or
 Cyrillic yet: the atlas would grow, or glyphs be made on demand on a

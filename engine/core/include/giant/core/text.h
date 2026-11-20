@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 namespace giant {
 
@@ -17,6 +18,15 @@ inline std::string path_to_utf8(const std::filesystem::path& path) {
 // And back: a path from UTF-8 text (a command's argument).
 inline std::filesystem::path path_from_utf8(const std::string& text) {
     return std::filesystem::path(std::u8string(text.begin(), text.end()));
+}
+
+// A to Z as a to z, every other byte as it is (names of files and joints compared whatever their case).
+inline std::string ascii_lower(std::string_view text) {
+    std::string out(text);
+    for (char& c : out) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return out;
 }
 
 } // namespace giant

@@ -3,12 +3,12 @@
 #include "pose_math.h"
 
 #include "giant/core/log.h"
+#include "giant/core/text.h"
 #include "giant/geometry/alembic.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cctype>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -247,8 +247,7 @@ u32 hair_joint(const anim::Skeleton& skeleton, const std::string& name) {
             if (skeleton.names[j] == name) return static_cast<u32>(j);
             continue;
         }
-        std::string lower = skeleton.names[j];
-        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const std::string lower = ascii_lower(skeleton.names[j]);
         if (lower.find("head") != std::string::npos) return static_cast<u32>(j);
     }
     return k_no_hair_joint;
@@ -593,8 +592,7 @@ std::shared_ptr<HairState::GroomFile> HairState::groom_file(const std::string& n
     WaitGroup* freed = &m_freed;
     m_jobs.submit(file->done, [file, jobs, freed] {
         if (file->cancel.load()) return;
-        std::string ending = file->path.size() >= 4 ? file->path.substr(file->path.size() - 4) : std::string();
-        for (char& c : ending) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const std::string ending = ascii_lower(file->path.size() >= 4 ? file->path.substr(file->path.size() - 4) : std::string());
         if (ending != ".abc") {
             file->problem = "only Alembic (.abc) groom files are read";
             return;

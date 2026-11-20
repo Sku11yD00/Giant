@@ -3,10 +3,10 @@
 #include "pose_math.h"
 
 #include "giant/anim/skeleton.h"
+#include "giant/core/text.h"
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <optional>
@@ -328,8 +328,7 @@ const char* RagdollState::to_string(Kind kind) {
 }
 
 RagdollState::Kind RagdollState::kind_of(std::string_view joint_name) {
-    std::string name(joint_name);
-    for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::string name = ascii_lower(joint_name);
     const std::string_view n = name;
     // (The order matters: a forearm is not an arm, an "UpLeg" not a leg.)
     if (has(n, "head")) return Kind::head;

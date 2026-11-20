@@ -1,7 +1,8 @@
 #include "giant/world/height_map.h"
 
+#include "giant/core/text.h"
+
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 
 namespace giant::world {
@@ -61,8 +62,7 @@ struct Cursor {
 } // namespace
 
 std::optional<std::string> read_height_map(std::span<const u8> bytes, std::string_view extension, HeightMap& out) {
-    std::string ext(extension);
-    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::string ext = ascii_lower(extension);
     HeightMap map;
     if (ext == ".r16" || ext == ".raw") {
         if (bytes.empty() || bytes.size() % 2 != 0) return "a 16-bit RAW height map has two bytes a sample";

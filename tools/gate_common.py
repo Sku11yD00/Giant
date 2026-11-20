@@ -246,10 +246,10 @@ def describe(times):
 class Editor:
     """giant_editor --mcp as a child process, killed after `timeout` seconds."""
 
-    def __init__(self, executable, options, name, timeout=300):
+    def __init__(self, executable, options, name, timeout=300, cwd=None, env=None):
         self.process = subprocess.Popen([executable, "--mcp", *options], stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=None, text=True, encoding="utf-8",
-                                        bufsize=1)
+                                        bufsize=1, cwd=cwd, env=env)
         self.timer = threading.Timer(timeout, self.process.kill)
         self.timer.daemon = True  # (never what keeps the script alive)
         self.timer.start()

@@ -8,6 +8,8 @@
 //                [--allow-scripts-by-command] [--chat-asks]
 //                [--game path/to/world [--player-settings file]]
 //
+// With game.json beside it (a folder made by package_game) the program is
+// that game without being told: see take_packaged_game.
 // --require-validation fails the run if the GPU validation layer is not
 // actually running (CI uses it so "no validation errors" means something).
 // --mcp speaks MCP over stdin/stdout (logs go to stderr); the editor closes
@@ -58,6 +60,7 @@
 #include "terrain_meshes.h"
 #include "world_streaming.h"
 #include "game_menus.h"
+#include "game_package.h"
 #include "game_saves.h"
 #include "game_ui.h"
 #include "ui/panels.h"
@@ -124,6 +127,7 @@ struct Options {
     bool allow_mods_scripts_by_command = false; // automated runs: enable_mod allows a mod's scripts without asking the person
     bool allow_scripts_by_command = false;      // automated runs: load_scripts loads a file without asking the person
     bool chat_asks = false;                     // Claude's changes from the chat wait for the person even with --hidden
+    std::string game_name;       // a packaged game's (game.json beside the program): its window's title, its settings' folder
     std::string player_settings; // a game: the file its settings are kept in (empty: in the person's settings folder)
     std::string game; // a world folder to run as a game (its menus lead, no editor panels); empty: the editor
 };
@@ -211,10 +215,6 @@ bool parse_options(const std::vector<std::string>& argv, Options& out) {
             return false;
         }
     }
-    if (!out.player_settings.empty() && out.game.empty()) {
-        log_error("editor", "--player-settings is a game's (--game): the editor keeps no settings");
-        return false;
-    }
     return true;
 }
 
@@ -252,6 +252,61 @@ std::filesystem::path find_managed_dir() {
         }
     }
     return exe / "managed";
+}
+
+// The program's own file (package_game copies it under the game's name). Empty when it cannot be
+// told (anywhere but Windows and Linux).
+std::filesystem::path program_file() {
+#if defined(_WIN32)
+    std::wstring name(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, name.data(), static_cast<DWORD>(name.size()));
+    if (length == 0 || length >= name.size()) return {};
+    name.resize(length);
+    return std::filesystem::path(name);
+#else
+    std::error_code error;
+    const std::filesystem::path file = std::filesystem::read_symlink("/proc/self/exe", error);
+    return error ? std::filesystem::path() : file;
+#endif
+}
+
+// A packaged game (game_package.h): a game's game.json beside the program makes the program that
+// game, unless it was started as another (--game). Its working folder becomes its own: the world's
+// paths are from there, wherever it was started from (paths on the command line are made whole
+// first). Its scripts are loaded unasked, as --scripts': whoever runs a game runs what it is made
+// of. Another program's game.json (no "giant_game": 1) is let be. False (logged): it is a game's
+// and cannot be run.
+bool take_packaged_game(Options& options) {
+    if (!options.game.empty()) return true;
+    const std::filesystem::path folder = platform::executable_dir();
+    std::error_code error;
+    const std::filesystem::path file = folder / std::string(editor::k_game_file);
+    if (!std::filesystem::is_regular_file(file, error)) return true;
+    const std::optional<std::string> text = read_text_file(file, 65536);
+    // (Some other program's game.json, or none that can be read: the editor, as ever.)
+    if (!text || !editor::is_game_info(*text)) return true;
+    std::string why;
+    const std::optional<editor::GameInfo> info = editor::game_info_from_text(*text, why);
+    if (!info) {
+        log_error("game", "game.json beside the program: " + why);
+        return false;
+    }
+    // (Paths given on the command line are from where it was started, not from the game's folder.)
+    for (std::string* given : {&options.player_settings, &options.scripts}) {
+        if (given->empty()) continue;
+        const std::filesystem::path whole = std::filesystem::absolute(path_from_utf8(*given), error);
+        if (!error) *given = path_to_utf8(whole);
+    }
+    std::filesystem::current_path(folder, error);
+    if (error) {
+        log_error("game", "the game's folder could not be made the working folder: " + error.message());
+        return false;
+    }
+    options.game = info->world;
+    options.game_name = info->name;
+    if (options.scripts.empty()) options.scripts = info->scripts;
+    log_info("game", info->name + " " + info->version);
+    return true;
 }
 
 // The editor's settings on this machine, the person's own (where the chat's key is too): %APPDATA%\Giant,
@@ -414,7 +469,7 @@ int run(const Options& options) {
     const LogHistory log_history;
 
     platform::WindowDesc window_desc;
-    window_desc.title = options.game.empty() ? "Giant Editor" : "Giant";
+    window_desc.title = options.game.empty() ? "Giant Editor" : options.game_name.empty() ? "Giant" : options.game_name;
     window_desc.hidden = options.hidden;
     // A game: the person's settings as it last kept them, read before the window is made (its mode and
     // size, vsync) and handed to the menus once they are there.
@@ -425,7 +480,10 @@ int run(const Options& options) {
             const std::filesystem::path folder = settings_folder();
             kept_in = !options.player_settings.empty() ? options.player_settings
                       : folder.empty()                  ? std::string()
-                                                        : path_to_utf8(folder / "game_settings.json");
+                      : options.game_name.empty()       ? path_to_utf8(folder / "game_settings.json")
+                                                        // (A packaged game's own: not another game's.)
+                                                        : path_to_utf8(folder / "games" / path_from_utf8(options.game_name) /
+                                                                       "game_settings.json");
         } catch (const std::exception&) {
             // (A folder whose name is not text: the settings last while the program runs.)
         }
@@ -489,6 +547,12 @@ int run(const Options& options) {
     editor::MeshLibrary meshes(renderer.get()); // after the renderer: released first
     editor::EditorState state;
     state.vsync_now = sc_desc.vsync;
+    try {
+        state.program = path_to_utf8(program_file());
+        state.managed_folder = path_to_utf8(find_managed_dir());
+    } catch (const std::exception&) {
+        // (A folder whose name is not text: package_game says the program is not there.)
+    }
     state.meshes = &meshes;
     // Cooked material textures are kept beside the working folder's assets
     // between sessions (cooking a 4K map takes seconds; reading it back, not).
@@ -593,7 +657,7 @@ int run(const Options& options) {
     }
     // Hidden runs (tests, CI) keep the panel layout in memory only.
     auto ui = editor::ImGuiLayer::create(*window, *device,
-                                         options.hidden ? nullptr : "giant_editor_layout.ini");
+                                         options.hidden || !options.game.empty() ? nullptr : "giant_editor_layout.ini"); // (a game has no panels to lay out)
     if (ui == nullptr) {
         return 1;
     }
@@ -1153,6 +1217,18 @@ int run(const Options& options) {
 int main(int argc, char** argv) {
     Options options;
     if (!parse_options(utf8_args(argc, argv), options)) {
+        return 2;
+    }
+    try {
+        if (!take_packaged_game(options)) {
+            return 1;
+        }
+    } catch (const std::exception& error) {
+        log_error("game", std::string("game.json beside the program: ") + error.what());
+        return 1;
+    }
+    if (!options.player_settings.empty() && options.game.empty()) {
+        log_error("editor", "--player-settings is a game's (--game, or a packaged game): the editor keeps no settings");
         return 2;
     }
     return run(options);

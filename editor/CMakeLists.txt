@@ -23,6 +23,7 @@ add_executable(giant_editor
   src/game_ui.cpp
   src/game_ui_commands.cpp
   src/game_menus.cpp
+  src/game_package.cpp
   src/hit_targets.cpp
   src/editor_commands.cpp
   src/chat_bridge.cpp
@@ -120,7 +121,7 @@ if(GIANT_BUILD_TESTS)
     add_test(NAME editor_game
       COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/game_smoke.py
               $<TARGET_FILE:giant_editor> --hidden ${mcp_backend})
-    set_tests_properties(editor_game PROPERTIES TIMEOUT 900 ENVIRONMENT "${mcp_env}")
+    set_tests_properties(editor_game PROPERTIES TIMEOUT 1500 ENVIRONMENT "${mcp_env}")
     # The chat with Claude, end to end against a stand-in for its service (no key, no network).
     if(GIANT_DOTNET AND NOT GIANT_SANITIZE_THREAD)
       add_test(NAME editor_chat
@@ -201,13 +202,13 @@ endif()
 # The editor's commands without a window or GPU.
 if(GIANT_BUILD_TESTS)
   add_executable(giant_editor_tests tests/test_scene_commands.cpp tests/test_kits.cpp tests/test_scene_cells.cpp
-                 tests/test_world_streaming.cpp tests/test_terrain.cpp tests/test_far_ground.cpp tests/test_scatter.cpp tests/test_weather.cpp tests/test_clock.cpp tests/test_water.cpp tests/test_people.cpp tests/test_travel.cpp tests/test_routines.cpp tests/test_senses.cpp tests/test_people_list.cpp tests/test_behaviours.cpp tests/test_routes.cpp tests/test_effects.cpp tests/test_water_meshes.cpp tests/test_physics.cpp tests/test_wet.cpp tests/test_animation.cpp tests/test_cloth.cpp tests/test_hair.cpp tests/test_pose_bakes.cpp tests/test_figures.cpp tests/test_swing.cpp tests/test_lamps.cpp tests/test_nav.cpp tests/test_walkers.cpp tests/test_ragdolls.cpp tests/test_audio.cpp tests/test_game_saves.cpp tests/test_game_ui.cpp tests/test_game_menus.cpp tests/test_textures.cpp tests/test_chat.cpp tests/test_script_commands.cpp tests/test_mods.cpp
+                 tests/test_world_streaming.cpp tests/test_terrain.cpp tests/test_far_ground.cpp tests/test_scatter.cpp tests/test_weather.cpp tests/test_clock.cpp tests/test_water.cpp tests/test_people.cpp tests/test_travel.cpp tests/test_routines.cpp tests/test_senses.cpp tests/test_people_list.cpp tests/test_behaviours.cpp tests/test_routes.cpp tests/test_effects.cpp tests/test_water_meshes.cpp tests/test_physics.cpp tests/test_wet.cpp tests/test_animation.cpp tests/test_cloth.cpp tests/test_hair.cpp tests/test_pose_bakes.cpp tests/test_figures.cpp tests/test_swing.cpp tests/test_lamps.cpp tests/test_nav.cpp tests/test_walkers.cpp tests/test_ragdolls.cpp tests/test_audio.cpp tests/test_game_saves.cpp tests/test_game_ui.cpp tests/test_game_menus.cpp tests/test_game_package.cpp tests/test_textures.cpp tests/test_chat.cpp tests/test_script_commands.cpp tests/test_mods.cpp
                  src/scene_commands.cpp src/terrain_commands.cpp src/terrain_meshes.cpp src/far_ground.cpp src/terrain_brush_tool.cpp src/viewport_camera.cpp
                  src/scatter_placer.cpp src/scatter_commands.cpp src/weather_state.cpp src/weather_commands.cpp src/clock_state.cpp src/clock_commands.cpp src/water_commands.cpp src/people_commands.cpp src/people_state.cpp src/people_figures.cpp src/people_routines.cpp src/people_senses.cpp src/people_list.cpp src/people_travel.cpp src/route_commands.cpp src/effects_commands.cpp src/effects_state.cpp src/event_effects.cpp src/weather_effects.cpp src/water_meshes.cpp src/physics_state.cpp src/wet_things.cpp src/physics_commands.cpp src/play_state.cpp
                  src/mesh_library.cpp src/texture_library.cpp src/scene_render.cpp src/world_streaming.cpp src/frame_times.cpp
                  src/animation_state.cpp src/animation_commands.cpp src/hit_targets.cpp src/cloth_state.cpp
                  src/cloth_commands.cpp src/hair_state.cpp src/hair_commands.cpp src/pose_bakes.cpp src/pose_commands.cpp src/swing_commands.cpp src/swing_state.cpp src/nav_commands.cpp src/nav_state.cpp src/walker_commands.cpp src/walker_state.cpp src/ragdoll_commands.cpp src/ragdoll_state.cpp src/audio_commands.cpp src/audio_state.cpp
-                 src/game_saves.cpp src/save_commands.cpp src/game_ui.cpp src/game_ui_commands.cpp src/game_menus.cpp src/chat_commands.cpp src/script_commands.cpp src/mods.cpp src/mods_commands.cpp)
+                 src/game_saves.cpp src/save_commands.cpp src/game_ui.cpp src/game_ui_commands.cpp src/game_menus.cpp src/game_package.cpp src/chat_commands.cpp src/script_commands.cpp src/mods.cpp src/mods_commands.cpp)
   target_link_libraries(giant_editor_tests PRIVATE giant::core giant::platform giant::rhi giant::geometry giant::texture
                         giant::render giant::world giant::sim giant::nav giant::audio giant::save giant::ui giant::ai giant::test_main)
   target_include_directories(giant_editor_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/geometry/tests) # gltf_test_files.h

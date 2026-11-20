@@ -90,6 +90,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
     register_audio_commands(registry, state);
     register_save_commands(registry, state);
     register_game_ui_commands(registry, state);
+    register_package_commands(registry, state);
     register_chat_commands(registry, state);
     register_mod_commands(registry, state);
     register_script_commands(registry, state);
