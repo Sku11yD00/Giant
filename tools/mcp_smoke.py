@@ -1041,8 +1041,11 @@ def crowd_gate(tool, call, check):
         tool("set_camera", {"position": [0, 2, 0], "look_at": [300, 1, 20]})
         culling = tool("get_render_settings")["gpu_culling"]
         tool("set_render_settings", {"gpu_culling": False})  # (exact counts on the frame itself)
-        off = tool("set_figure_settings")
-        check(off["on"] is False and off["figures"] == 0, f"figures are off until asked for, got {off}")
+        check(tool("set_figure_settings")["on"] is True, "figures are on unless turned off")
+        off = tool("set_figure_settings", {"on": False})
+        for _ in range(3):
+            off = tool("set_figure_settings")
+        check(off["on"] is False and off["figures"] == 0, f"turned off, no figures are drawn, got {off}")
         before = tool("get_engine_info")["last_frame"]["scene_instances"]
         tool("set_figure_settings", {"on": True})
         drawn = off
@@ -1092,8 +1095,8 @@ def crowd_gate(tool, call, check):
               f"the walk's poses are baked in place, got {walks}")
         check(all(abs(p["center"][2]) < 0.35 for p in walks), f"each over the spot it stands on, got {walks}")
         tool("simulate", {"on": False})
-        tool("set_figure_settings", {"on": False})
         tool("clear_baked_poses")
+        tool("set_figure_settings", {"on": True})  # (as it is by default)
         tool("set_render_settings", {"gpu_culling": culling})
 
 
