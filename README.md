@@ -460,6 +460,11 @@ Open-world systems:
   runs a world as a game: a main menu (Continue, New game, Load,
   Settings, Quit) instead of the editor's panels, play from it, and the
   pause menu's Quit leads back to it.
+- N7 part 3: a game as a folder. `package_game` writes the open world as
+  a game into a new folder: the program under the game's name, the world,
+  the files it uses, the scripts and `game.json`. That folder runs on its
+  own, from anywhere, as the game: no editor panels, and no chat or key
+  in it.
 - N7 part 2: a game's settings last. UI scale, field of view, mouse
   speed, fullscreen, vsync and the window's size are kept as text
   (`game_settings.json` in the person's settings folder) and are there

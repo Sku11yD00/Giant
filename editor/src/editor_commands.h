@@ -326,6 +326,9 @@ struct EditorState {
     // always shows, and no editor panel is drawn. Set by main (and tests).
     bool game_mode = false;
     bool vsync_now = true; // as the program started: its frames wait for the display
+    // The program's own file and where its C# API is (package_game copies them; empty: not known).
+    std::string program;
+    std::string managed_folder;
     // Renders the editor as it looks now (viewport and panels) and returns
     // RGBA8 pixels at the window's pixel size; empty on failure. Set by main.
     std::function<std::vector<u8>()> render_screenshot;
@@ -422,6 +425,7 @@ void register_audio_commands(ai::CommandRegistry& registry, EditorState& state);
 void register_save_commands(ai::CommandRegistry& registry, EditorState& state);
 // get_game_ui, set_game_ui, show_toast (game_ui.h).
 void register_game_ui_commands(ai::CommandRegistry& registry, EditorState& state);
+void register_package_commands(ai::CommandRegistry& registry, EditorState& state); // game_package.h
 // The walkers steered and posed around step_physics's fixed steps
 // (state.physics's before_fixed_step and after_fixed_step). Once both are set.
 void connect_walkers(EditorState& state);
