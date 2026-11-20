@@ -3,7 +3,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gate_common import frame_stats, held_by_window, hitch_limit, leg_slow_frames, slow_frames, without_held  # noqa: E402
+from gate_common import Editor, slow_over, frame_stats, held_by_window, hitch_limit, leg_slow_frames, slow_frames, without_held  # noqa: E402
 
 
 def frame(ms, cpu, **phases):
@@ -97,6 +97,48 @@ def main():
     # No hitches, or no samples: nothing to say.
     check(slow_frames([10.0] * 50, [frame(20.0, 19.0, render=18.0)], typicals) is None, "no hitches")
     check(slow_frames(times, slow, []) is None, "no samples")
+    # Frames read in pieces (Editor.begin_frames, read_frames): each read adds those since the last,
+    # a held one set aside, the slow ones named by the stop; frames missed between reads are said.
+    class Fake(Editor):
+        def __init__(self, replies):  # (no process: the replies get_engine_info gives, in turn)
+            self.replies = list(replies)
+            self.name = "test"
+
+        def real_gpu(self):
+            return False
+
+        def tool(self, name, arguments=None):
+            return {"frame_times": self.replies.pop(0)}
+
+    def reply(recorded, recent, slow=()):
+        phases = {"frames": len(recent), "slow": list(slow), "typical": {"render": 8.0}, "typical_cpu_ms": 9.0}
+        return {"recorded": recorded, "recent_ms": recent, "phases": phases}
+
+    held = dict(frame(900.0, 5.0, events=890.0), window=True, frame=104)
+    late = dict(frame(40.0, 39.0, render=38.0), frame=106)
+    fake = Fake([{"recorded": 100}, reply(103, [9.0, 1.0, 2.0, 3.0]), reply(107, [3.0, 4.0, 900.0, 40.0, 7.0], [held, late])])
+    count = fake.begin_frames()
+    check(count == 100 and fake.slow_over_ms == 25.0 and fake.slow == [] and fake.held == [], "begun: nothing yet")
+    read, count = fake.read_frames([], count, 1)
+    check(read == [1.0, 2.0, 3.0] and count == 103, f"the frames since the count, no older ones: {read}")
+    read, count = fake.read_frames(read, count, 2)
+    check(read == [1.0, 2.0, 3.0, 4.0, 40.0, 7.0] and count == 107 and fake.held == [900.0], f"a held frame set aside: {read}")
+    check([f["stop"] for f in fake.slow] == [2] and len(fake.typicals) == 2, "the slow frame kept, named by its stop")
+    try:
+        missed = Fake([{"recorded": 100}, reply(500, [1.0] * 240)])
+        missed.read_frames([], missed.begin_frames())
+        check(False, "frames missed between reads raise")
+    except RuntimeError as error:
+        check("not timed" in str(error), f"and say so: {error}")
+    # GIANT_GATE_SLOW_MS keeps more frames, never fewer; nonsense is said.
+    check(slow_over(None, 25.0) == 25.0 and slow_over("", 25.0) == 25.0 and slow_over("0.5", 25.0) == 0.5, "asked lower")
+    check(slow_over("90", 25.0) == 25.0, "never higher than usual")
+    for wrong in ("fast", "0", "-1", "nan", "inf"):
+        try:
+            slow_over(wrong, 25.0)
+            check(False, f"GIANT_GATE_SLOW_MS={wrong} raises")
+        except RuntimeError:
+            pass
     for f in failures:
         print(f"FAIL: {f}")
     print("test_gate_common: " + ("FAILED" if failures else "ok"))
