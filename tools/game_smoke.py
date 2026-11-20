@@ -151,8 +151,14 @@ def packaged_runs(folder, runs):
         check(os.path.basename(loaded["loaded"]) == os.path.basename(scripts) and loaded["running"] >= 1,
               f"the game's scripts run: {loaded}")
     run.until("the main menu", lambda: run.tool("get_menu")["menu"] == "main")
+    check(first["loading"]["shown"] == 0, f"no loading screen before a game is begun: {first}")
     check(run.tool("ui_click", {"screen": "menu.main", "id": "new"})["event"] is not None, "New game is pressed")
     run.until("the game played", lambda: run.tool("get_player")["playing"])
+    # (The screen may be gone by the time anything can be asked: that it stood is counted.)
+    run.until("the loading screen gone", lambda: run.tool("get_menu")["menu"] == "none")
+    played = run.tool("get_menu")
+    check(played["loading"]["shown"] == 1 and played["loading"]["on"] is False and played["loading"]["progress"] == 1,
+          f"the game was begun behind the loading screen, which is gone in play: {played}")
     run.tool("quit_editor")
     check(run.ended() == 0, "the packaged game ended well")
     check(set(os.listdir(elsewhere)) <= {"mine.json"}, f"nothing but its settings is written where it was started from: {os.listdir(elsewhere)}")

@@ -28,13 +28,18 @@
 // yet; Load; Settings; Quit: the program ends) and takes the input, the
 // pause menu's Quit goes back to it, and a game loaded from a menu is
 // played once it is in (one that could not be loaded leads back to the
-// main menu, which says why). Nothing leads to the editor.
+// main menu, which says why). Nothing leads to the editor. A game is not
+// begun into a world still arriving: a loading screen stands first, over
+// everything, until the cells and textures round the player are in (see
+// Loading); over a game loaded in play it holds the game still as a menu
+// does.
 #pragma once
 
 #include "giant/core/jobs.h"
 #include "giant/core/types.h"
 #include "giant/platform/input.h"
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -49,7 +54,7 @@ struct EditorState;
 
 class GameMenus {
 public:
-    enum class Menu : u8 { none, pause, saves, settings, main };
+    enum class Menu : u8 { none, pause, saves, settings, main, loading };
     static const char* to_string(Menu menu);
 
     // Its screens loaded on `state.game_ui` (none: nothing shown).
@@ -112,6 +117,26 @@ public:
     const std::string& message() const { return m_message; }
     // What the main menu says went wrong (a game that could not be loaded or begun); empty: nothing.
     const std::string& notice() const { return m_notice; }
+    // A game being loaded or about to be played, while it and the world round the player come in
+    // (the loading screen): what is still to come, and how far along it is. Play begins (a game
+    // loaded in play: goes on) once nothing has been coming for k_quiet_frames frames, or after
+    // k_most_loading_seconds of frames whatever is still to come (logged).
+    struct Loading {
+        bool on = false;
+        bool game = false;   // the saved game itself is still being read and put in
+        u32 cells = 0;       // the world's cells streaming is still bringing (WorldStreaming::coming)
+        u32 textures = 0;    // waiting to cook, cooking, waiting to upload, finer levels being read
+        u32 ground = 0;      // terrain tiles whose mesh is still to build
+        bool bodies = false; // what the player would stand on or in is still being made (entities' bodies, ground, trunks)
+        float progress = 0.0f; // 0 to 1, never back: the share of all that was to come that is in
+        u32 shown = 0;       // how many times the screen has stood since the program began
+    };
+    const Loading& loading() const { return m_arriving; }
+    static constexpr u32 k_quiet_frames = 10;
+    static constexpr double k_most_loading_seconds = 120.0;
+    // (The bodies alone are waited for no longer than play itself waits for them, PlayState::k_most_placing_seconds: some never come.)
+    // Tests: the loading screen as if `seconds` more of frames had passed.
+    void loading_waited(double seconds) { m_arriving_seconds += seconds; }
     // The slot list still being read; wait() blocks until it is in (tests).
     bool reading() const { return m_reading; }
     void wait();
@@ -132,13 +157,27 @@ private:
     bool load(const std::string& slot);
     // A game: the main menu, saying `notice`.
     void lead(std::string notice);
-    // A game: play begun from the menus (a new game, or the loaded one). False: the main menu, saying why not.
+    // Play begun from the menus (a new game, or the loaded one). A game: the loading screen stands
+    // first (true). Else at once; false: the main menu, saying why not.
     bool begin_play();
 
     EditorState& m_state;
     Menu m_menu = Menu::none;
     bool m_saving = false;
     Settings m_settings;
+    // The loading screen (see Loading): what was to come last frame, what has come in since it
+    // stood, the frames nothing was coming, the seconds of frames it has stood (not while the game
+    // itself is read: that has its own end) and the bodies alone were waited for.
+    Loading m_arriving;
+    u32 m_arriving_before = 0;
+    u64 m_arriving_done = 0;
+    u32 m_arriving_quiet = 0;
+    u64 m_arriving_streamed = 0; // WorldStreaming::updates when last looked at
+    double m_arriving_seconds = 0.0, m_arriving_bodies = 0.0;
+    std::chrono::steady_clock::time_point m_arriving_frame;
+    void show_loading();  // the screen stands from now
+    void arrive();        // each frame while it is on
+    bool start_play();    // play itself, from where the camera is
     Settings m_written; // as the file has them (or will, once the job under way is done)
     std::string m_file;
     // The writes of the settings: one at a time, each the newest text asked for (a job run by a

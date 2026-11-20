@@ -122,6 +122,11 @@ public:
     // Held still: what it stands on is still being made.
     bool waiting_for_ground() const { return m_waiting || m_placing; }
     bool placing() const { return m_placing; }
+    // What a player put down at `eye` would wait for is still being made: entities' bodies, the
+    // ground under it, the trunks round it (a loading screen waits for the same, before play).
+    bool world_waits(const world::Scene& scene, const DVec3& eye) const { return placing_waits(scene, eye); }
+    // The longest a player is held waiting for them (some never come).
+    static constexpr double k_most_placing_seconds = 5.0;
 
 private:
     void apply_input();

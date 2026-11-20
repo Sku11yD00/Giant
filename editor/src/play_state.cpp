@@ -212,7 +212,7 @@ bool PlayState::before_step(const world::Scene& scene, EditorCamera& camera, u64
     if (m_placing) {
         // Just started: held until what it could stand on is in, then put on it.
         m_placing_for += std::max(seconds, 0.0);
-        if (placing_waits(scene, m_place_eye) && m_placing_for < 5.0) return true;
+        if (placing_waits(scene, m_place_eye) && m_placing_for < k_most_placing_seconds) return true;
         m_placing = false;
         world.hold_character(m_player, false);
         put_down();

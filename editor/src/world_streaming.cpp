@@ -147,6 +147,12 @@ bool WorldStreaming::ground_coming(CellCoord cell) const {
     return it != m_cells.end() && it->second.state != State::loaded && it->second.state != State::failed;
 }
 
+u32 WorldStreaming::coming() const {
+    const usize queued = m_wanted.size() + m_touched.size(); // (an upper bound: one read meanwhile is skipped when its turn comes)
+    return static_cast<u32>(std::min<usize>(queued, 1u << 30)) + m_count[static_cast<usize>(State::reading)] +
+           m_count[static_cast<usize>(State::ready)];
+}
+
 const std::unordered_set<CellCoord, world::CellCoordHash>& WorldStreaming::far_chunks(u32 level) const {
     GIANT_ASSERT(level >= 1 && level <= world::k_far_levels, "far ground levels are 1 and 2");
     return m_far[level - 1];
@@ -646,6 +652,7 @@ void WorldStreaming::update(world::Scene& scene, u64 generation, const DVec3& ca
     if (!follows(scene)) {
         return;
     }
+    ++m_updates;
     m_ids_seen = std::max(m_ids_seen, scene.next_id());
     // The scene's terrain takes the spacing of the tiles on disk while it
     // has none of its own (an undo can put another back while it is empty).
