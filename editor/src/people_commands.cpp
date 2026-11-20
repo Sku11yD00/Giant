@@ -1282,7 +1282,7 @@ void register_people_commands(ai::CommandRegistry& registry, EditorState& state)
          "activity (set_person_look's `activities`: the clip's start, its end for one not looped), and "
          "is not drawn while the activity is `hidden`. One whose walk or activity pose is not there yet, "
          "or cannot be had, stands. `on` "
-         "(default false: until the crowd gate has measured what they cost); "
+         "(default true); "
          "`distance` (metres from the camera a person is drawn out to, default 400, at most 4000) and "
          "`keep` (metres farther one drawn stays, default 40); `most` at once (default 4096, at most "
          "16384); `made_a_frame` (default 64) and `scanned_a_frame` (people looked at a frame, default "

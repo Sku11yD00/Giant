@@ -713,7 +713,7 @@ GIANT_TEST("figures: with the poses nearly all taken, a standing pose is had bef
 GIANT_TEST("figures: one whose entity is taken away is a figure in that frame, where it stands, before the list comes round") {
     Fixture f;
     if (f.renderer == nullptr) return;
-    GIANT_CHECK(!PeopleFigures::Settings{}.on); // (off until the crowd gate has measured them: the fixture turns them on)
+    GIANT_CHECK(PeopleFigures::Settings{}.on); // (on since the crowd gate measured them)
     f.row(40); // x = 10 to 88
     f.frames(4);
     GIANT_CHECK(f.figures.stats().figures == 40);

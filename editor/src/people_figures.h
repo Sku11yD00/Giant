@@ -106,9 +106,11 @@ public:
     static constexpr u32 k_no_kind = ~0u;
 
     struct Settings {
-        // Off until the crowd gate (CR6) has measured what they cost on
-        // the owner's machine: nothing is on by default unmeasured.
-        bool on = false;
+        // On since the crowd gate (CR6) measured them on the owner's
+        // machine (3,000 people, 2560x1440): 0.30 ms on the GPU, 0.04 ms
+        // of it their shadows, and the people's work 0.75 ms of the main
+        // thread at worst.
+        bool on = true;
         float distance = 400.0f;    // metres from the camera a person is drawn out to (1 to 4000)
         float keep = 40.0f;         // metres farther one drawn stays so (0 to 1000)
         u32 most = 4096;            // figures at once (0 to k_max_figures)

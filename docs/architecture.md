@@ -4953,13 +4953,18 @@ did, not when one in it moved or changed pose. They are marked `render::Instance
 (out of the voxel world; drawn as meshes at every distance), and their
 materials are counted like any instance's.
 
-Off by default (`set_figure_settings`) until the crowd gate (CR6) has
-measured what they cost on the owner's machine. Limits: changing
+On by default (`set_figure_settings`) since the crowd gate (CR6)
+measured what they cost on the owner's machine; the setting is the
+view's, saved nowhere, so a packaged game draws them too. Limits: changing
 `triangles` or a clip leaves the poses asked for before in `PoseBakes`
 (1,024 in all, `bake_pose`'s too) until `clear_baked_poses`; a pose
 that could not be had is asked for again only after a file is imported
-or the poses are cleared; frame time with thousands of figures is not
-measured yet (CR6, the crowd gate).
+or the poses are cleared; poses are not cleared when another scene
+or world is opened, so a long session over many worlds with other
+looks creeps towards the 1,024 (past it a new look's far people are
+not drawn: `looks_without`); and a game's loading screen does not
+wait for poses being baked, so far people may appear a moment after
+play begins.
 
 ### Figures walk (CR3)
 
@@ -5054,9 +5059,9 @@ may differ at the change (in view only past 60 m); an entity on a trip
 is let go where it walked to, which may be a little to the side of its
 way, where its figure stands. The entities' count and distances are as
 they were: retuning them for the new tier waits for the crowd gate's
-numbers from the owner's PC (CR6), and so does turning figures on by
-default. `tools/living_gate.py` turns figures off all the same, to
-measure what it measured before whatever the default.
+numbers from the owner's PC (CR6). Figures are on by default since
+that run (below). `tools/living_gate.py` turns figures off all the
+same, to measure what it measured before.
 
 ### Variety and what figures cost (CR5)
 
@@ -5087,11 +5092,11 @@ size on screen needs, whatever `triangles` the pose was baked with.
 
 Not here: whether figures cast sun shadows. They do, as every
 instance does, and nothing in the renderer leaves one instance out of
-the shadow pages; what that costs with thousands of them moving is
-for the crowd gate to measure on the owner's machine (CR6: the GPU's
-passes with the figures and without, `shadows` on and off, and the
-shadow pages drawn, waiting and behind), and a switch is made then if
-the numbers ask for one.
+the shadow pages; what that costs with thousands of them moving the
+crowd gate measured on the owner's machine (CR6: the GPU's passes
+with the figures and without, `shadows` on and off, and the shadow
+pages drawn, waiting and behind): 0.04 ms for 3,000, so there is no
+switch.
 
 ### The crowd gate (CR6)
 
@@ -5134,9 +5139,11 @@ the GPU and no more shadow pages behind with them than without; the
 people's four phases (picking and placing the figures is in `people`;
 drawing them is in `render` and shows in the frame times) under 1 ms
 of the main thread in the worst sample; and no overflow. The 2 ms and
-1 ms are first budgets, set before any run on a real GPU: the first
-run's numbers say whether figures are turned on by default and
-whether the entities' count and distances change.
+1 ms are first budgets, set before any run on a real GPU. The first
+run (RTX 5090, 2560x1440, 2026-11-20) passed: all 3,000 drawn, the figures
+0.30 ms on the GPU (0.04 ms of it their shadows), the people's work
+0.67 ms median and 0.75 ms worst, no hitches. On that, figures are on
+by default; the entities' count and distances stay as they were.
 
 On CI (the null device) 360 people are put through the same on a
 shorter flight, without the speed and the costs. Its arithmetic (the

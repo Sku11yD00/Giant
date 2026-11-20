@@ -481,8 +481,8 @@ Open-world systems:
   file and baked on a worker: what distant people will be drawn with.
 - Crowds part 2: figures. People with no entity (those farther off than
   the ones near the camera) are drawn as instances of their look's baked
-  pose, out to 400 m, with no skeleton (`set_figure_settings`; off by
-  default until the crowd gate has measured what they cost).
+  pose, out to 400 m, with no skeleton (`set_figure_settings`; on by
+  default since the crowd gate measured them).
 - Crowds part 3: figures walk. One travelling is put along its way
   every frame, facing along it, stepping through eight poses of its
   look's walk baked in place (which one by how far it has gone, so its
@@ -499,7 +499,8 @@ Open-world systems:
   in a market square by the valley's town, 2,000 standing and 1,000
   walking its lanes, flown to, through and round; it measures what the
   figures add on the GPU (their shadows told apart) and what the
-  people's own work takes of the main thread.
+  people's own work takes of the main thread. It passed on a real GPU
+  (0.30 ms for 3,000), so figures are on by default.
 
 The Windows editor download is attached to each CI run (`giant-editor-windows`).
 It is a console app for now so its log is visible; run `giant_editor.exe` and
