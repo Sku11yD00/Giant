@@ -3026,7 +3026,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         // Skinned meshes are not held: their pose is not the bind the
         // voxels would be made from (they bounce no light; known gap).
         m_voxels->update(cmd, frame.view.position, frame.instances, frame.cells, frame.materials, m_meshes_version,
-                         [this](MeshId id) { return skinned(id) ? nullptr : mesh(id); },
+                         [this](MeshId id) -> std::shared_ptr<const geometry::ClusterMesh> {
+                             // Shared: a brick being built on a worker keeps its meshes.
+                             return id < m_meshes.size() && m_meshes[id].live && !skinned(id) ? m_meshes[id].data : nullptr;
+                         },
                          std::clamp(settings.voxel_ms_per_frame, 0.0f, 1000.0f));
         cmd.end_timing();
     } else {

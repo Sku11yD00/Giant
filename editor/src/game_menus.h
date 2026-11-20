@@ -146,6 +146,8 @@ public:
     const Loading& loading() const { return m_arriving; }
     static constexpr u32 k_quiet_frames = 10;
     static constexpr double k_most_loading_seconds = 120.0;
+    // The voxel world's CPU budget a frame while the screen stands (RenderSettings::voxel_ms_per_frame, 1 in play).
+    static constexpr float k_loading_voxel_ms = 12.0f;
     static constexpr double k_most_gpu_seconds = 5.0; // the GPU's own (voxels, light, shadows, geometry), once the rest is in: of the clock, not of frames
     // (The bodies alone are waited for no longer than play itself waits for them, PlayState::k_most_placing_seconds: some never come.)
     // Tests: the loading screen as if `seconds` more of frames had passed.

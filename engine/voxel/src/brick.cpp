@@ -302,6 +302,41 @@ u32 BrickBuilder::add_triangle(const Vec3& a, const Vec3& b, const Vec3& c, cons
     return tested;
 }
 
+u32 BrickBuilder::add_point(const Vec3& at, u32 triangles, float area, const Vec3& normals, const Vec3& color,
+                            bool stand_in, float coverage) {
+    if (!(coverage > 0.0f) || triangles == 0 || m_water) {
+        return 0; // also NaN
+    }
+    coverage = std::min(coverage, 1.0f);
+    const float s = m_voxel_size;
+    const float edge = s * static_cast<float>(k_brick_edge);
+    if (!(at.x >= 0.0f && at.x < edge && at.y >= 0.0f && at.y < edge && at.z >= 0.0f && at.z < edge)) {
+        return 0; // also catches NaN
+    }
+    const auto cell = [s](float v) { return std::min(static_cast<u32>(v / s), k_brick_edge - 1); };
+    const u32 index = voxel_index(cell(at.x), cell(at.y), cell(at.z));
+    const float n = static_cast<float>(triangles);
+    // As `triangles` triangles in this voxel each: coverage-weighted colour and facing, and a
+    // cut-out's area over the voxel's face (each triangle's share capped as add_triangle's is).
+    const float cover = coverage < 1.0f && std::isfinite(area) ? coverage * std::min(n * 1.41421356f * s * s, std::max(area, 0.0f)) / (s * s) : 0.0f;
+    Sum& sum = m_sums[index];
+    if (!sum.touched) {
+        sum.touched = true;
+        m_list[m_touched++] = static_cast<u16>(index);
+    }
+    Part& part = stand_in ? sum.stand : sum.own;
+    part.color += color * (coverage * n);
+    const bool facing = std::isfinite(normals.x) && std::isfinite(normals.y) && std::isfinite(normals.z);
+    part.normal += (facing ? normals : Vec3{}) * coverage;
+    part.weight += coverage * n;
+    if (coverage >= 1.0f) {
+        part.solid = true;
+    } else {
+        part.cover += cover;
+    }
+    return 1;
+}
+
 u32 BrickBuilder::add_water_triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& color) {
     m_water = true;
     const u32 tested = add_triangle(a, b, c, color);

@@ -13,10 +13,11 @@
 //   contiguous run) rebuild every window, never more than one at a time.
 // Everything is a queue worked through under a time budget per frame
 // (RenderSettings::voxel_ms_per_frame): finding bricks is split into
-// resumable steps, and bricks are built coarse levels first, so the view is
-// covered roughly before it sharpens; a coarse brick over thousands of
-// instances is built over several frames. Until a brick is rebuilt, its old
-// version stays.
+// resumable steps, and bricks never built are built coarse levels first, so
+// the view is covered roughly before it sharpens, then those whose contents
+// changed, oldest first. Bricks are built on worker threads from a copy of
+// what is over them (copied a few hundred instances between looks at the
+// clock). Until a brick is rebuilt, its old version stays.
 //
 // A brick is built on the CPU from the meshes' clusters at a detail matching
 // its voxel size (a cut through the cluster LOD, so a million-triangle mesh
@@ -29,6 +30,7 @@
 // thousands; world streaming will hand over changes instead).
 #pragma once
 
+#include "giant/core/jobs.h"
 #include "giant/core/math.h"
 #include "giant/core/types.h"
 #include "giant/geometry/clusters.h"
@@ -38,6 +40,7 @@
 #include "giant/voxel/clipmap.h"
 
 #include <array>
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <limits>
@@ -81,9 +84,10 @@ float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale);
 
 class VoxelScene {
 public:
-    // A mesh by id, or null when it does not exist (any more). Ids are never
-    // reused, and a mesh never changes once added.
-    using MeshLookup = std::function<const geometry::ClusterMesh*(MeshId)>;
+    // A mesh by id, or null when it does not exist (any more). A mesh never
+    // changes once added (an id freed may come back as another mesh: the
+    // meshes' version changes then). Shared: a brick being built holds it.
+    using MeshLookup = std::function<std::shared_ptr<const geometry::ClusterMesh>(MeshId)>;
 
     VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u32 brick_capacity);
     ~VoxelScene();
@@ -167,7 +171,16 @@ public:
     // The clusters of `mesh` whose error is at most `error` while their
     // group's is above it: one cut through its LOD covering the whole
     // surface. Exposed for tests.
-    static std::vector<u32> cut(const geometry::ClusterMesh& mesh, float error);
+    // A cut of a mesh: its clusters at an error, and what an object far smaller than a voxel adds
+    // as one point (BrickBuilder::add_point): its triangles, their area and unit normals summed.
+    struct Cut {
+        std::vector<u32> clusters;
+        u32 triangles = 0;
+        float area = 0.0f;
+        Vec3 normals{};
+    };
+    // `sums`: also the totals a point needs (a walk over every triangle of the cut).
+    static Cut cut(const geometry::ClusterMesh& mesh, float error, bool sums = true);
 
 private:
     struct Box { // empty by default
@@ -205,10 +218,55 @@ private:
         bool stand_in = false; // small enough for the far field to stand in for
     };
     struct MeshCache {
-        const geometry::ClusterMesh* mesh = nullptr; // null: missing
+        std::shared_ptr<const geometry::ClusterMesh> mesh; // null: missing (shared: builds under way keep it)
         Vec3 min{}; // mesh-space bounds of its original clusters
         Vec3 max{};
-        std::unordered_map<i32, std::vector<u32>> cuts; // by log2 of the error
+        std::unordered_map<i32, std::shared_ptr<const Cut>> cuts; // by log2 of the error, twice, +1 with sums
+    };
+    // A brick being built away from the main thread (start_build): what it is built from, copied
+    // when it started, and the result.
+    struct Build {
+        struct Item { // an instance over it, as it was
+            DVec3 position{};
+            Quat rotation{};
+            Vec3 scale{};
+            Vec3 color{};
+            float coverage = 1.0f;
+            float canopy = 0.0f;
+            bool stand_in = false;
+            u32 mesh = 0; // into meshes
+            u32 cut = 0;  // into cuts: at the brick's detail
+        };
+        struct WaterTriangle {
+            Vec3 a{}, b{}, c{}; // in the brick's frame
+            Vec3 color{};
+        };
+        // Gathering: its instances being copied (main thread); queued: waiting for a thread;
+        // running; built: `result` is ready.
+        // Cancelled: dropped before a thread took it (it left the window, or the scene is going).
+        static constexpr u32 k_gathering = 0, k_queued = 1, k_running = 2, k_built = 3, k_cancelled = 4;
+
+        u32 level = 0;
+        voxel::BrickCoord brick{};
+        DVec3 origin{};          // its lowest corner
+        double brick_size = 0.0; // metres
+        float voxel_size = 0.0f;
+        u32 seed = 0;
+        std::vector<Item> items;
+        // What the items use (held: a mesh removed meanwhile stays until the build is done).
+        std::vector<std::shared_ptr<const geometry::ClusterMesh>> meshes;
+        std::vector<std::shared_ptr<const Cut>> cuts;
+        std::vector<WaterTriangle> water;
+        voxel::BrickBuilder builder;
+        voxel::Brick result;
+        std::vector<u32> found; // (gathering) the instances over it, and the next to copy
+        u32 next = 0;
+        u32 count = 0;          // items, once gathered (items itself is the builder's then)
+        std::atomic<u32> state{k_gathering};
+        bool again = false; // (main thread only) something over it changed meanwhile
+
+        // Builds it, if no other thread has begun (true if this one did).
+        bool run();
     };
     enum class JobKind : u8 {
         find,    // mark the bricks under the instances over the box, then
@@ -235,7 +293,8 @@ private:
         bool rebuild = false;   // part of a full rebuild
         bool started = false;
         std::vector<u32> found; // find: instances over the box
-        u32 next = 0;           // find: the next of found (found.size(): sweeping)
+        u32 next = 0;
+        u32 count = 0;          // items, once gathered (items itself is the builder's then)           // find: the next of found (found.size(): sweeping)
         u64 cursor = 0;         // bricks done of the current instance, sweep or box
     };
 
@@ -275,13 +334,17 @@ private:
     bool run_job(Job& job, const OutOfTime& out_of_time);
     void job_done(const Job& job);
 
-    // Builds the brick under way (m_building), a few instances at a time
-    // until `out_of_time`: done (true), or more next frame (false).
-    template <typename OutOfTime>
-    bool build_step(const MeshLookup& meshes, const OutOfTime& out_of_time);
-    // Copies the finished brick to the pool; false if out of memory.
-    bool finish_build(rhi::CommandList& cmd, bool& pool_writable);
-    void touch_building(const Box& box); // a change there: the brick under way is built again after
+    // Starts building the next brick waiting (m_gathering); false if none waits.
+    bool start_build();
+    // Copies what is over m_gathering, until done (then a worker builds it: true) or out of time.
+    bool gather(const MeshLookup& meshes, const std::function<bool()>& out_of_time);
+    // Copies a built brick to the pool (and marks it again if something over it changed
+    // meanwhile); false if out of memory.
+    bool finish_build(rhi::CommandList& cmd, bool& pool_writable, const Build& build);
+    bool place_build(rhi::CommandList& cmd, bool& pool_writable, const Build& build);
+    // Drops builds no thread has taken whose bricks left the window (all of them: `all`).
+    void cancel_builds(bool all);
+    void touch_building(const Box& box); // a change there: the bricks under way are built again after
     void set_slot(u32 level, u32 slot, u32 value, const voxel::BrickCoord& brick);
     void remove(u32 level, u32 slot, const voxel::BrickCoord& brick); // to k_no_brick, freeing its brick
     void forget_stand_in(u32 level, u32 index); // a pool brick freed or rebuilt
@@ -317,7 +380,12 @@ private:
 
     // Work. Bricks to build, coarsest level first:
     std::unordered_set<Key, KeyHash> m_pending;
-    std::vector<std::deque<Key>> m_order; // per level (may hold stale keys)
+    std::vector<std::deque<Key>> m_order; // per level (may hold stale keys): never built
+    // Bricks built already and to be built again (what is in them changed), after every one never
+    // built, oldest first whatever their level: else a coarse brick (2 km across) that something
+    // in changes while it is built (scatter streaming in round it) goes back before everything
+    // nearer, again and again, and nothing nearer is ever rebuilt. They show what they had meanwhile.
+    std::deque<Key> m_again;
     std::unordered_set<Key, KeyHash> m_retry; // did not fit in the pool
     // Boxes whose bricks are still to be found or marked, oldest first:
     std::deque<Job> m_jobs;
@@ -390,27 +458,16 @@ private:
     std::unordered_map<MeshId, MeshCache> m_meshes;
     std::vector<MeshId> m_forgotten; // by forget_mesh, for the next see_changes
 
-    // The brick being built (a coarse one over thousands of instances
-    // takes several frames).
-    struct Building {
-        bool active = false;
-        Key key;
-        Box box;                // its world box
-        std::vector<u32> found; // instances over it when started
-        u32 next = 0;
-        bool again = false;     // something over it changed meanwhile
-        // Water over it, gathered once the instances are done: the bodies
-        // as they were then (a change meanwhile sets `again`), (body,
-        // triangle) pairs, and the next to add.
-        bool water_gathered = false;
-        std::vector<std::shared_ptr<const WaterBody>> water_bodies;
-        std::vector<std::pair<u32, u32>> water;
-        usize water_next = 0;
-    };
-    Building m_building;
-    voxel::BrickBuilder m_builder;
+    // Bricks being built, on m_build_jobs' workers (or, with time to spare, the main thread),
+    // each from what was over it when it started (so changes meanwhile cannot touch it: they set
+    // `again`, and it is built once more after). Copied to the pool as each is done.
+    std::deque<std::shared_ptr<Build>> m_builds;
+    std::shared_ptr<Build> m_gathering; // the one of them whose instances are being copied
+    bool building(const Key& key) const; // in m_builds
+    WaitGroup m_build_group;
     VoxelStats m_stats;
     bool m_overflow_logged = false;
+    JobSystem m_build_jobs; // last: destroyed (finishing its builds) first
 };
 
 } // namespace giant::render

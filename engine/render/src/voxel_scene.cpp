@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <thread>
 
 namespace giant::render {
 
@@ -33,6 +34,14 @@ constexpr usize k_bulk = 256;
 constexpr double k_region = 64.0;
 // Marks (cheap set inserts) between looks at the clock.
 constexpr u64 k_marks_per_check = 256;
+// Bricks being built at once (on the workers or waiting for one): enough to keep them busy.
+constexpr usize k_most_builds = 16;
+// With at least this budget a frame (behind a loading screen, in tests), the main thread builds
+// bricks too, a whole brick at a time, and waits on the workers' rather than leave time unused.
+constexpr double k_help_ms = 4.0;
+// An instance whose sphere's radius is at most this share of a voxel is added as one point
+// (BrickBuilder::add_point), not triangle by triangle: a quarter, so it spans a voxel or two.
+constexpr float k_point_share = 0.25f;
 
 DVec3 to_d(const Vec3& v) { return {v.x, v.y, v.z}; }
 DVec3 lower(const DVec3& a, const DVec3& b) { return {std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)}; }
@@ -94,9 +103,12 @@ usize VoxelScene::CellHash::operator()(const Cell& c) const {
 }
 
 VoxelScene::VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u32 brick_capacity)
-    : m_device(device), m_clipmap(clipmap), m_capacity(std::clamp(brick_capacity, 1u, gpu::k_unbuilt - 1)) {}
+    : m_device(device), m_clipmap(clipmap), m_capacity(std::clamp(brick_capacity, 1u, gpu::k_unbuilt - 1)),
+      // A quarter of the cores, two to four: the other systems' workers want theirs.
+      m_build_jobs(std::clamp(std::thread::hardware_concurrency() / 4, 2u, 4u)) {}
 
 VoxelScene::~VoxelScene() {
+    cancel_builds(true); // (the workers would otherwise build every queued one as they stop)
     m_device.destroy(m_pool);
     m_device.destroy(m_table);
 }
@@ -127,6 +139,7 @@ bool VoxelScene::init() {
     m_filled.assign(levels, {});
     m_loose.assign(levels, false);
     m_order.assign(levels, {});
+    m_again.clear();
     m_occupancy.assign(m_capacity, {});
     m_has_stand_in.assign(m_capacity, 0);
     m_owner.assign(m_capacity, ~0u);
@@ -140,14 +153,28 @@ bool VoxelScene::init() {
     return true;
 }
 
-std::vector<u32> VoxelScene::cut(const geometry::ClusterMesh& mesh, float error) {
-    std::vector<u32> out;
+VoxelScene::Cut VoxelScene::cut(const geometry::ClusterMesh& mesh, float error, bool sums) {
+    Cut out;
     for (u32 ci = 0; ci < mesh.clusters.size(); ++ci) {
         const geometry::Cluster& c = mesh.clusters[ci];
         const float own = c.refined >= 0 ? mesh.groups[static_cast<usize>(c.refined)].simplified.error : 0.0f;
         const float replacement = mesh.groups[c.group].simplified.error;
         if (own <= error && replacement > error) {
-            out.push_back(ci);
+            out.clusters.push_back(ci);
+            if (!sums) {
+                continue;
+            }
+            for (u32 t = 0; t < c.triangle_count; ++t) {
+                const u32* idx = &mesh.indices[c.first_index + t * 3];
+                const Vec3 face = cross(mesh.vertices[idx[1]].position - mesh.vertices[idx[0]].position,
+                                        mesh.vertices[idx[2]].position - mesh.vertices[idx[0]].position);
+                const float twice = length(face);
+                if (twice > 0.0f && std::isfinite(twice)) { // (add_triangle leaves out what has no area)
+                    ++out.triangles;
+                    out.area += 0.5f * twice;
+                    out.normals += face * (1.0f / twice);
+                }
+            }
         }
     }
     return out;
@@ -307,7 +334,7 @@ void VoxelScene::set_stand_in_radius(float radius) {
     for (Copy& c : m_copies) {
         // The same rule as set_copy, from the copy's own instance.
         const auto it = m_meshes.find(c.instance.mesh);
-        const geometry::ClusterMesh* mesh = it != m_meshes.end() ? it->second.mesh : nullptr;
+        const geometry::ClusterMesh* mesh = it != m_meshes.end() ? it->second.mesh.get() : nullptr;
         const bool stand_in = !c.instance.always_mesh && !c.box.empty() && mesh != nullptr &&
                               stand_in_radius_of(*mesh, c.instance.scale) <= r;
         any = any || stand_in != c.stand_in;
@@ -799,7 +826,9 @@ void VoxelScene::copy_all(std::span<const Instance> instances, std::span<const M
     // skip indices past the end), and the full rebuild that always follows
     // covers whatever they miss. Restarting them on every bulk change
     // would starve them.
-    m_building.again = m_building.again || m_building.active; // so is the brick under way's
+    for (const std::shared_ptr<Build>& b : m_builds) {
+        b->again = true; // so are the bricks under way
+    }
 }
 
 void VoxelScene::remove_range(u32 first, u32 count) {
@@ -871,10 +900,13 @@ void VoxelScene::remove_range(u32 first, u32 count) {
             job.region = std::make_shared<const Region>(std::move(r));
         }
     }
-    if (m_building.active) {
-        remap(m_building.found, m_building.next, nullptr);
+    for (const std::shared_ptr<Build>& b : m_builds) {
+        b->again = true;
     }
-    m_building.again = m_building.again || m_building.active;
+    if (m_gathering != nullptr) {
+        // The one still copying holds indices: shifted too (the instances it has yet to copy).
+        remap(m_gathering->found, m_gathering->next, nullptr);
+    }
 }
 
 void VoxelScene::see_changes(std::span<const Instance> instances, std::span<const Material> materials,
@@ -888,7 +920,7 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
         std::unordered_set<MeshId> stale(m_forgotten.begin(), m_forgotten.end());
         m_forgotten.clear();
         for (auto it = m_meshes.begin(); it != m_meshes.end();) {
-            const geometry::ClusterMesh* now = meshes ? meshes(it->first) : nullptr;
+            std::shared_ptr<const geometry::ClusterMesh> now = meshes ? meshes(it->first) : nullptr;
             if (now != nullptr && now->empty()) {
                 now = nullptr;
             }
@@ -1103,7 +1135,9 @@ void VoxelScene::enter(const voxel::BrickBox& box) {
 void VoxelScene::mark(u32 level, const voxel::BrickCoord& brick) {
     const Key key{level, brick};
     if (m_clipmap.contains(level, brick) && m_pending.insert(key).second) {
-        m_order[level].push_back(key);
+        const u32 s = level * m_clipmap.slots_per_level() + m_clipmap.slot(level, brick);
+        const bool built = m_slot_bricks[s] == brick && m_slots[s] != gpu::k_unbuilt;
+        (built ? m_again : m_order[level]).push_back(key);
     }
 }
 
@@ -1304,146 +1338,297 @@ void VoxelScene::tighten_filled(u32 level) {
 }
 
 void VoxelScene::touch_building(const Box& box) {
-    if (m_building.active && !box.empty() &&
-        overlaps(box.min, box.max, m_building.box.min, m_building.box.max)) {
-        m_building.again = true;
+    if (box.empty()) {
+        return;
+    }
+    for (const std::shared_ptr<Build>& b : m_builds) {
+        const double size = b->brick_size;
+        if (!b->again && overlaps(box.min, box.max, b->origin, b->origin + DVec3{size, size, size})) {
+            b->again = true;
+        }
     }
 }
 
-template <typename OutOfTime>
-bool VoxelScene::build_step(const MeshLookup& meshes, const OutOfTime& out_of_time) {
-    Building& job = m_building;
-    const u32 level = job.key.level;
-    const DVec3 origin = job.box.min;
-    const float voxel = static_cast<float>(m_clipmap.voxel_size(level));
-    const float edge = voxel * static_cast<float>(voxel::k_brick_edge);
-    while (job.next < job.found.size()) {
-        const u32 i = job.found[job.next++];
-        if (i >= m_copies.size()) {
-            continue; // removed meanwhile (job.again is set)
-        }
-        const Copy& copy = m_copies[i];
-        const Instance& in = copy.instance;
-        MeshCache* m = mesh_cache(in.mesh, meshes);
-        const float s = max_abs_scale(in.scale);
-        if (m != nullptr && s > 0.0f && std::isfinite(s)) {
-            // Detail to half a voxel: the cut whose error is the power of
-            // two at or under that (shared by instances of similar scale).
-            const float wanted = 0.5f * voxel / s;
-            const i32 exponent = static_cast<i32>(std::clamp(std::floor(std::log2(wanted)), -40.0f, 40.0f));
-            auto cut_it = m->cuts.find(exponent);
-            if (cut_it == m->cuts.end()) {
-                cut_it = m->cuts.emplace(exponent, cut(*m->mesh, std::ldexp(1.0f, exponent))).first;
-            }
-            const Vec3 rel = to_camera_relative(in.position, origin); // the brick's frame
-            const bool mirrored = in.scale.x * in.scale.y * in.scale.z < 0.0f;
-            const auto place = [&](const Vec3& p) {
-                return rel + rotate(in.rotation, Vec3{p.x * in.scale.x, p.y * in.scale.y, p.z * in.scale.z});
-            };
-            const geometry::ClusterMesh& mesh = *m->mesh;
-            // Leafy crowns face out from the middle, as resolve.slang bends them.
-            const Vec3 middle = place(mesh.bounds.center);
-            for (const u32 ci : cut_it->second) {
-                const geometry::Cluster& c = mesh.clusters[ci];
-                const Vec3 center = place(c.bounds.center);
-                const float r = c.bounds.radius * s;
-                // Sphere against the brick's box.
-                const float dx = center.x - std::clamp(center.x, 0.0f, edge);
-                const float dy = center.y - std::clamp(center.y, 0.0f, edge);
-                const float dz = center.z - std::clamp(center.z, 0.0f, edge);
-                if (dx * dx + dy * dy + dz * dz > r * r) {
-                    continue;
-                }
-                for (u32 t = 0; t < c.triangle_count; ++t) {
-                    const u32* idx = &mesh.indices[c.first_index + t * 3];
-                    const Vec3 a = place(mesh.vertices[idx[0]].position);
-                    Vec3 b = place(mesh.vertices[idx[1]].position);
-                    Vec3 d = place(mesh.vertices[idx[2]].position);
-                    if (mirrored) {
-                        std::swap(b, d); // keep the facing outward
-                    }
-                    Vec3 facing{};
-                    if (copy.canopy > 0.0f) {
-                        // As resolve.slang: the side seen from outside
-                        // (a leaf card's either way), bent out.
-                        Vec3 own = normalize_or_zero(cross(b - a, d - a));
-                        const Vec3 out = normalize_or_zero((a + b + d) * (1.0f / 3.0f) - middle);
-                        if (dot(own, out) < 0.0f) {
-                            own = own * -1.0f;
-                        }
-                        // (Never cancels once own is on out's side; out
-                        // zero, at the middle: add_triangle keeps own.)
-                        facing = own + (out - own) * copy.canopy;
-                    }
-                    m_builder.add_triangle(a, b, d, copy.color, copy.stand_in, copy.coverage, facing);
-                }
-            }
-        }
-        if (job.next % 16 == 0 && job.next < job.found.size() && out_of_time()) {
-            return false;
-        }
+bool VoxelScene::Build::run() {
+    u32 expected = k_queued;
+    if (!state.compare_exchange_strong(expected, k_running, std::memory_order_acq_rel)) {
+        return false; // another thread has it
     }
-    // Water's surfaces over the brick, after everything else: gathered
-    // once from the pieces over it (each triangle once; the bodies as they
-    // are then, kept while it builds), added a few dozen between looks at
-    // the clock.
-    const DVec3 far_corner = origin + DVec3{edge, edge, edge};
-    if (!job.water_gathered) {
-        job.water_gathered = true;
-        job.water_bodies.clear();
-        job.water.clear();
-        job.water_next = 0;
-        const u32 stamp = ++m_water_stamp;
-        for (const auto& body : m_water) {
-            if (!overlaps(body->box.min, body->box.max, origin, far_corner)) {
+    builder.reset(voxel_size, seed);
+    const float voxel = voxel_size;
+    const float edge = voxel * static_cast<float>(voxel::k_brick_edge);
+    for (const Item& item : items) {
+        const geometry::ClusterMesh& mesh = *meshes[item.mesh];
+        const Cut& chosen = *cuts[item.cut];
+        const float s = max_abs_scale(item.scale);
+        const Vec3 rel = to_camera_relative(item.position, origin); // the brick's frame
+        const bool mirrored = item.scale.x * item.scale.y * item.scale.z < 0.0f;
+        const auto place = [&](const Vec3& p) {
+            return rel + rotate(item.rotation, Vec3{p.x * item.scale.x, p.y * item.scale.y, p.z * item.scale.z});
+        };
+        if (mesh.bounds.radius * s <= k_point_share * voxel) {
+            // Far smaller than a voxel (a grass tuft or a tree in a coarse level's): one point where
+            // it is, added by the brick its middle is in (a few dozen times less work than its
+            // triangles, which would all fall in one voxel or two). Its facing as its triangles'
+            // summed (a leafy crown's, bent outward on every side, sums to about none: +Y).
+            // Which brick, from the world position, so that one on a brick's face is added by
+            // exactly one of the two (in each brick's frame, floats can put it just outside both).
+            const Vec3 offset = rotate(item.rotation, Vec3{mesh.bounds.center.x * item.scale.x, mesh.bounds.center.y * item.scale.y,
+                                                           mesh.bounds.center.z * item.scale.z});
+            const DVec3 middle = to_world(offset, item.position);
+            if (std::floor(middle.x / brick_size) != static_cast<double>(brick.x) ||
+                std::floor(middle.y / brick_size) != static_cast<double>(brick.y) ||
+                std::floor(middle.z / brick_size) != static_cast<double>(brick.z)) {
                 continue;
             }
-            const u32 bi = static_cast<u32>(job.water_bodies.size());
-            bool any = false;
-            for (const WaterPiece& piece : body->pieces) {
-                if (!overlaps(piece.box.min, piece.box.max, origin, far_corner)) {
-                    continue;
+            const Vec3 n = chosen.normals;
+            const Vec3 normals = rotate(item.rotation, Vec3{std::copysign(1.0f, item.scale.x) * n.x, std::copysign(1.0f, item.scale.y) * n.y,
+                                                            std::copysign(1.0f, item.scale.z) * n.z}) *
+                                 (1.0f - std::clamp(item.canopy, 0.0f, 1.0f));
+            const float inside = std::nextafter(edge, 0.0f);
+            const Vec3 at = place(mesh.bounds.center);
+            builder.add_point({std::clamp(at.x, 0.0f, inside), std::clamp(at.y, 0.0f, inside), std::clamp(at.z, 0.0f, inside)},
+                              chosen.triangles, chosen.area * s * s, normals, item.color, item.stand_in, item.coverage);
+            continue;
+        }
+        // Leafy crowns face out from the middle, as resolve.slang bends them.
+        const Vec3 middle = place(mesh.bounds.center);
+        for (const u32 ci : chosen.clusters) {
+            const geometry::Cluster& c = mesh.clusters[ci];
+            const Vec3 center = place(c.bounds.center);
+            const float r = c.bounds.radius * s;
+            // Sphere against the brick's box.
+            const float dx = center.x - std::clamp(center.x, 0.0f, edge);
+            const float dy = center.y - std::clamp(center.y, 0.0f, edge);
+            const float dz = center.z - std::clamp(center.z, 0.0f, edge);
+            if (dx * dx + dy * dy + dz * dz > r * r) {
+                continue;
+            }
+            for (u32 t = 0; t < c.triangle_count; ++t) {
+                const u32* idx = &mesh.indices[c.first_index + t * 3];
+                const Vec3 a = place(mesh.vertices[idx[0]].position);
+                Vec3 b = place(mesh.vertices[idx[1]].position);
+                Vec3 d = place(mesh.vertices[idx[2]].position);
+                if (mirrored) {
+                    std::swap(b, d); // keep the facing outward
                 }
-                for (const u32 t : piece.triangles) {
-                    if (body->stamps[t] != stamp) {
-                        body->stamps[t] = stamp;
-                        job.water.emplace_back(bi, t);
-                        any = true;
+                Vec3 facing{};
+                if (item.canopy > 0.0f) {
+                    // As resolve.slang: the side seen from outside
+                    // (a leaf card's either way), bent out.
+                    Vec3 own = normalize_or_zero(cross(b - a, d - a));
+                    const Vec3 out = normalize_or_zero((a + b + d) * (1.0f / 3.0f) - middle);
+                    if (dot(own, out) < 0.0f) {
+                        own = own * -1.0f;
                     }
+                    // (Never cancels once own is on out's side; out
+                    // zero, at the middle: add_triangle keeps own.)
+                    facing = own + (out - own) * item.canopy;
                 }
-            }
-            if (any) {
-                job.water_bodies.push_back(body);
+                builder.add_triangle(a, b, d, item.color, item.stand_in, item.coverage, facing);
             }
         }
     }
-    while (job.water_next < job.water.size()) {
-        const auto [bi, t] = job.water[job.water_next++];
-        const WaterBody& body = *job.water_bodies[bi];
-        const DVec3& a = body.corners[usize{t} * 3];
-        const DVec3& b = body.corners[usize{t} * 3 + 1];
-        const DVec3& c = body.corners[usize{t} * 3 + 2];
-        const DVec3 lo = lower(lower(a, b), c);
-        const DVec3 hi = upper(upper(a, b), c);
-        if (overlaps(lo, hi, origin, far_corner)) {
-            m_builder.add_water_triangle(to_camera_relative(a, origin), to_camera_relative(b, origin),
-                                         to_camera_relative(c, origin), body.color);
-        }
-        if (job.water_next % 64 == 0 && job.water_next < job.water.size() && out_of_time()) {
-            return false;
-        }
+    // Water's surfaces over the brick, after everything else.
+    for (const WaterTriangle& w : water) {
+        builder.add_water_triangle(w.a, w.b, w.c, w.color);
     }
+    // Empty also when cut-outs touched voxels but thinned every one away.
+    result = builder.build();
+    items.clear();
+    items.shrink_to_fit();
+    meshes.clear(); // they may go now
+    cuts.clear();
+    water.clear();
+    water.shrink_to_fit();
+    state.store(k_built, std::memory_order_release);
     return true;
 }
 
-bool VoxelScene::finish_build(rhi::CommandList& cmd, bool& pool_writable) {
-    Building& job = m_building;
-    job.active = false;
-    const Key key = job.key;
-    const u32 level = key.level;
-    if (job.again) {
-        mark(level, key.brick); // built again with what changed
+bool VoxelScene::building(const Key& key) const {
+    for (const std::shared_ptr<Build>& b : m_builds) {
+        if (b->level == key.level && b->brick == key.brick) {
+            return true;
+        }
     }
+    return false;
+}
+
+bool VoxelScene::start_build() {
+    // Every level's never built, coarsest first; then those to build again, oldest first.
+    for (u32 n = m_clipmap.levels() + 1; n-- > 0;) {
+        std::deque<Key>& order = n > 0 ? m_order[n - 1] : m_again;
+        while (!order.empty()) {
+            const Key key = order.front();
+            order.pop_front();
+            if (m_pending.erase(key) == 0 || !m_clipmap.contains(key.level, key.brick)) {
+                continue; // left the window while waiting
+            }
+            bool under_way = false;
+            for (const std::shared_ptr<Build>& b : m_builds) {
+                if (b->level == key.level && b->brick == key.brick) {
+                    b->again = true; // built once more when it is done (never two at once)
+                    under_way = true;
+                }
+            }
+            if (under_way) {
+                continue;
+            }
+            auto job = std::make_shared<Build>();
+            Build& b = *job;
+            b.level = key.level;
+            b.brick = key.brick;
+            b.origin = m_clipmap.brick_min(key.level, key.brick);
+            b.brick_size = m_clipmap.brick_size(key.level);
+            b.voxel_size = static_cast<float>(m_clipmap.voxel_size(key.level));
+            b.seed = static_cast<u32>(KeyHash{}(key));
+            const DVec3 far_corner = b.origin + DVec3{b.brick_size, b.brick_size, b.brick_size};
+            find({b.origin, far_corner});
+            b.found = m_found;
+            b.items.reserve(m_found.size());
+            // Water's surfaces over it: each triangle once (the bodies as they are now; a change
+            // meanwhile sets `again`).
+            const u32 stamp = ++m_water_stamp;
+            for (const auto& body : m_water) {
+                if (!overlaps(body->box.min, body->box.max, b.origin, far_corner)) {
+                    continue;
+                }
+                for (const WaterPiece& piece : body->pieces) {
+                    if (!overlaps(piece.box.min, piece.box.max, b.origin, far_corner)) {
+                        continue;
+                    }
+                    for (const u32 t : piece.triangles) {
+                        if (body->stamps[t] == stamp) {
+                            continue;
+                        }
+                        body->stamps[t] = stamp;
+                        const DVec3& p0 = body->corners[usize{t} * 3];
+                        const DVec3& p1 = body->corners[usize{t} * 3 + 1];
+                        const DVec3& p2 = body->corners[usize{t} * 3 + 2];
+                        if (overlaps(lower(lower(p0, p1), p2), upper(upper(p0, p1), p2), b.origin, far_corner)) {
+                            b.water.push_back({to_camera_relative(p0, b.origin), to_camera_relative(p1, b.origin),
+                                               to_camera_relative(p2, b.origin), body->color});
+                        }
+                    }
+                }
+            }
+            m_builds.push_back(job);
+            m_gathering = job; // its instances copied next, a few hundred between looks at the clock
+            return true;
+        }
+    }
+    return false;
+}
+
+bool VoxelScene::gather(const MeshLookup& meshes, const std::function<bool()>& out_of_time) {
+    Build& b = *m_gathering;
+    // Runs of one mesh at one detail (a scatter cell's) look it up once.
+    MeshId last_mesh = k_no_mesh;
+    i32 last_exponent = 0;
+    bool last_point = false;
+    bool have = false; // looked one up in this call
+    bool looked = false;
+    while (b.next < b.found.size()) {
+        if (b.next % 256 == 0 && looked && out_of_time()) {
+            return false;
+        }
+        looked = true;
+        const u32 i = b.found[b.next++];
+        if (i >= m_copies.size()) {
+            continue; // removed meanwhile (`again` is set)
+        }
+        const Copy& copy = m_copies[i];
+        const Instance& in = copy.instance;
+        const float s = max_abs_scale(in.scale);
+        if (!(s > 0.0f) || !std::isfinite(s)) {
+            continue;
+        }
+        // Detail to half a voxel: the cut whose error is the power of
+        // two at or under that (shared by instances of similar scale).
+        const float wanted = 0.5f * b.voxel_size / s;
+        const i32 exponent = static_cast<i32>(std::clamp(std::floor(std::log2(wanted)), -40.0f, 40.0f));
+        const bool fresh = !have || in.mesh != last_mesh || exponent != last_exponent;
+        MeshCache* m = fresh ? mesh_cache(in.mesh, meshes) : nullptr;
+        if (fresh && m == nullptr) {
+            continue;
+        }
+        // A point needs the cut's sums (Build::run), the rest only its clusters: kept apart, so a
+        // fine cut of a dense mesh is not walked triangle by triangle for nothing.
+        const geometry::ClusterMesh& mesh = fresh ? *m->mesh : *b.meshes.back();
+        const bool point = mesh.bounds.radius * s <= k_point_share * b.voxel_size;
+        if (fresh || point != last_point) {
+            if (m == nullptr && (m = mesh_cache(in.mesh, meshes)) == nullptr) {
+                continue;
+            }
+            const i32 key = exponent * 2 + (point ? 1 : 0);
+            auto cut_it = m->cuts.find(key);
+            if (cut_it == m->cuts.end()) {
+                cut_it = m->cuts.emplace(key, std::make_shared<const Cut>(cut(*m->mesh, std::ldexp(1.0f, exponent), point))).first;
+            }
+            b.meshes.push_back(m->mesh);
+            b.cuts.push_back(cut_it->second);
+            have = true;
+            last_mesh = in.mesh;
+            last_exponent = exponent;
+            last_point = point;
+        }
+        Build::Item item;
+        item.position = in.position;
+        item.rotation = in.rotation;
+        item.scale = in.scale;
+        item.color = copy.color;
+        item.coverage = copy.coverage;
+        item.canopy = copy.canopy;
+        item.stand_in = copy.stand_in;
+        item.mesh = static_cast<u32>(b.meshes.size() - 1);
+        item.cut = static_cast<u32>(b.cuts.size() - 1);
+        b.items.push_back(item);
+    }
+    b.found.clear();
+    b.found.shrink_to_fit();
+    b.count = static_cast<u32>(b.items.size());
+    b.state.store(Build::k_queued, std::memory_order_release);
+    m_build_jobs.submit(m_build_group, [job = m_gathering] { job->run(); });
+    m_gathering.reset();
+    return true;
+}
+
+bool VoxelScene::finish_build(rhi::CommandList& cmd, bool& pool_writable, const Build& build) {
+    const bool ok = place_build(cmd, pool_writable, build);
+    if (build.again) {
+        // Built again with what changed: marked once placed, so a first build counts as built
+        // (it waits its turn with the rest, not ahead of every brick never built).
+        mark(build.level, build.brick);
+    }
+    return ok;
+}
+
+void VoxelScene::cancel_builds(bool all) {
+    for (auto it = m_builds.begin(); it != m_builds.end();) {
+        Build& b = **it;
+        if (!all && m_clipmap.contains(b.level, b.brick)) {
+            ++it;
+            continue;
+        }
+        u32 expected = Build::k_queued;
+        const bool queued = b.state.compare_exchange_strong(expected, Build::k_cancelled, std::memory_order_acq_rel);
+        if (queued || (*it == m_gathering)) {
+            if (*it == m_gathering) {
+                m_gathering.reset();
+            }
+            if (!all && b.again) {
+                mark(b.level, b.brick); // (no-op: it left the window)
+            }
+            it = m_builds.erase(it);
+        } else {
+            ++it; // under way or done: finished as usual
+        }
+    }
+}
+
+bool VoxelScene::place_build(rhi::CommandList& cmd, bool& pool_writable, const Build& build) {
+    const Key key{build.level, build.brick};
+    const u32 level = key.level;
     if (!m_clipmap.contains(level, key.brick)) {
         return true; // left the window meanwhile
     }
@@ -1453,8 +1638,7 @@ bool VoxelScene::finish_build(rhi::CommandList& cmd, bool& pool_writable) {
     if (m_slots[s] < gpu::k_unbuilt && !here) {
         remove(level, slot, key.brick); // a brick that left the window (entering frees them; never kept)
     }
-    // Empty also when cut-outs touched voxels but thinned every one away.
-    const voxel::Brick brick = m_builder.build();
+    const voxel::Brick& brick = build.result;
     if (brick.empty()) {
         remove(level, slot, key.brick);
         m_retry.erase(key);
@@ -1565,6 +1749,9 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
 
     // Coarse levels' slabs first (recenter lists them finest first).
     const std::vector<voxel::BrickBox> entered = m_clipmap.recenter(camera);
+    if (!entered.empty()) {
+        cancel_builds(false); // (after a teleport, the new window's bricks start at once)
+    }
     for (usize i = entered.size(); i-- > 0;) {
         enter(entered[i]);
     }
@@ -1575,16 +1762,26 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         if (i > 0 && entered[i - 1].level == level) {
             continue; // once per level
         }
-        std::deque<Key>& order = m_order[level];
         std::deque<Key> kept;
-        for (const Key& key : order) {
+        for (const Key& key : m_order[level]) {
             if (m_clipmap.contains(level, key.brick)) {
                 kept.push_back(key);
             } else {
                 m_pending.erase(key);
             }
         }
-        order = std::move(kept);
+        m_order[level] = std::move(kept);
+    }
+    if (!entered.empty()) {
+        std::deque<Key> kept;
+        for (const Key& key : m_again) {
+            if (m_clipmap.contains(key.level, key.brick)) {
+                kept.push_back(key);
+            } else {
+                m_pending.erase(key);
+            }
+        }
+        m_again = std::move(kept);
     }
     const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells);
     see_changes(instances, materials, only ? &m_changed_cells : nullptr, meshes_version, meshes);
@@ -1674,54 +1871,71 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         m_jobs.pop_front();
         job_done(done);
     }
-    // A brick at a time: the one under way first, then the coarsest waiting.
+    // Bricks: those built copied to the pool, and more started (coarsest waiting first) while the
+    // workers have room. With time to spare, the main thread builds some itself and waits on the
+    // workers' rather than leave it unused.
     bool pool_writable = false;
     bool progress = false; // at least one step a frame
-    const auto build_out_of_time = [&] { return elapsed() >= budget; };
+    const bool help = budget >= k_help_ms;
+    const std::function<bool()> out_of_time = [&] { return elapsed() >= budget; };
     for (;;) {
-        if (progress && (build_out_of_time() || m_stats.uploaded >= k_max_uploads)) {
+        if (progress && (elapsed() >= budget || m_stats.uploaded >= k_max_uploads)) {
             break;
         }
-        if (!m_building.active) {
-            bool started = false;
-            for (u32 l = m_clipmap.levels(); l-- > 0 && !started;) {
-                std::deque<Key>& order = m_order[l];
-                while (!order.empty()) {
-                    const Key key = order.front();
-                    order.pop_front();
-                    if (m_pending.erase(key) == 0 || !m_clipmap.contains(key.level, key.brick)) {
-                        continue; // left the window while waiting
+        bool stepped = false;
+        bool failed = false;
+        bool timed_out = false;
+        for (auto it = m_builds.begin(); it != m_builds.end() && m_stats.uploaded < k_max_uploads;) {
+            if (stepped && elapsed() >= budget) {
+                timed_out = true;
+                break; // one a step, more while there is time
+            }
+            if ((*it)->state.load(std::memory_order_acquire) != Build::k_built) {
+                ++it;
+                continue;
+            }
+            const std::shared_ptr<Build> done = *it;
+            it = m_builds.erase(it);
+            ++m_stats.built;
+            stepped = true;
+            if (!finish_build(cmd, pool_writable, *done)) {
+                failed = true;
+                break;
+            }
+        }
+        if (failed) {
+            break;
+        }
+        if (timed_out) {
+            progress = true;
+            continue; // (out of time: ends at the top)
+        }
+        if (m_gathering != nullptr) {
+            gather(meshes, out_of_time);
+            stepped = true;
+        } else if (m_builds.size() < k_most_builds && start_build()) {
+            stepped = true;
+        } else if (help && !m_builds.empty()) {
+            // None more to start: build one here (the smallest waiting, and only in the first
+            // half of the budget, as a whole brick is not split), or wait for the workers'.
+            Build* smallest = nullptr;
+            if (elapsed() < budget * 0.5) {
+                for (const std::shared_ptr<Build>& b : m_builds) {
+                    if (b->state.load(std::memory_order_acquire) == Build::k_queued &&
+                        (smallest == nullptr || b->count < smallest->count)) {
+                        smallest = b.get();
                     }
-                    m_building.active = true;
-                    m_building.key = key;
-                    m_building.box = {m_clipmap.brick_min(key.level, key.brick),
-                                      m_clipmap.brick_min(key.level, {key.brick.x + 1, key.brick.y + 1,
-                                                                      key.brick.z + 1})};
-                    find(m_building.box);
-                    m_building.found = m_found;
-                    m_building.next = 0;
-                    m_building.again = false;
-                    m_building.water_gathered = false;
-                    m_building.water_bodies.clear();
-                    m_building.water.clear();
-                    m_building.water_next = 0;
-                    m_builder.reset(static_cast<float>(m_clipmap.voxel_size(key.level)), static_cast<u32>(KeyHash{}(key)));
-                    started = true;
-                    break;
                 }
             }
-            if (!started) {
-                break; // nothing waits
+            if (smallest == nullptr || !smallest->run()) {
+                std::this_thread::yield();
             }
+            stepped = true;
+        }
+        if (!stepped) {
+            break; // nothing waits, or all under way
         }
         progress = true;
-        if (!build_step(meshes, build_out_of_time)) {
-            break; // more next frame
-        }
-        ++m_stats.built;
-        if (!finish_build(cmd, pool_writable)) {
-            break;
-        }
     }
     if (pool_writable) {
         cmd.barrier(m_pool, rhi::ResourceState::shader_read);
@@ -1760,13 +1974,20 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
 
     m_stats.bricks = m_used;
     m_stats.pending = static_cast<u32>(m_pending.size() + m_jobs.size() + m_regions.size() + m_changed_count +
-                                       (m_rebuild_again ? 1 : 0) + (m_building.active ? 1 : 0));
+                                       (m_rebuild_again ? 1 : 0) + m_builds.size());
     m_stats.missing = static_cast<u32>(m_retry.size());
     m_stats.overflow = m_stats.missing > 0;
     m_stats.cpu_ms = static_cast<float>(elapsed());
 }
 
 void VoxelScene::idle() {
+    if (m_gathering != nullptr) {
+        // Off for now: what it was copying (and the meshes it holds) let go; built when back on.
+        const std::shared_ptr<Build> b = m_gathering;
+        m_gathering.reset();
+        m_builds.erase(std::find(m_builds.begin(), m_builds.end(), b));
+        mark(b->level, b->brick);
+    }
     m_placed.clear();
     m_rebuilt.clear();
     m_stats.built = 0;
@@ -1861,7 +2082,7 @@ bool VoxelScene::holds(u32 index) const {
                     if (value == gpu::k_unbuilt || (value != gpu::k_no_brick && !(m_slot_bricks[s] == brick)) ||
                         (!m_pending.empty() && m_pending.count(key) != 0) ||
                         (!m_retry.empty() && m_retry.count(key) != 0) ||
-                        (m_building.active && m_building.key == key)) {
+                        building(key)) {
                         return false;
                     }
                 }

@@ -271,6 +271,51 @@ GIANT_TEST("voxel: a triangle can face another way for lighting (leafy crowns)")
     }
 }
 
+GIANT_TEST("voxel: an object far smaller than a voxel adds as a point what its triangles would") {
+    // A small closed box (12 triangles) well inside voxel (2, 3, 4) of 1 m voxels, tilted so its
+    // faces sum to no facing in all.
+    const Vec3 lo{2.30f, 3.35f, 4.40f};
+    const Vec3 hi{2.55f, 3.60f, 4.70f};
+    const std::array<Vec3, 8> c{Vec3{lo.x, lo.y, lo.z}, Vec3{hi.x, lo.y, lo.z}, Vec3{hi.x, hi.y, lo.z}, Vec3{lo.x, hi.y, lo.z},
+                                Vec3{lo.x, lo.y, hi.z}, Vec3{hi.x, lo.y, hi.z}, Vec3{hi.x, hi.y, hi.z}, Vec3{lo.x, hi.y, hi.z}};
+    const std::array<std::array<u32, 3>, 12> faces{{{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}, {0, 1, 5}, {0, 5, 4},
+                                                    {3, 7, 6}, {3, 6, 2}, {0, 4, 7}, {0, 7, 3}, {1, 2, 6}, {1, 6, 5}}};
+    float area = 0.0f;
+    Vec3 normals{};
+    for (const auto& f : faces) {
+        const Vec3 n = cross(c[f[1]] - c[f[0]], c[f[2]] - c[f[0]]);
+        area += 0.5f * length(n);
+        normals += normalize_or_zero(n);
+    }
+    const Vec3 colour{0.6f, 0.4f, 0.2f};
+    const Vec3 middle = (lo + hi) * 0.5f;
+    for (const float coverage : {1.0f, 0.4f}) {
+        for (u32 seed = 0; seed < 8; ++seed) {
+            BrickBuilder by_triangles;
+            by_triangles.reset(1.0f, seed);
+            for (const auto& f : faces) by_triangles.add_triangle(c[f[0]], c[f[1]], c[f[2]], colour, false, coverage);
+            BrickBuilder by_point;
+            by_point.reset(1.0f, seed);
+            GIANT_CHECK(by_point.add_point(middle, 12, area, normals, colour, false, coverage) == 1);
+            const Brick a = by_triangles.build();
+            const Brick b = by_point.build();
+            GIANT_CHECK(a.occupancy == b.occupancy && a.voxels == b.voxels && a.stand_in == b.stand_in);
+        }
+    }
+    // A stand-in's point is one; outside the brick, nothing covered, no triangles or NaN: nothing.
+    BrickBuilder b;
+    b.reset(1.0f, 3);
+    b.add_point(middle, 12, area, normals, colour, true, 1.0f);
+    GIANT_CHECK(b.build().stands_in(voxel_index(2, 3, 4)));
+    b.reset(1.0f, 3);
+    GIANT_CHECK(b.add_point({8.5f, 1.0f, 1.0f}, 12, area, normals, colour) == 0);
+    GIANT_CHECK(b.add_point({-0.1f, 1.0f, 1.0f}, 12, area, normals, colour) == 0);
+    GIANT_CHECK(b.add_point(middle, 12, area, normals, colour, false, 0.0f) == 0);
+    GIANT_CHECK(b.add_point(middle, 0, area, normals, colour) == 0);
+    GIANT_CHECK(b.add_point({k_nan, 1.0f, 1.0f}, 12, area, normals, colour) == 0);
+    GIANT_CHECK(b.empty());
+}
+
 GIANT_TEST("voxel: a triangle outside the brick, or with no area, adds nothing") {
     BrickBuilder b;
     b.reset(1.0f);
