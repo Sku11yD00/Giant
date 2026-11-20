@@ -49,6 +49,7 @@ struct TerrainMeshStats {
     u32 tiles = 0;     // with a mesh drawn
     u32 building = 0;  // waiting for or being built (newer heights than drawn)
     u32 in_flight = 0; // being built on the workers now
+    u32 waiting = 0;   // of `building`: built and handed to the renderer, waiting for room in its geometry pool
     u64 built = 0;     // ever
     u64 triangles = 0; // in the drawn meshes, at full detail
 };

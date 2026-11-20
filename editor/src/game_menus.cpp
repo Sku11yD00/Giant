@@ -1,9 +1,12 @@
 #include "game_menus.h"
 
 #include "editor_commands.h"
+#include "far_ground.h"
 #include "game_saves.h"
 #include "game_ui.h"
 #include "play_state.h"
+#include "pose_bakes.h"
+#include "scatter_placer.h"
 #include "terrain_meshes.h"
 #include "texture_library.h"
 #include "world_streaming.h"
@@ -558,7 +561,7 @@ void GameMenus::show_loading() {
     m_arriving_before = 0;
     m_arriving_done = 0;
     m_arriving_quiet = 0;
-    m_arriving_seconds = m_arriving_bodies = 0.0;
+    m_arriving_seconds = m_arriving_bodies = m_arriving_gpu = 0.0;
     m_arriving_frame = std::chrono::steady_clock::now();
     m_arriving_streamed = 0;
     open(Menu::loading);
@@ -587,7 +590,8 @@ bool GameMenus::start_play() {
 void GameMenus::arrive() {
     // The frame's seconds, as the frames have them: a window put away (no frames) is no time passed.
     const auto now = std::chrono::steady_clock::now();
-    const double frame = std::clamp(std::chrono::duration<double>(now - m_arriving_frame).count(), 0.0, 0.1);
+    const double real = std::max(std::chrono::duration<double>(now - m_arriving_frame).count(), 0.0);
+    const double frame = std::min(real, 0.1);
     m_arriving_frame = now;
     const WorldStreaming* streaming = m_state.world;
     const bool streamed = streaming != nullptr && streaming->active(m_state.scene_generation);
@@ -600,8 +604,28 @@ void GameMenus::arrive() {
     m_arriving.textures = m_state.textures != nullptr ? static_cast<u32>(std::min<usize>(m_state.textures->pending(), 1u << 30)) : 0;
     // (A loaded game's dented tiles are put in as their cells come, and built then: not counted while they
     // wait, since those of cells far from the player never come.)
-    m_arriving.ground = m_state.terrain_meshes != nullptr ? m_state.terrain_meshes->stats().building : 0u;
-    const u32 counted = m_arriving.cells + m_arriving.textures + m_arriving.ground + (m_arriving.game ? 1u : 0u);
+    // (Tiles built and waiting for room in the renderer's geometry pool are the GPU's own, below: a pool
+    // too small may never take them.)
+    u32 ground_waiting = 0;
+    m_arriving.ground = 0;
+    if (m_state.terrain_meshes != nullptr) {
+        const TerrainMeshStats ground = m_state.terrain_meshes->stats();
+        m_arriving.ground = ground.building - ground.waiting;
+        ground_waiting = ground.waiting;
+    }
+    m_arriving.scatter = m_state.scatter != nullptr ? m_state.scatter->stats().building : 0u;
+    m_arriving.far_ground = 0;
+    if (m_state.far_ground != nullptr) {
+        const FarGroundStats far = m_state.far_ground->stats();
+        m_arriving.far_ground = far.reading + far.wanted;
+        for (u32 l = 0; l < far.building.size(); ++l) {
+            m_arriving.far_ground += far.building[l] - far.waiting[l];
+            ground_waiting += far.waiting[l];
+        }
+    }
+    m_arriving.poses = m_state.poses != nullptr ? static_cast<u32>(std::min<usize>(m_state.poses->baking(), 1u << 30)) : 0u;
+    const u32 counted = m_arriving.cells + m_arriving.textures + m_arriving.ground + m_arriving.scatter + m_arriving.far_ground +
+                        m_arriving.poses + (m_arriving.game ? 1u : 0u);
     // The bodies, once the rest is in, and for no longer than play itself would wait for them.
     // (A player already put down by a loaded game waits for its own, held still.)
     m_arriving.bodies = !playing && m_state.play != nullptr && m_state.play->world_waits(m_state.scene, m_state.camera.position);
@@ -610,7 +634,24 @@ void GameMenus::arrive() {
         m_arriving_bodies += frame;
         bodies = m_arriving_bodies <= PlayState::k_most_placing_seconds;
     }
-    const u32 coming = counted + (bodies ? 1u : 0u);
+    // The GPU's own, the same: once the rest is in, for no longer than k_most_gpu_seconds, of the clock:
+    // on a slow device (a software one: seconds a frame) what is behind is not worth waiting for
+    // frame by frame, and a window put away does nothing for it either.
+    const render::RenderStats& drawn = m_state.scene_stats;
+    // (The voxel world's count is kept as it was when it is turned off: not counted then. Shadow pages:
+    // those never drawn or long behind, not the backlog of what moves on them, which may never end.)
+    const bool voxels = m_state.render_settings.voxel_world;
+    m_arriving.voxels = voxels ? drawn.voxel_pending : 0u;
+    m_arriving.light = voxels ? drawn.gi_waiting : 0u;
+    m_arriving.shadows = drawn.shadow_behind;
+    m_arriving.geometry = drawn.waiting + ground_waiting;
+    const u32 gpu = m_arriving.voxels + m_arriving.light + m_arriving.shadows + m_arriving.geometry;
+    bool gpu_waited = false;
+    if (counted == 0 && gpu != 0) {
+        m_arriving_gpu += real;
+        gpu_waited = m_arriving_gpu <= k_most_gpu_seconds;
+    }
+    const u32 coming = counted + (bodies ? 1u : 0u) + (gpu_waited ? 1u : 0u);
     // What has come in since the screen stood, of all that was ever to come: more found to come
     // later (a cell in brings its textures) holds the bar where it is, never back.
     if (coming < m_arriving_before) m_arriving_done += m_arriving_before - coming;
@@ -636,12 +677,22 @@ void GameMenus::arrive() {
     if (!in_time)
         log_warning("game", "the world was still coming in after " + std::to_string(static_cast<int>(k_most_loading_seconds)) + " s (" +
                                 std::to_string(m_arriving.cells) + " cells, " + std::to_string(m_arriving.textures) + " textures, " +
-                                std::to_string(m_arriving.ground) + " ground tiles" + (m_arriving.bodies ? ", bodies" : "") +
+                                std::to_string(m_arriving.ground) + " ground tiles, " + std::to_string(m_arriving.scatter) +
+                                " scatter cells, " + std::to_string(m_arriving.far_ground) + " far ground chunks, " +
+                                std::to_string(m_arriving.poses) + " poses" + (m_arriving.bodies ? ", bodies" : "") + "; " + gpu_left() +
                                 "): play begins without them");
+    else if (m_arriving.voxels + m_arriving.light + m_arriving.shadows + m_arriving.geometry != 0)
+        log_info("game", "play begins with the GPU still at it after " + std::to_string(static_cast<int>(k_most_gpu_seconds)) + " s (" +
+                             gpu_left() + ")");
     m_arriving.on = false;
     // (A loaded game that was saved in play is playing already, held still behind the screen: it goes on.)
     if (playing) close();
     else start_play();
+}
+
+std::string GameMenus::gpu_left() const {
+    return std::to_string(m_arriving.voxels) + " voxel bricks, " + std::to_string(m_arriving.light) + " unlit, " +
+           std::to_string(m_arriving.shadows) + " shadow pages, " + std::to_string(m_arriving.geometry) + " geometry";
 }
 
 void GameMenus::press(const std::string& screen, const std::string& id) {

@@ -395,7 +395,9 @@ TerrainMeshStats TerrainMeshes::stats() const {
     TerrainMeshStats s;
     for (const auto& [cell, tile] : m_tiles) {
         s.tiles += tile.drawn ? 1u : 0u;
-        s.building += (tile.in_flight || tile.waiting) && !m_queued.contains(cell) ? 1u : 0u;
+        const bool building = (tile.in_flight || tile.waiting) && !m_queued.contains(cell);
+        s.building += building ? 1u : 0u;
+        s.waiting += building && !tile.in_flight ? 1u : 0u;
         s.triangles += tile.drawn ? tile.triangles : 0u;
     }
     s.building += static_cast<u32>(m_queue.size());
