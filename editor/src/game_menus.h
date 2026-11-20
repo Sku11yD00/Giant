@@ -12,9 +12,14 @@
 //
 // The slot list is read from disk on a job when the saves menu opens
 // ("Reading saves..." until it is in). Settings last while the editor
-// runs. Menus take the window's input only over play (outside play they
-// are MCP's), and only while the game UI is shown: with it hidden, Esc
-// stops play as it did before the menus.
+// runs; a game keeps them between runs as text in the person's settings
+// folder (`keep_in`: read by main before the window is made, written on a
+// job when one changes and once more as the program ends, with the
+// window's size). A game takes fullscreen at once and vsync when it next
+// starts (the swap chain is made with it); the editor only shows the two,
+// its own window and frames left as they are. Menus take the window's input
+// only over play (outside play they are MCP's), and only while the game UI
+// is shown: with it hidden, Esc stops play as it did before the menus.
 //
 // Run as a game (EditorState::game_mode), the menus lead: outside play the
 // main menu stands (Continue: the newest save of this world that can be
@@ -34,6 +39,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace giant::editor {
@@ -56,10 +62,28 @@ public:
         float ui_scale = 1.0f;          // 0.5 to 2
         float fov_degrees = 70.0f;      // vertical, while playing: 40 to 110
         float look_sensitivity = 1.0f;  // 0.25 to 4
+        bool fullscreen = false;        // the window borderless over the whole of its screen
+        bool vsync = true;              // frames wait for the display (a game: taken up when it next starts)
+        // The window's size in points while it is not fullscreen (0: as the program makes it; else 320 to
+        // 7680 by 240 to 4320).
+        u32 window_width = 0, window_height = 0;
+        bool operator==(const Settings&) const = default;
     };
     const Settings& settings() const { return m_settings; }
-    // Clamped to the ranges above; applied at once.
+    // `settings` within the ranges above (a value that is no number: its default).
+    static Settings clamped(const Settings& settings);
+    // Clamped; applied at once (but vsync: see above).
     void set_settings(const Settings& settings);
+    // Where the settings are kept from now on (a text file; empty: nowhere), those set now taken as
+    // what it holds: a change after this is written there on a job.
+    void keep_in(std::string file);
+    const std::string& kept_in() const { return m_file; }
+    // The window's size while it is a plain window (the caller's to tell: not fullscreen, not
+    // maximised): kept with the settings, written by `store`.
+    void note_window(u32 width, u32 height);
+    // What is not written yet is, before this returns (the program ends), and what a job could not
+    // write is tried again. False: it could not be.
+    bool store();
 
     // Opens `menu` (saves: `saving` true to save, false to load).
     void open(Menu menu, bool saving = false);
@@ -115,6 +139,17 @@ private:
     Menu m_menu = Menu::none;
     bool m_saving = false;
     Settings m_settings;
+    Settings m_written; // as the file has them (or will, once the job under way is done)
+    std::string m_file;
+    // The writes of the settings: one at a time, each the newest text asked for (a job run by a
+    // waiting thread beside the jobs' own would else write over a newer one, or into its half-made file).
+    struct Keeper {
+        std::mutex mutex;
+        std::optional<std::string> text; // waiting to be written
+        bool failed = false;             // the last write could not be done
+    };
+    std::shared_ptr<Keeper> m_keeper = std::make_shared<Keeper>();
+    void write_later();
     std::vector<Slot> m_slots;
     std::string m_message;
     bool m_was_playing = false;
@@ -140,5 +175,11 @@ private:
     JobSystem m_jobs{1};
     WaitGroup m_group;
 };
+
+// A game's settings as the text kept between runs (JSON, a key a line, numbers to three places), and read back: a key left
+// out or of the wrong kind keeps its default and, wrong, is named in `problems`; every value is
+// clamped. Text that is no JSON object gives the defaults and says so.
+std::string settings_text(const GameMenus::Settings& settings);
+GameMenus::Settings settings_from_text(std::string_view text, std::vector<std::string>& problems);
 
 } // namespace giant::editor

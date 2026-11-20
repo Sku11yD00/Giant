@@ -15,9 +15,12 @@
 
 #include "giant_test.h"
 
+#include "giant/core/text.h"
+#include "giant/core/text_files.h"
 #include "giant/rhi/rhi.h"
 #include "giant/world/scene.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -25,6 +28,7 @@
 #include <fstream>
 #include <ios>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -484,4 +488,148 @@ GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to men
     std::error_code ec;
     std::filesystem::remove_all(folder, ec);
     std::filesystem::remove_all(other, ec);
+}
+
+GIANT_TEST("game menus: a game's settings as text and back; what is wrong in the text is named and left at its default") {
+    GameMenus::Settings s;
+    s.ui_scale = 1.25f;
+    s.fov_degrees = 95.0f;
+    s.look_sensitivity = 0.5f;
+    s.fullscreen = true;
+    s.vsync = false;
+    s.window_width = 1920;
+    s.window_height = 1080;
+    std::vector<std::string> problems;
+    const std::string text = settings_text(s);
+    GIANT_CHECK(settings_from_text(text, problems) == s && problems.empty());
+    // Text a person can read and change: a key a line.
+    GIANT_CHECK(text.find("\"fov\": 95") != std::string::npos && text.find("\"fullscreen\": true") != std::string::npos &&
+                text.back() == '\n' && std::count(text.begin(), text.end(), '\n') >= 7);
+    // Exactly this: the keys in this order, one a line, a step of the menu's (1.1 as a float) as a person would write it.
+    GameMenus::Settings stepped;
+    stepped.ui_scale = 1.1f;
+    stepped.look_sensitivity = 0.35f;
+    stepped.window_width = 1280;
+    stepped.window_height = 720;
+    GIANT_CHECK(settings_text(stepped) == "{\n  \"ui_scale\": 1.1,\n  \"fov\": 70.0,\n  \"look_sensitivity\": 0.35,\n"
+                                          "  \"fullscreen\": false,\n  \"vsync\": true,\n  \"window\": [1280, 720]\n}\n");
+    // A number beyond what a float holds is brought in as any too large is, not taken for none.
+    const GameMenus::Settings huge = settings_from_text(R"({"ui_scale": 1e300, "fov": -1e300})", problems);
+    GIANT_CHECK(huge.ui_scale == 2.0f && huge.fov_degrees == 40.0f && problems.empty());
+    // Keys left out keep their defaults; others are not minded.
+    GIANT_CHECK(settings_from_text(R"({"fov": 60, "later": [1, 2]})", problems).fov_degrees == 60.0f && problems.empty());
+    GIANT_CHECK(settings_from_text("{}", problems) == GameMenus::Settings{} && problems.empty());
+    // Values out of range are brought in; a window too small or too large too, one of no size is none.
+    const GameMenus::Settings wide = settings_from_text(
+        R"({"ui_scale": 9, "fov": 1, "look_sensitivity": 100, "window": [100, 99999]})", problems);
+    GIANT_CHECK(wide.ui_scale == 2.0f && wide.fov_degrees == 40.0f && wide.look_sensitivity == 4.0f && problems.empty());
+    GIANT_CHECK(wide.window_width == 320 && wide.window_height == 4320);
+    const GameMenus::Settings none = settings_from_text(R"({"window": [0, 900]})", problems);
+    GIANT_CHECK(none.window_width == 0 && none.window_height == 0 && problems.empty());
+    // What is of the wrong kind is named and keeps its default; the rest is taken.
+    const GameMenus::Settings mixed = settings_from_text(
+        R"({"ui_scale": "big", "fov": 80, "fullscreen": 1, "vsync": "no", "window": [800], "look_sensitivity": null})", problems);
+    GIANT_CHECK(mixed.ui_scale == 1.0f && mixed.fov_degrees == 80.0f && !mixed.fullscreen && mixed.vsync && mixed.window_width == 0);
+    GIANT_CHECK(problems.size() == 5);
+    problems.clear();
+    GIANT_CHECK(settings_from_text(R"({"window": [800, -600]})", problems).window_width == 0 && problems.size() == 1);
+    // No JSON, or no object: the defaults, and it says so.
+    for (const char* bad : {"", "fov = 90", "[1, 2]", "{\"fov\": "}) {
+        problems.clear();
+        GIANT_CHECK(settings_from_text(bad, problems) == GameMenus::Settings{} && problems.size() == 1);
+    }
+}
+
+GIANT_TEST("game menus: a game's settings are kept in a file as they change, the window's size as the program ends") {
+    const std::filesystem::path folder = fresh_folder();
+    const std::filesystem::path file = folder / "settings" / "deeper" / "game_settings.json"; // (a folder not there yet)
+    const auto kept = [&] {
+        std::vector<std::string> problems;
+        const std::optional<std::string> text = read_text_file(file);
+        GIANT_CHECK(text.has_value());
+        const GameMenus::Settings s = settings_from_text(text.value_or(""), problems);
+        GIANT_CHECK(problems.empty());
+        return s;
+    };
+    {
+        Stage stage(folder, false);
+        GIANT_CHECK(stage.device != nullptr);
+        if (stage.device == nullptr) return;
+        GameMenus& menus = *stage.menus;
+        const auto run = [&](const char* name, const Json& args = Json::object()) { return stage.run(name, args); };
+        // Kept nowhere: nothing is written, whatever changes (the editor's own menus).
+        GIANT_CHECK(run("set_game_settings", {{"fov", 100}}).value["settings"]["kept_in"] == "");
+        GIANT_CHECK(menus.store() && !std::filesystem::exists(folder / "settings"));
+        // Kept in a file from now on: what is set now is taken as what it holds, so nothing is written yet.
+        menus.keep_in(path_to_utf8(file));
+        GIANT_CHECK(menus.store() && !std::filesystem::exists(file));
+        GIANT_CHECK(run("get_menu").value["settings"]["kept_in"] == path_to_utf8(file));
+        // The menu's buttons and the command change them: written (on a job; store waits for it).
+        GIANT_CHECK(run("play", {{"on", true}}).ok);
+        for (int i = 0; i < 3; ++i) stage.frame();
+        GIANT_CHECK(run("open_menu", {{"menu", "settings"}}).ok);
+        stage.frame();
+        GIANT_CHECK(run("ui_click", {{"screen", "menu.settings"}, {"id", "fullscreen.toggle"}}).ok);
+        GIANT_CHECK(run("ui_click", {{"screen", "menu.settings"}, {"id", "vsync.toggle"}}).ok);
+        stage.frame();
+        GIANT_CHECK(menus.settings().fullscreen && !menus.settings().vsync);
+        GIANT_CHECK(stage.game_ui->values.text("settings.fullscreen") == "On" && stage.game_ui->values.text("settings.vsync") == "Off");
+        GIANT_CHECK(menus.store());
+        GIANT_CHECK(kept() == menus.settings() && kept().fullscreen && !kept().vsync && kept().fov_degrees == 100.0f);
+        const Json set = run("set_game_settings", {{"fullscreen", false}, {"vsync", true}, {"look_sensitivity", 2}}).value;
+        GIANT_CHECK(set["settings"]["fullscreen"] == false && set["settings"]["vsync"] == true);
+        GIANT_CHECK(menus.store() && kept() == menus.settings() && kept().look_sensitivity == 2.0f);
+        // The window's size: noted while it is a window, not written until the program ends; not noted fullscreen.
+        const auto written = std::filesystem::last_write_time(file);
+        menus.note_window(1280, 720);
+        stage.frame();
+        GIANT_CHECK(menus.settings().window_width == 1280 && kept().window_width == 0);
+        GIANT_CHECK(std::filesystem::last_write_time(file) == written);
+        // A setting set to what it is, the window's size other than the file's: still no reason to write.
+        GIANT_CHECK(run("set_game_settings", {{"look_sensitivity", 2}}).ok);
+        menus.wait();
+        GIANT_CHECK(kept().window_width == 0);
+        // Many changes one after another, the program ending at once: the file holds the last (each
+        // write is the newest text, one at a time, whichever thread runs the job).
+        for (int i = 0; i < 60; ++i) GIANT_CHECK(run("set_game_settings", {{"fov", 41 + i}, {"vsync", i % 2 == 0}}).ok);
+        GIANT_CHECK(menus.store() && kept() == menus.settings() && kept().fov_degrees == 100.0f && !kept().vsync);
+        GIANT_CHECK(kept().window_width == 1280); // (written with the change: the size as noted)
+        GIANT_CHECK(run("set_game_settings", {{"vsync", true}}).ok);
+        GIANT_CHECK(run("set_game_settings", {{"fullscreen", true}}).ok);
+        menus.note_window(3840, 2160);
+        menus.note_window(0, 0);
+        GIANT_CHECK(menus.settings().window_width == 1280 && menus.settings().window_height == 720);
+        GIANT_CHECK(menus.store() && kept() == menus.settings() && kept().window_width == 1280 && kept().fullscreen);
+    }
+    // The next run: read, set and kept in the same file, they are as they were left.
+    const std::filesystem::path second = fresh_folder(), third = fresh_folder();
+    {
+        Stage stage(second, false);
+        if (stage.device == nullptr) return;
+        stage.menus->set_settings(kept());
+        stage.menus->keep_in(path_to_utf8(file));
+        const GameMenus::Settings& s = stage.menus->settings();
+        GIANT_CHECK(s.fullscreen && s.vsync && s.fov_degrees == 100.0f && s.look_sensitivity == 2.0f && s.window_height == 720);
+        GIANT_CHECK(stage.game_ui->ui_scale == s.ui_scale && stage.play.look_sensitivity == 2.0f);
+    }
+    // A file that cannot be written (its name is a folder's): store says so, and the settings hold.
+    {
+        Stage stage(third, false);
+        if (stage.device == nullptr) return;
+        stage.menus->keep_in(path_to_utf8(folder));
+        GIANT_CHECK(stage.run("set_game_settings", {{"fov", 50}}).ok);
+        // (The job's write failed: store tries again, and says it could not, each time.)
+        GIANT_CHECK(!stage.menus->store() && stage.menus->settings().fov_degrees == 50.0f);
+        GIANT_CHECK(!stage.menus->store());
+        // Kept in a file that can be written from now on: nothing is owed to the old one, and a change is written.
+        const std::filesystem::path good = third / "kept" / "game_settings.json";
+        stage.menus->keep_in(path_to_utf8(good));
+        GIANT_CHECK(stage.menus->store() && !std::filesystem::exists(good));
+        GIANT_CHECK(stage.run("set_game_settings", {{"fov", 51}}).ok);
+        GIANT_CHECK(stage.menus->store());
+        std::vector<std::string> problems;
+        GIANT_CHECK(settings_from_text(read_text_file(good).value_or(""), problems).fov_degrees == 51.0f && problems.empty());
+    }
+    std::error_code ec;
+    for (const std::filesystem::path& made : {folder, second, third}) std::filesystem::remove_all(made, ec);
 }

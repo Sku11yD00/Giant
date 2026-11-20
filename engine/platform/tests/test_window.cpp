@@ -26,6 +26,35 @@ GIANT_TEST("platform: a hidden window opens with the requested size") {
     GIANT_CHECK(!window->take_resized());
 }
 
+GIANT_TEST("platform: a window asked to fill its screen, and back, goes on with a size") {
+    WindowDesc desc;
+    desc.title = "giant test";
+    desc.width = 320;
+    desc.height = 200;
+    desc.hidden = true;
+    auto window = Window::create(desc);
+    GIANT_CHECK(window != nullptr);
+    if (window == nullptr) {
+        return;
+    }
+    // (What size a hidden window on a test machine's display takes is the display's: that asking is
+    // taken, the window says which it is, the loop goes on and the window has a size after.)
+    GIANT_CHECK(!window->fullscreen() && !window->maximized());
+    GIANT_CHECK(window->request_fullscreen(true));
+    GIANT_CHECK(window->poll_events());
+    GIANT_CHECK(window->fullscreen());
+    GIANT_CHECK(window->pixel_width() > 0 && window->pixel_height() > 0);
+    GIANT_CHECK(window->request_fullscreen(false));
+    GIANT_CHECK(window->poll_events());
+    GIANT_CHECK(!window->fullscreen());
+    GIANT_CHECK(window->pixel_width() > 0 && window->pixel_height() > 0);
+    // Made so from the start.
+    desc.fullscreen = true;
+    window.reset();
+    window = Window::create(desc);
+    GIANT_CHECK(window != nullptr && window->fullscreen());
+}
+
 GIANT_TEST("platform: windows can be opened and closed repeatedly") {
     for (int i = 0; i < 3; ++i) {
         WindowDesc desc;

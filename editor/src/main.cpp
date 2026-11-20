@@ -6,6 +6,7 @@
 //                [--debug-layer] [--require-validation] [--no-vsync] [--mcp]
 //                [--scripts path/to/Scripts.dll] [--allow-mods-scripts-by-command]
 //                [--allow-scripts-by-command] [--chat-asks]
+//                [--game path/to/world [--player-settings file]]
 //
 // --require-validation fails the run if the GPU validation layer is not
 // actually running (CI uses it so "no validation errors" means something).
@@ -84,8 +85,10 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 #include <vector>
 
@@ -121,6 +124,7 @@ struct Options {
     bool allow_mods_scripts_by_command = false; // automated runs: enable_mod allows a mod's scripts without asking the person
     bool allow_scripts_by_command = false;      // automated runs: load_scripts loads a file without asking the person
     bool chat_asks = false;                     // Claude's changes from the chat wait for the person even with --hidden
+    std::string player_settings; // a game: the file its settings are kept in (empty: in the person's settings folder)
     std::string game; // a world folder to run as a game (its menus lead, no editor panels); empty: the editor
 };
 
@@ -190,6 +194,12 @@ bool parse_options(const std::vector<std::string>& argv, Options& out) {
             out.chat_asks = true;
         } else if (arg == "--scripts" && i + 1 < argc) {
             out.scripts = argv[++i];
+        } else if (arg == "--player-settings" && i + 1 < argc) {
+            out.player_settings = argv[++i];
+            if (out.player_settings.empty()) {
+                log_error("editor", "--player-settings needs a file");
+                return false;
+            }
         } else if (arg == "--game" && i + 1 < argc) {
             out.game = argv[++i];
             if (out.game.empty()) {
@@ -200,6 +210,10 @@ bool parse_options(const std::vector<std::string>& argv, Options& out) {
             log_error("editor", "unknown option: " + std::string(arg));
             return false;
         }
+    }
+    if (!out.player_settings.empty() && out.game.empty()) {
+        log_error("editor", "--player-settings is a game's (--game): the editor keeps no settings");
+        return false;
     }
     return true;
 }
@@ -402,6 +416,43 @@ int run(const Options& options) {
     platform::WindowDesc window_desc;
     window_desc.title = options.game.empty() ? "Giant Editor" : "Giant";
     window_desc.hidden = options.hidden;
+    // A game: the person's settings as it last kept them, read before the window is made (its mode and
+    // size, vsync) and handed to the menus once they are there.
+    editor::GameMenus::Settings kept;
+    std::string kept_in;
+    if (!options.game.empty()) {
+        try {
+            const std::filesystem::path folder = settings_folder();
+            kept_in = !options.player_settings.empty() ? options.player_settings
+                      : folder.empty()                  ? std::string()
+                                                        : path_to_utf8(folder / "game_settings.json");
+        } catch (const std::exception&) {
+            // (A folder whose name is not text: the settings last while the program runs.)
+        }
+        if (!kept_in.empty()) {
+            const std::optional<std::string> text = read_text_file(path_from_utf8(kept_in), 65536);
+            std::error_code there;
+            if (!text && std::filesystem::exists(path_from_utf8(kept_in), there))
+                log_warning("game", "the settings in " + kept_in + " could not be read (or are over 64 KB): the defaults stand");
+            if (text) {
+                std::vector<std::string> problems;
+                kept = editor::settings_from_text(*text, problems);
+                for (const std::string& problem : problems) log_warning("game", "the settings in " + kept_in + ": " + problem);
+                if (!problems.empty()) {
+                    // What a person wrote by hand is not lost to the next write: it is set aside.
+                    std::error_code ec;
+                    std::filesystem::copy_file(path_from_utf8(kept_in), path_from_utf8(kept_in + ".bad"),
+                                               std::filesystem::copy_options::overwrite_existing, ec);
+                    log_warning("game", ec ? "they could not be set aside as " + kept_in + ".bad" : "they are set aside as " + kept_in + ".bad");
+                }
+            }
+        }
+        window_desc.fullscreen = kept.fullscreen;
+        if (kept.window_width != 0) {
+            window_desc.width = kept.window_width;
+            window_desc.height = kept.window_height;
+        }
+    }
     auto window = platform::Window::create(window_desc);
     if (window == nullptr) {
         return 1;
@@ -424,7 +475,7 @@ int run(const Options& options) {
     sc_desc.native_window = window->native().hwnd;
     sc_desc.width = window->pixel_width();
     sc_desc.height = window->pixel_height();
-    sc_desc.vsync = options.vsync;
+    sc_desc.vsync = options.vsync && kept.vsync; // (--no-vsync is the run's; the setting the person's)
     auto swap_chain = device->create_swap_chain(sc_desc);
     if (swap_chain == nullptr) {
         return 1;
@@ -437,6 +488,7 @@ int run(const Options& options) {
 
     editor::MeshLibrary meshes(renderer.get()); // after the renderer: released first
     editor::EditorState state;
+    state.vsync_now = sc_desc.vsync;
     state.meshes = &meshes;
     // Cooked material textures are kept beside the working folder's assets
     // between sessions (cooking a 4K map takes seconds; reading it back, not).
@@ -549,6 +601,10 @@ int run(const Options& options) {
     state.game_ui = &game_ui;
     editor::GameMenus menus(state); // the pause, saves and settings menus, on the game UI
     state.menus = &menus;
+    if (!options.game.empty()) {
+        menus.set_settings(kept);
+        menus.keep_in(kept_in);
+    }
     play.escape_stops = false; // Esc in play opens the pause menu (its Quit stops play)
     std::vector<rhi::UiDrawList> ui_lists; // the game's UI, then the panels
     // Before the scripts: their OnStop may run commands (a raycast reads it).
@@ -840,7 +896,7 @@ int run(const Options& options) {
 
     // The null backend has no display to wait for, so pace it like vsync
     // instead of spinning a CPU core.
-    const bool pace_null = device->backend() == rhi::Backend::null && options.vsync;
+    const bool pace_null = device->backend() == rhi::Backend::null && sc_desc.vsync;
 
     auto report_start = clock::now();
     u64 report_frames = 0;
@@ -1022,6 +1078,9 @@ int run(const Options& options) {
         game_ui.update(state, delta, static_cast<float>(window->pixel_width()),
                        static_cast<float>(window->pixel_height())); // (counted with the panels)
         mark(editor::FramePhase::ui);
+        // (Only a plain window's size is the one to open with next time.)
+        if (state.game_mode && !menus.settings().fullscreen && !window->fullscreen() && !window->maximized())
+            menus.note_window(window->point_width(), window->point_height());
         if (window->take_resized()) {
             swap_chain->resize(window->pixel_width(), window->pixel_height());
         }
@@ -1077,6 +1136,7 @@ int run(const Options& options) {
         mark(editor::FramePhase::tail);
     }
 
+    menus.store(); // (a game: its settings as they are now, the window's size with them)
     device->wait_idle();
     log_info("editor", "rendered " + std::to_string(device->frames_completed()) + " frames");
     const u32 validation_errors = device->validation_errors();

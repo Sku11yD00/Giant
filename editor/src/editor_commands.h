@@ -325,6 +325,7 @@ struct EditorState {
     // The program runs as a game (--game <world>): the game's menus lead (game_menus.h), its UI
     // always shows, and no editor panel is drawn. Set by main (and tests).
     bool game_mode = false;
+    bool vsync_now = true; // as the program started: its frames wait for the display
     // Renders the editor as it looks now (viewport and panels) and returns
     // RGBA8 pixels at the window's pixel size; empty on failure. Set by main.
     std::function<std::vector<u8>()> render_screenshot;
