@@ -8,6 +8,7 @@
 #include "gpu_layout.h"
 #include "voxel_scene.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -1095,7 +1096,10 @@ GIANT_TEST("voxel scene: a lake of thousands of slivers is built a few at a time
         GIANT_CHECK(b.voxels->init());
         std::vector<WaterLook> looks(2);
         int frames = 0;
-        bool spread = false; // a frame that built nothing while bricks waited: work spread over frames
+        // Work spread over frames: no frame builds all of it. (Not "some frame built nothing while
+        // bricks waited": the workers of a fast machine finish some every frame.)
+        u32 built = 0;
+        u32 most = 0;
         for (; frames < 20000; ++frames) {
             std::vector<WaterVertex> all = v;
             std::vector<u32> all_idx = idx;
@@ -1104,12 +1108,14 @@ GIANT_TEST("voxel scene: a lake of thousands of slivers is built a few at a time
             }
             b.voxels->set_water(all, all_idx, looks);
             b.step(0.05f); // a sliver of a millisecond: a few looks at the clock each frame
-            spread = spread || (frames > 2 && b.voxels->stats().built == 0 && b.voxels->stats().pending > 0);
+            built += b.voxels->stats().built;
+            most = std::max(most, b.voxels->stats().built);
             if (b.voxels->stats().pending == 0 && frames > 0) {
                 break;
             }
         }
-        GIANT_CHECK(spread && frames < 20000);
+        GIANT_CHECK(frames < 20000);
+        GIANT_CHECK(built > 8 && most * 2 <= built);
         u32 packed = 0;
         GIANT_CHECK(b.voxel_at({0.1, 0.6, 0.1}, packed) && voxel::water_voxel(packed));
         GIANT_CHECK(b.voxel_at({-4.0, 0.6, 3.0}, packed) && voxel::water_voxel(packed));
