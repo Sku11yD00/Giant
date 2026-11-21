@@ -5906,9 +5906,13 @@ Done in N2 part 2:
   or removed mesh counts as a change to the instances using it. Changes
   wait gathered by 64 m square (a box wider than two squares waits on its
   own): each square becomes one job per level over its boxes' bricks (the
-  old boxes' built bricks, every brick under the changed instances), so
-  thousands of scatter placements arriving are a few hundred jobs, not a
-  rebuild. More than 256 changes in a frame (or an eighth of the
+  old boxes' built bricks, every brick under the changed instances; at a
+  level whose bricks are 128 m or wider, where the box around the whole
+  region is 8 bricks or fewer, each of those once, not once per instance), so thousands of scatter placements arriving are a
+  few hundred jobs, not a rebuild. When the renderer's meshes change
+  (streaming adds some most frames), only meshes it had found missing are
+  looked up again: a removed one is reported by `forget_mesh`, and a mesh
+  never changes once added. More than 256 changes in a frame (or an eighth of the
   instances), over 4,096 squares waiting, or any other removal rebuild
   every window, one rebuild at a time (another waits for it rather than
   restarting it, so constant changes still settle); `voxels.rebuilds`
@@ -5921,7 +5925,11 @@ Done in N2 part 2:
   built already whose contents changed, oldest first whatever their level
   (else a 2 km brick that scatter streaming in keeps changing goes back
   before everything nearer, again and again). Bricks are built on worker
-  threads (a quarter of the cores, two to four), up to 16 at once: the
+  threads (a quarter of the cores, two to four), up to 32 at once (a
+  brick with nothing over it is emptied on the spot with no build; one
+  over at most 16 instances and water triangles is built on the main
+  thread as it is gathered while such builds average under 0.05 ms, else
+  it goes to the workers too, as in a debug build): the
   main thread copies what is over a brick (its instances' places, colours,
   meshes and LOD cuts, held so a mesh removed meanwhile stays until the
   build is done; its water's triangles), a few hundred instances between

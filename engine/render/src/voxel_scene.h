@@ -67,6 +67,12 @@ struct VoxelStats {
     bool overflow = false; // missing > 0: the pool is full
     float cpu_ms = 0.0f;   // voxel work this frame
     u32 rebuilds = 0;      // whole windows rebuilt (too many changes at once, a new stand-in radius), ever
+    // What `pending` is made of: bricks waiting to be built, being built, and changes (jobs,
+    // regions, changed instances) not yet turned into bricks; and bricks marked this frame.
+    u32 waiting = 0;
+    u32 building = 0;
+    u32 changes = 0;
+    u32 marked = 0;
 };
 
 // What the voxel world holds at a point, on one level.
@@ -84,9 +90,11 @@ float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale);
 
 class VoxelScene {
 public:
-    // A mesh by id, or null when it does not exist (any more). A mesh never
-    // changes once added (an id freed may come back as another mesh: the
-    // meshes' version changes then). Shared: a brick being built holds it.
+    // A mesh by id, or null when it does not exist (yet). A mesh never changes
+    // once added. Removing one (and so before its id is used again) must be
+    // told with forget_mesh: a mesh cached is kept until then. When meshes
+    // are added the version passed to update changes, and only ids found
+    // missing are looked up again. Shared: a brick being built holds it.
     using MeshLookup = std::function<std::shared_ptr<const geometry::ClusterMesh>(MeshId)>;
 
     VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u32 brick_capacity);
@@ -262,6 +270,7 @@ private:
         std::vector<u32> found; // (gathering) the instances over it, and the next to copy
         u32 next = 0;
         u32 count = 0;          // items, once gathered (items itself is the builder's then)
+        u64 queued_at = 0;      // the update it was handed to the workers in
         std::atomic<u32> state{k_gathering};
         bool again = false; // (main thread only) something over it changed meanwhile
 
@@ -275,6 +284,7 @@ private:
         all,     // mark every brick of the box
         region,  // within the box: the bricks in the pool under the region's
                  // old boxes, and every brick under its changed instances
+                 // (at a coarse level with a small box: every brick of it, once)
     };
     // Changes not turned into jobs yet, gathered by region (k_region
     // metres square, so a scatter cell's thousands of placements are a few
@@ -293,8 +303,7 @@ private:
         bool rebuild = false;   // part of a full rebuild
         bool started = false;
         std::vector<u32> found; // find: instances over the box
-        u32 next = 0;
-        u32 count = 0;          // items, once gathered (items itself is the builder's then)           // find: the next of found (found.size(): sweeping)
+        u32 next = 0;           // find: the next of found (found.size(): sweeping)
         u64 cursor = 0;         // bricks done of the current instance, sweep or box
     };
 
@@ -334,8 +343,10 @@ private:
     bool run_job(Job& job, const OutOfTime& out_of_time);
     void job_done(const Job& job);
 
-    // Starts building the next brick waiting (m_gathering); false if none waits.
-    bool start_build();
+    // Starts building the next brick waiting (m_gathering) if there is `room`; false if none waits
+    // or none fits. Those with nothing over them are emptied on the way, room or not, until out of
+    // time (true, with no m_gathering).
+    bool start_build(const std::function<bool()>& out_of_time, bool room);
     // Copies what is over m_gathering, until done (then a worker builds it: true) or out of time.
     bool gather(const MeshLookup& meshes, const std::function<bool()>& out_of_time);
     // Copies a built brick to the pool (and marks it again if something over it changed
@@ -457,12 +468,19 @@ private:
     u64 m_meshes_version = ~u64{0};
     std::unordered_map<MeshId, MeshCache> m_meshes;
     std::vector<MeshId> m_forgotten; // by forget_mesh, for the next see_changes
+    // Cached as missing: looked up again when the meshes change (the rest stay as they are until
+    // forget_mesh: a mesh never changes once added, so the cache is not walked every time one is
+    // added, which streaming does every frame).
+    std::unordered_set<MeshId> m_missing;
 
     // Bricks being built, on m_build_jobs' workers (or, with time to spare, the main thread),
     // each from what was over it when it started (so changes meanwhile cannot touch it: they set
     // `again`, and it is built once more after). Copied to the pool as each is done.
     std::deque<std::shared_ptr<Build>> m_builds;
     std::shared_ptr<Build> m_gathering; // the one of them whose instances are being copied
+    u64 m_updates = 0; // update() calls, for how long a build has waited for a worker
+    double m_inline_ms = 0.0;  // what a small build on the main thread has been taking (a running average)
+    u32 m_inline_skipped = 0;  // small builds handed to the workers since the last built here
     bool building(const Key& key) const; // in m_builds
     WaitGroup m_build_group;
     VoxelStats m_stats;

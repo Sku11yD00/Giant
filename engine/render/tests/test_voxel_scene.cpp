@@ -43,6 +43,7 @@ struct Bench {
     std::unique_ptr<rhi::Device> device;
     geometry::ClusterMesh cube = geometry::build_clusters(geometry::make_cube());
     std::shared_ptr<const geometry::ClusterMesh> held; // mesh 1, when set
+    u32 lookups[3] = {}; // of mesh 0, 1, any other
     std::unique_ptr<VoxelScene> voxels; // after cube: its workers' builds may still read it
     std::vector<Instance> instances;
     std::vector<Material> materials;
@@ -64,6 +65,7 @@ struct Bench {
         rhi::CommandList* cmd = device->begin_frame(nullptr);
         voxels->update(*cmd, camera, instances, cells, materials, version,
                        [this](MeshId id) {
+                           ++lookups[id < 2 ? id : 2];
                            return id == 0   ? std::shared_ptr<const geometry::ClusterMesh>(std::shared_ptr<void>(), &cube)
                                   : id == 1 ? held
                                             : nullptr;
@@ -382,6 +384,41 @@ GIANT_TEST("voxel scene: a mesh removed while bricks are built from it is kept u
     GIANT_CHECK(b.voxels->stats().bricks == 0);
 }
 
+GIANT_TEST("voxel scene: a mesh that arrives after its instances fills them in, and only missing ones are looked up again") {
+    Bench b;
+    GIANT_CHECK(b.voxels->init());
+    Instance in;
+    in.mesh = 1; // not there yet
+    in.position = {0.0, 1.1, 0.0};
+    b.instances.push_back(in);
+    b.instances.push_back(Instance{}); // the cube (mesh 0), at the origin
+    b.instances.back().position = {-6.0, 1.1, 0.0};
+    for (int frame = 0; frame < 100 && (frame == 0 || b.voxels->stats().pending > 0); ++frame) {
+        b.step();
+    }
+    GIANT_CHECK(b.voxels->probe(0, {0.5, 1.1, 0.0}) != VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, {-5.5, 1.0, 0.0}) == VoxelProbe::solid);
+    // Many other meshes come meanwhile (the version changes every frame): only the missing one
+    // is looked up again, and nothing is built.
+    const u32 cube_lookups = b.lookups[0];
+    const u32 missing_lookups = b.lookups[1];
+    for (int frame = 0; frame < 10; ++frame) {
+        ++b.version;
+        b.step();
+        GIANT_CHECK(b.voxels->stats().built == 0);
+    }
+    GIANT_CHECK(b.lookups[0] == cube_lookups);
+    GIANT_CHECK(b.lookups[1] == missing_lookups + 10);
+    // It arrives: its instance is built.
+    b.held = std::make_shared<const geometry::ClusterMesh>(geometry::build_clusters(geometry::make_cube()));
+    ++b.version;
+    for (int frame = 0; frame < 100 && (frame == 0 || b.voxels->stats().pending > 0); ++frame) {
+        b.step();
+    }
+    GIANT_CHECK(b.voxels->probe(0, {0.5, 1.0, 0.0}) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, {-5.5, 1.0, 0.0}) == VoxelProbe::solid);
+}
+
 GIANT_TEST("voxel scene: something far smaller than a voxel on a brick's face is in one brick") {
     // A 0.1 m cube is a point at level 1 (0.5 m voxels, 4 m bricks), its middle a hair under
     // the face at y = 0: in the brick under it, though in that brick's frame (a float) it
@@ -497,6 +534,38 @@ GIANT_TEST("voxel scene: many changes at once rebuild everything, and it settles
     const double y = b.instances[0].position.y;
     GIANT_CHECK(b.voxels->probe(0, {-7.0, y + 0.1, -7.0}) == VoxelProbe::solid);
     GIANT_CHECK(b.voxels->probe(0, {-7.0, 1.2, -7.0}) == VoxelProbe::empty);
+}
+
+// A cleared scene leaves every brick it filled to empty: those are emptied
+// as they are reached, with no build each, so even a tight budget drains
+// them in a few frames (and the one brick still filled is rebuilt as usual).
+GIANT_TEST("voxel scene: bricks left with nothing over them are emptied a lot at a time") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    for (int i = 0; i < 400; ++i) {
+        Instance cube;
+        cube.mesh = 0;
+        cube.scale = {0.2f, 0.2f, 0.2f};
+        cube.position = {static_cast<double>(i % 20) * 0.7 - 7.0, 1.1, static_cast<double>(i / 20) * 0.7 - 7.0};
+        b.instances.push_back(cube);
+    }
+    b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    const u32 filled = b.voxels->stats().bricks;
+    GIANT_CHECK(filled > 50);
+    b.instances.resize(1); // the one at (-7, 1.1, -7) stays
+    u32 built = 0;
+    int frames = 0;
+    for (; frames < 50 && (frames == 0 || b.voxels->stats().pending > 0); ++frames) {
+        b.step(0.5f);
+        built += b.voxels->stats().built;
+    }
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(frames <= 10);
+    GIANT_CHECK(built + 2 >= filled); // each emptied counts as built
+    GIANT_CHECK(b.voxels->stats().bricks > 0 && b.voxels->stats().bricks <= 4);
+    GIANT_CHECK(b.voxels->probe(0, {-7.0, 1.2, -7.0}) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, {-6.3, 1.2, -7.0}) == VoxelProbe::empty);
 }
 
 // Scatter arrives a cell at a time: thousands of placements over a few

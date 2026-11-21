@@ -4951,6 +4951,10 @@ void Renderer::copy_streaming_stats() {
     m_stats.voxel_overflow = v.overflow;
     m_stats.voxel_cpu_ms = v.cpu_ms;
     m_stats.voxel_rebuilds = v.rebuilds;
+    m_stats.voxel_waiting = v.waiting;
+    m_stats.voxel_building = v.building;
+    m_stats.voxel_changes = v.changes;
+    m_stats.voxel_marked = v.marked;
     m_stats.far_field = m_far_field;
     m_stats.far_culled = m_far_culled;
     const ShadowStats& sh = m_shadows->stats();
