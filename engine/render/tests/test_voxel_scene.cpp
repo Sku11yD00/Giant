@@ -536,6 +536,38 @@ GIANT_TEST("voxel scene: many changes at once rebuild everything, and it settles
     GIANT_CHECK(b.voxels->probe(0, {-7.0, 1.2, -7.0}) == VoxelProbe::empty);
 }
 
+// A cleared scene leaves every brick it filled to empty: those are emptied
+// as they are reached, with no build each, so even a tight budget drains
+// them in a few frames (and the one brick still filled is rebuilt as usual).
+GIANT_TEST("voxel scene: bricks left with nothing over them are emptied a lot at a time") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    for (int i = 0; i < 400; ++i) {
+        Instance cube;
+        cube.mesh = 0;
+        cube.scale = {0.2f, 0.2f, 0.2f};
+        cube.position = {static_cast<double>(i % 20) * 0.7 - 7.0, 1.1, static_cast<double>(i / 20) * 0.7 - 7.0};
+        b.instances.push_back(cube);
+    }
+    b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    const u32 filled = b.voxels->stats().bricks;
+    GIANT_CHECK(filled > 50);
+    b.instances.resize(1); // the one at (-7, 1.1, -7) stays
+    u32 built = 0;
+    int frames = 0;
+    for (; frames < 50 && (frames == 0 || b.voxels->stats().pending > 0); ++frames) {
+        b.step(0.5f);
+        built += b.voxels->stats().built;
+    }
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(frames <= 10);
+    GIANT_CHECK(built + 2 >= filled); // each emptied counts as built
+    GIANT_CHECK(b.voxels->stats().bricks > 0 && b.voxels->stats().bricks <= 4);
+    GIANT_CHECK(b.voxels->probe(0, {-7.0, 1.2, -7.0}) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, {-6.3, 1.2, -7.0}) == VoxelProbe::empty);
+}
+
 // Scatter arrives a cell at a time: thousands of placements over a few
 // frames, each frame under the bulk limit. They wait gathered by region, so
 // the backlog never overflows into rebuilding every window.

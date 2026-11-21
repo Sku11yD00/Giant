@@ -343,8 +343,10 @@ private:
     bool run_job(Job& job, const OutOfTime& out_of_time);
     void job_done(const Job& job);
 
-    // Starts building the next brick waiting (m_gathering); false if none waits.
-    bool start_build();
+    // Starts building the next brick waiting (m_gathering) if there is `room`; false if none waits
+    // or none fits. Those with nothing over them are emptied on the way, room or not, until out of
+    // time (true, with no m_gathering).
+    bool start_build(const std::function<bool()>& out_of_time, bool room);
     // Copies what is over m_gathering, until done (then a worker builds it: true) or out of time.
     bool gather(const MeshLookup& meshes, const std::function<bool()>& out_of_time);
     // Copies a built brick to the pool (and marks it again if something over it changed

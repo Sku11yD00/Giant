@@ -1472,8 +1472,9 @@ bool VoxelScene::building(const Key& key) const {
     return false;
 }
 
-bool VoxelScene::start_build() {
+bool VoxelScene::start_build(const std::function<bool()>& out_of_time, bool room) {
     // Every level's never built, coarsest first; then those to build again, oldest first.
+    u32 emptied = 0;
     for (u32 n = m_clipmap.levels() + 1; n-- > 0;) {
         std::deque<Key>& order = n > 0 ? m_order[n - 1] : m_again;
         while (!order.empty()) {
@@ -1492,16 +1493,36 @@ bool VoxelScene::start_build() {
             if (under_way) {
                 continue;
             }
+            const DVec3 origin = m_clipmap.brick_min(key.level, key.brick);
+            const double size = m_clipmap.brick_size(key.level);
+            const Box box{origin, origin + DVec3{size, size, size}};
+            find(box);
+            if (m_found.empty() && !water_over(box)) {
+                // Nothing over it (most of the window, and all that a removal left): emptied here,
+                // with no build to hand over or copy back.
+                remove(key.level, m_clipmap.slot(key.level, key.brick), key.brick);
+                m_retry.erase(key);
+                ++m_stats.built;
+                if (++emptied % 16 == 0 && out_of_time()) {
+                    return true;
+                }
+                continue;
+            }
+            if (!room) {
+                // The workers are full: it waits at the front, as it was.
+                m_pending.insert(key);
+                order.push_front(key);
+                return emptied > 0;
+            }
             auto job = std::make_shared<Build>();
             Build& b = *job;
             b.level = key.level;
             b.brick = key.brick;
-            b.origin = m_clipmap.brick_min(key.level, key.brick);
-            b.brick_size = m_clipmap.brick_size(key.level);
+            b.origin = origin;
+            b.brick_size = size;
             b.voxel_size = static_cast<float>(m_clipmap.voxel_size(key.level));
             b.seed = static_cast<u32>(KeyHash{}(key));
-            const DVec3 far_corner = b.origin + DVec3{b.brick_size, b.brick_size, b.brick_size};
-            find({b.origin, far_corner});
+            const DVec3 far_corner = box.max;
             b.found = m_found;
             b.items.reserve(m_found.size());
             // Water's surfaces over it: each triangle once (the bodies as they are now; a change
@@ -1535,7 +1556,7 @@ bool VoxelScene::start_build() {
             return true;
         }
     }
-    return false;
+    return emptied > 0;
 }
 
 bool VoxelScene::gather(const MeshLookup& meshes, const std::function<bool()>& out_of_time) {
@@ -1942,8 +1963,11 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         if (m_gathering != nullptr) {
             gather(meshes, out_of_time);
             stepped = true;
-        } else if (m_builds.size() < k_most_builds && start_build()) {
-            gather(meshes, out_of_time); // (most bricks are over a few instances: done at once)
+        } else if (start_build(out_of_time, m_builds.size() < k_most_builds)) {
+            // (with the workers full, only those with nothing over them, emptied here)
+            if (m_gathering != nullptr) {
+                gather(meshes, out_of_time); // (most bricks are over a few instances: done at once)
+            }
             stepped = true;
         } else if (help && !m_builds.empty()) {
             // None more to start: build one here (the smallest waiting, and only in the first
