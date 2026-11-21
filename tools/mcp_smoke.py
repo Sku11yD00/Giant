@@ -926,9 +926,11 @@ def gi_gate(tool, call, check):
                            "base_color": [0.9, 0.05, 0.05], "roughness": 0.9})
     tool("set_lighting", {"sun_elevation_degrees": 37, "sun_azimuth_degrees": 270})
     tool("set_camera", {"position": [-2, 8, 6], "look_at": [1, 0, 0]})
+    # (The voxel world gets a loading screen's time a frame while this gate waits on it: a debug
+    # build fits only a few bricks in the usual millisecond, and frames here take seconds.)
     tool("set_render_settings", {"gi": True, "gi_bricks_per_frame": 64, "screen_space_reflections": True,
                                  "ambient_occlusion": True, "contact_shadows": True,
-                                 "subsurface_scattering": True})
+                                 "subsurface_scattering": True, "voxel_ms_per_frame": 50})
 
     def settle():
         last = None
@@ -996,6 +998,7 @@ def gi_gate(tool, call, check):
                                  "subsurface_scattering": False})
     last = settle()
     check(not last["gi"]["on"], f"global illumination turns off, got {last['gi']}")
+    tool("set_render_settings", {"voxel_ms_per_frame": 1})
     tool("new_scene")
 
 

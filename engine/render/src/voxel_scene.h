@@ -479,6 +479,8 @@ private:
     std::deque<std::shared_ptr<Build>> m_builds;
     std::shared_ptr<Build> m_gathering; // the one of them whose instances are being copied
     u64 m_updates = 0; // update() calls, for how long a build has waited for a worker
+    double m_inline_ms = 0.0;  // what a small build on the main thread has been taking (a running average)
+    u32 m_inline_skipped = 0;  // small builds handed to the workers since the last built here
     bool building(const Key& key) const; // in m_builds
     WaitGroup m_build_group;
     VoxelStats m_stats;

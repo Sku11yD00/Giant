@@ -35,10 +35,15 @@ constexpr double k_region = 64.0;
 // Marks (cheap set inserts) between looks at the clock.
 constexpr u64 k_marks_per_check = 256;
 // Bricks being built at once (on the workers or waiting for one): enough to keep them busy.
-constexpr usize k_most_builds = 16;
+constexpr usize k_most_builds = 32;
 // A brick over at most this many instances and water triangles is built on the main thread as it is gathered (as the
 // rest were, between looks at the clock): most are, and a frame finishes them without waiting.
 constexpr u32 k_inline_items = 16;
+// ...while such builds are cheap: averaging over this (a debug build, a starved machine), they
+// go to the workers like the rest, which have the whole frame, bar one in this many to keep
+// the average current.
+constexpr double k_inline_ms = 0.05;
+constexpr u32 k_inline_probe = 64;
 // A build no worker has taken after this many frames is built on the main thread (one a frame):
 // the workers may get no core (a software GPU on every core, say), and it would wait for ever.
 constexpr u64 k_most_waiting_updates = 30;
@@ -1627,10 +1632,15 @@ bool VoxelScene::gather(const MeshLookup& meshes, const std::function<bool()>& o
     b.found.shrink_to_fit();
     b.count = static_cast<u32>(b.items.size());
     b.state.store(Build::k_queued, std::memory_order_release);
-    if (b.items.size() + b.water.size() <= k_inline_items) {
+    const bool small = b.items.size() + b.water.size() <= k_inline_items;
+    if (small && (m_inline_ms <= k_inline_ms || ++m_inline_skipped >= k_inline_probe)) {
         // A few instances (most bricks): built here at once, as cheap as handing it over, and
         // not left waiting on workers that may have no core to run on.
+        m_inline_skipped = 0;
+        const auto before = std::chrono::steady_clock::now();
         b.run();
+        const double took = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - before).count();
+        m_inline_ms += (took - m_inline_ms) * 0.125;
     } else {
         b.queued_at = m_updates;
         m_build_jobs.submit(m_build_group, [job = m_gathering] { job->run(); });
