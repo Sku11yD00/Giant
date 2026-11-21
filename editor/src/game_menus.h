@@ -36,6 +36,7 @@
 #pragma once
 
 #include "giant/core/jobs.h"
+#include "giant/core/math.h"
 #include "giant/core/types.h"
 #include "giant/platform/input.h"
 
@@ -190,6 +191,12 @@ private:
     u64 m_arriving_done = 0;
     u32 m_arriving_quiet = 0;
     u64 m_arriving_streamed = 0; // WorldStreaming::updates when last looked at
+    // The view the loading screen found, kept while it holds the view where the player's eyes will
+    // be (m_arriving_eye, as last set): play starts from the view found, and it is put back if
+    // the screen goes without play.
+    std::optional<DVec3> m_arriving_view;
+    DVec3 m_arriving_eye;
+    void restore_view();
     double m_arriving_seconds = 0.0, m_arriving_bodies = 0.0, m_arriving_gpu = 0.0;
     std::chrono::steady_clock::time_point m_arriving_frame;
     void show_loading();  // the screen stands from now

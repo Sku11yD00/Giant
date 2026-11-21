@@ -29,18 +29,24 @@ bool PlayState::placing_waits(const world::Scene& scene, const DVec3& eye) const
            m_physics.forest().waiting(); // trunks made later could stand inside the player
 }
 
+DVec3 PlayState::place_eye(const world::Scene& scene, DVec3 eye) const {
+    // A view under the ground with nothing under it to stand on (one never set for this world, as a
+    // game's first is): stood on the ground over it, not left to fall. (A cellar's floor under it is stood on.)
+    const auto ground = scene.terrain.height_at(eye.x, eye.z);
+    if (ground && eye.y < *ground && !m_physics.world().raycast(eye, {0.0f, -1.0f, 0.0f}, 1000.0))
+        eye.y = *ground + static_cast<double>(m_settings.eye_height);
+    return eye;
+}
+
+DVec3 PlayState::eye_at_start(const world::Scene& scene, const DVec3& view) const {
+    return spawn_at(place_eye(scene, view)) + DVec3(0.0, static_cast<double>(m_settings.eye_height), 0.0);
+}
+
 bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_generation, const PlayerStart* at) {
     if (playing()) return true;
     m_physics.catch_up(scene); // a frame's share: never a stall
     sim::CharacterDesc desc = m_settings.body;
-    m_place_eye = at != nullptr ? at->feet + DVec3(0.0, static_cast<double>(m_settings.eye_height), 0.0) : camera.position;
-    // A view under the ground with nothing under it to stand on (one never set for this world, as a
-    // game's first is): stood on the ground over it, not left to fall. (A cellar's floor under it is stood on.)
-    if (at == nullptr) {
-        const auto ground = scene.terrain.height_at(m_place_eye.x, m_place_eye.z);
-        if (ground && m_place_eye.y < *ground && !m_physics.world().raycast(m_place_eye, {0.0f, -1.0f, 0.0f}, 1000.0))
-            m_place_eye.y = *ground + static_cast<double>(m_settings.eye_height);
-    }
+    m_place_eye = at != nullptr ? at->feet + DVec3(0.0, static_cast<double>(m_settings.eye_height), 0.0) : place_eye(scene, camera.position);
     desc.position = at != nullptr ? at->feet : spawn_at(m_place_eye);
     m_player = m_physics.world().add_character(desc);
     if (m_player == sim::k_no_character) return false;

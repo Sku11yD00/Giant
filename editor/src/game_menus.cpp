@@ -28,6 +28,11 @@
 namespace giant::editor {
 
 namespace {
+bool same_place(const DVec3& a, const DVec3& b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
+} // namespace
+
+
+namespace {
 
 using Json = ai::Json;
 
@@ -553,7 +558,13 @@ void GameMenus::lead(std::string notice) {
     show_values();
 }
 
+void GameMenus::restore_view() {
+    if (m_arriving_view && same_place(m_state.camera.position, m_arriving_eye)) m_state.camera.position = *m_arriving_view;
+    m_arriving_view.reset();
+}
+
 void GameMenus::show_loading() {
+    restore_view();
     const u32 shown = m_arriving.shown + 1;
     m_arriving = Loading{};
     m_arriving.on = true;
@@ -634,6 +645,19 @@ void GameMenus::arrive() {
         m_arriving_bodies += frame;
         bodies = m_arriving_bodies <= PlayState::k_most_placing_seconds;
     }
+    // The view goes to where the player's eyes will be (a new game's is wherever the world's view was
+    // left, play's a body's height over the ground under it): what the GPU still has to make round
+    // the view (the voxel world's window, the shadows) is then made for play's first frame, not
+    // for a view play never has.
+    // (Always from the view the screen found, kept: what is under it may still be coming in, a roof
+    // after its ground, and play is started from that view itself. A view something else set
+    // meanwhile, a game read in, is the one found from there on.)
+    if (m_arriving_view && !same_place(m_state.camera.position, m_arriving_eye)) m_arriving_view.reset();
+    if (!playing && m_state.play != nullptr && counted == 0 && !m_arriving.bodies) {
+        if (!m_arriving_view) m_arriving_view = m_state.camera.position;
+        m_arriving_eye = m_state.play->eye_at_start(m_state.scene, *m_arriving_view);
+        m_state.camera.position = m_arriving_eye;
+    }
     // The GPU's own, the same: once the rest is in, for no longer than k_most_gpu_seconds, of the clock:
     // on a slow device (a software one: seconds a frame) what is behind is not worth waiting for
     // frame by frame, and a window put away does nothing for it either.
@@ -686,8 +710,12 @@ void GameMenus::arrive() {
                              gpu_left() + ")");
     m_arriving.on = false;
     // (A loaded game that was saved in play is playing already, held still behind the screen: it goes on.)
-    if (playing) close();
-    else start_play();
+    if (playing) {
+        close();
+    } else {
+        restore_view(); // (play starts from the view found, and returns to it)
+        start_play();
+    }
 }
 
 std::string GameMenus::gpu_left() const {
@@ -818,8 +846,13 @@ bool GameMenus::update(const std::vector<platform::InputEvent>& events, float pi
     }
     // A game about to be played: the world round the player comes in behind the loading screen.
     if (m_arriving.on) {
-        if (m_menu != Menu::loading) m_arriving.on = false; // (another menu opened, or play begun or ended, by a command)
-        else arrive();
+        if (m_menu != Menu::loading) {
+            m_arriving.on = false; // (another menu opened, or play begun or ended, by a command)
+            if (!(play != nullptr && play->playing())) restore_view();
+            m_arriving_view.reset();
+        } else {
+            arrive();
+        }
     }
     // A game, outside play (and not while a game is being loaded): the main menu stands.
     if (m_state.game_mode && !(play != nullptr && play->playing()) && m_menu == Menu::none && can_show && !busy) open(Menu::main);
