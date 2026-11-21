@@ -125,6 +125,10 @@ public:
     // What a player put down at `eye` would wait for is still being made: entities' bodies, the
     // ground under it, the trunks round it (a loading screen waits for the same, before play).
     bool world_waits(const world::Scene& scene, const DVec3& eye) const { return placing_waits(scene, eye); }
+    // Where the player's eyes would be if play started now from the view `view` (stood on what is
+    // under it, as start() does): what a loading screen brings the world in round, so that play's
+    // first frame looks from where the world was made ready (as far as the bodies made so far say).
+    DVec3 eye_at_start(const world::Scene& scene, const DVec3& view) const;
     // The longest a player is held waiting for them (some never come).
     static constexpr double k_most_placing_seconds = 5.0;
 
@@ -132,6 +136,7 @@ private:
     void apply_input();
     // On what is under `eye` (within a kilometre), else hanging from it.
     DVec3 spawn_at(const DVec3& eye) const;
+    DVec3 place_eye(const world::Scene& scene, DVec3 eye) const;
     // Starting waits for this: entities to make, or the ground under `eye`.
     bool placing_waits(const world::Scene& scene, const DVec3& eye) const;
     // Put down where it is to start: on what is under the eyes, or as a game save had it.

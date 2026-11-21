@@ -604,6 +604,7 @@ GIANT_TEST("game menus: the loading screen stands while the world round the play
         stage.state.scene_stats.voxel_pending = 7;
         GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
         stage.frame();
+        const DVec3 found = stage.state.camera.position; // the view the screen found
         streamed_in();
         for (u32 i = 0; i < GameMenus::k_quiet_frames * 4; ++i) {
             stream();
@@ -615,6 +616,11 @@ GIANT_TEST("game menus: the loading screen stands while the world round the play
         GIANT_CHECK(told["loading"]["voxels"] == 7 && told["loading"]["light"] == 0 && told["loading"]["shadows"] == 0 &&
                     told["loading"]["geometry"] == 0);
         GIANT_CHECK(told["loading"]["scatter"] == 0 && told["loading"]["far_ground"] == 0 && told["loading"]["poses"] == 0);
+        // What the GPU makes round the view is made round where the player's eyes will be: the view
+        // is there already while the screen stands, and play's first frame looks from the same place
+        // (else the voxel world's window moves as play begins, and a slab of it is to build again).
+        const DVec3 made_for = stage.state.camera.position;
+        GIANT_CHECK(length(made_for - found) > 0.1 && length(made_for - play.eye_at_start(stage.state.scene, found)) < 1e-6);
         // (With the voxel world turned off, what it last said is not waited for.)
         stage.state.render_settings.voxel_world = false;
         for (u32 i = 0; i < GameMenus::k_quiet_frames * 2 && !play.playing(); ++i) {
@@ -623,6 +629,12 @@ GIANT_TEST("game menus: the loading screen stands while the world round the play
         }
         stage.frame();
         GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none && menus.loading().progress == 1.0f);
+        GIANT_CHECK(length(stage.state.camera.position - made_for) < 0.05);
+        // (Play was started from the view found: stopped, the view is back there.)
+        GIANT_CHECK(stage.run("play", {{"on", false}}).ok);
+        GIANT_CHECK(length(stage.state.camera.position - found) < 1e-6);
+        GIANT_CHECK(stage.run("play", {{"on", true}}).ok);
+        stage.frame();
         GIANT_CHECK(menus.loading().voxels == 0);
         stage.state.render_settings.voxel_world = true;
         stage.state.scene_stats.voxel_pending = 0;

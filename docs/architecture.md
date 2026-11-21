@@ -5754,7 +5754,17 @@ and load, settings), which also route the real mouse and keys to screens.
   the ground's tiles waiting for room), for at most `k_most_gpu_seconds` (5, of the clock rather than of
   frames: on a software device a frame takes seconds; a pool too
   small may never let them all be done; play then begins with a line
-  in the log saying what was left, and the bar still ends full). (`busy` saves count as `game` too: one being written while
+  in the log saying what was left, and the bar still ends full). Before
+  that wait, once the bodies are in, the view is moved to where the
+  player's eyes will be (`PlayState::eye_at_start`: a new game's view is
+  wherever the world's was left, its player stands on the ground under
+  it), so what the GPU makes round the view (the voxel world's window
+  above all) is made for play's first frame: otherwise the window moves
+  as play begins and a slab of bricks at each level is built again
+  (about 1,500 on the valley). The view found is kept: the eyes are
+  worked out from it each frame (a roof may come in after its ground),
+  play starts from it and returns to it, and it is put back if the
+  screen goes without play. (`busy` saves count as `game` too: one being written while
   the screen stands.) So a game starts with ground to stand on
   and with its first cells and textures already in, not arriving over
   the first seconds of play (rule 9). A loaded game that was saved in
