@@ -36,6 +36,12 @@ constexpr double k_region = 64.0;
 constexpr u64 k_marks_per_check = 256;
 // Bricks being built at once (on the workers or waiting for one): enough to keep them busy.
 constexpr usize k_most_builds = 16;
+// A brick over at most this many instances and water triangles is built on the main thread as it is gathered (as the
+// rest were, between looks at the clock): most are, and a frame finishes them without waiting.
+constexpr u32 k_inline_items = 16;
+// A build no worker has taken after this many frames is built on the main thread (one a frame):
+// the workers may get no core (a software GPU on every core, say), and it would wait for ever.
+constexpr u64 k_most_waiting_updates = 30;
 // With at least this budget a frame (behind a loading screen, in tests), the main thread builds
 // bricks too, a whole brick at a time, and waits on the workers' rather than leave time unused.
 constexpr double k_help_ms = 4.0;
@@ -1599,7 +1605,14 @@ bool VoxelScene::gather(const MeshLookup& meshes, const std::function<bool()>& o
     b.found.shrink_to_fit();
     b.count = static_cast<u32>(b.items.size());
     b.state.store(Build::k_queued, std::memory_order_release);
-    m_build_jobs.submit(m_build_group, [job = m_gathering] { job->run(); });
+    if (b.items.size() + b.water.size() <= k_inline_items) {
+        // A few instances (most bricks): built here at once, as cheap as handing it over, and
+        // not left waiting on workers that may have no core to run on.
+        b.run();
+    } else {
+        b.queued_at = m_updates;
+        m_build_jobs.submit(m_build_group, [job = m_gathering] { job->run(); });
+    }
     m_gathering.reset();
     return true;
 }
@@ -1889,6 +1902,8 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     bool pool_writable = false;
     bool progress = false; // at least one step a frame
     const bool help = budget >= k_help_ms;
+    ++m_updates;
+    bool rescued = false; // one build left waiting too long, built here this frame
     const std::function<bool()> out_of_time = [&] { return elapsed() >= budget; };
     for (;;) {
         if (progress && (elapsed() >= budget || m_stats.uploaded >= k_max_uploads)) {
@@ -1926,6 +1941,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
             gather(meshes, out_of_time);
             stepped = true;
         } else if (m_builds.size() < k_most_builds && start_build()) {
+            gather(meshes, out_of_time); // (most bricks are over a few instances: done at once)
             stepped = true;
         } else if (help && !m_builds.empty()) {
             // None more to start: build one here (the smallest waiting, and only in the first
@@ -1943,6 +1959,16 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
                 std::this_thread::yield();
             }
             stepped = true;
+        }
+        if (!stepped && !rescued) {
+            for (const std::shared_ptr<Build>& b : m_builds) {
+                if (b->state.load(std::memory_order_acquire) == Build::k_queued &&
+                    m_updates - b->queued_at > k_most_waiting_updates) {
+                    rescued = true;
+                    stepped = b->run();
+                    break;
+                }
+            }
         }
         if (!stepped) {
             break; // nothing waits, or all under way

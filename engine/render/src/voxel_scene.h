@@ -264,6 +264,7 @@ private:
         std::vector<u32> found; // (gathering) the instances over it, and the next to copy
         u32 next = 0;
         u32 count = 0;          // items, once gathered (items itself is the builder's then)
+        u64 queued_at = 0;      // the update it was handed to the workers in
         std::atomic<u32> state{k_gathering};
         bool again = false; // (main thread only) something over it changed meanwhile
 
@@ -296,8 +297,7 @@ private:
         bool rebuild = false;   // part of a full rebuild
         bool started = false;
         std::vector<u32> found; // find: instances over the box
-        u32 next = 0;
-        u32 count = 0;          // items, once gathered (items itself is the builder's then)           // find: the next of found (found.size(): sweeping)
+        u32 next = 0;           // find: the next of found (found.size(): sweeping)
         u64 cursor = 0;         // bricks done of the current instance, sweep or box
     };
 
@@ -470,6 +470,7 @@ private:
     // `again`, and it is built once more after). Copied to the pool as each is done.
     std::deque<std::shared_ptr<Build>> m_builds;
     std::shared_ptr<Build> m_gathering; // the one of them whose instances are being copied
+    u64 m_updates = 0; // update() calls, for how long a build has waited for a worker
     bool building(const Key& key) const; // in m_builds
     WaitGroup m_build_group;
     VoxelStats m_stats;
