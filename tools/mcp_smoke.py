@@ -938,6 +938,8 @@ def gi_gate(tool, call, check):
             last = tool("get_render_settings")["last_frame"]
             if last["voxels"]["pending"] == 0 and last["gi"]["waiting"] == 0:
                 return last
+        # (Never settled: what was left, for the log.)
+        print(f"mcp_smoke: gi_gate did not settle: voxels {last['voxels']}, gi {last['gi']}", flush=True)
         return last
 
     last = settle()

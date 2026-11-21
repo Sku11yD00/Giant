@@ -925,6 +925,10 @@ struct RenderStats {
     bool voxel_overflow = false;  // voxel_missing > 0: the pool is full
     float voxel_cpu_ms = 0.0f;    // voxel work this frame
     u32 voxel_rebuilds = 0;       // whole windows rebuilt (too many changes at once, a new stand-in radius), ever
+    u32 voxel_waiting = 0;        // of voxel_pending: bricks waiting to be built
+    u32 voxel_building = 0;       // of voxel_pending: bricks being built
+    u32 voxel_changes = 0;        // of voxel_pending: changes not yet turned into bricks
+    u32 voxel_marked = 0;         // bricks marked to be built this frame
     // The far field (this frame, on the CPU).
     bool far_field = false; // on this frame
     u32 far_culled = 0;     // instances left to the voxel world

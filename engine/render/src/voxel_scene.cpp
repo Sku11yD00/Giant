@@ -1142,6 +1142,7 @@ void VoxelScene::enter(const voxel::BrickBox& box) {
 void VoxelScene::mark(u32 level, const voxel::BrickCoord& brick) {
     const Key key{level, brick};
     if (m_clipmap.contains(level, brick) && m_pending.insert(key).second) {
+        ++m_stats.marked;
         const u32 s = level * m_clipmap.slots_per_level() + m_clipmap.slot(level, brick);
         const bool built = m_slot_bricks[s] == brick && m_slots[s] != gpu::k_unbuilt;
         (built ? m_again : m_order[level]).push_back(key);
@@ -1761,6 +1762,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     const auto start = clock::now();
     m_stats.built = 0;
     m_stats.uploaded = 0;
+    m_stats.marked = 0;
     m_placed.clear();
     m_rebuilt.clear();
     if (!m_pool.valid()) {
@@ -2013,6 +2015,9 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     m_stats.bricks = m_used;
     m_stats.pending = static_cast<u32>(m_pending.size() + m_jobs.size() + m_regions.size() + m_changed_count +
                                        (m_rebuild_again ? 1 : 0) + m_builds.size());
+    m_stats.waiting = static_cast<u32>(m_pending.size());
+    m_stats.building = static_cast<u32>(m_builds.size());
+    m_stats.changes = static_cast<u32>(m_jobs.size() + m_regions.size() + m_changed_count + (m_rebuild_again ? 1 : 0));
     m_stats.missing = static_cast<u32>(m_retry.size());
     m_stats.overflow = m_stats.missing > 0;
     m_stats.cpu_ms = static_cast<float>(elapsed());

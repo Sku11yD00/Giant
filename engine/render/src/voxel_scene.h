@@ -67,6 +67,12 @@ struct VoxelStats {
     bool overflow = false; // missing > 0: the pool is full
     float cpu_ms = 0.0f;   // voxel work this frame
     u32 rebuilds = 0;      // whole windows rebuilt (too many changes at once, a new stand-in radius), ever
+    // What `pending` is made of: bricks waiting to be built, being built, and changes (jobs,
+    // regions, changed instances) not yet turned into bricks; and bricks marked this frame.
+    u32 waiting = 0;
+    u32 building = 0;
+    u32 changes = 0;
+    u32 marked = 0;
 };
 
 // What the voxel world holds at a point, on one level.
