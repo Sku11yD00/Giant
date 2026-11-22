@@ -113,10 +113,18 @@ usize VoxelScene::CellHash::operator()(const Cell& c) const {
     return static_cast<usize>(h);
 }
 
-VoxelScene::VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u32 brick_capacity)
+VoxelScene::VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u32 brick_capacity, u32 more_workers)
     : m_device(device), m_clipmap(clipmap), m_capacity(std::clamp(brick_capacity, 1u, gpu::k_unbuilt - 1)),
       // A quarter of the cores, two to four: the other systems' workers want theirs.
-      m_build_jobs(std::clamp(std::thread::hardware_concurrency() / 4, 2u, 4u)) {}
+      m_build_jobs(std::clamp(std::thread::hardware_concurrency() / 4, 2u, 4u)) {
+    // Behind a loading screen nothing else wants them: up to half the cores, eight at most.
+    const u32 base = m_build_jobs.worker_count();
+    const u32 all = std::clamp(std::thread::hardware_concurrency() / 2, 2u, 8u);
+    const u32 more = more_workers == k_auto ? (all > base ? all - base : 0u) : std::min(more_workers, 16u);
+    if (more > 0) {
+        m_more_jobs = std::make_unique<JobSystem>(more);
+    }
+}
 
 VoxelScene::~VoxelScene() {
     cancel_builds(true); // (the workers would otherwise build every queued one as they stop)
@@ -1643,7 +1651,12 @@ bool VoxelScene::gather(const MeshLookup& meshes, const std::function<bool()>& o
         m_inline_ms += (took - m_inline_ms) * 0.125;
     } else {
         b.queued_at = m_updates;
-        m_build_jobs.submit(m_build_group, [job = m_gathering] { job->run(); });
+        const u32 base = m_build_jobs.worker_count();
+        const u32 all = base + (m_helping && m_more_jobs != nullptr ? m_more_jobs->worker_count() : 0u);
+        const bool more = m_submitted++ % all >= base;
+        m_more_handed += more ? 1u : 0u;
+        JobSystem& jobs = more ? *m_more_jobs : m_build_jobs;
+        jobs.submit(m_build_group, [job = m_gathering] { job->run(); });
     }
     m_gathering.reset();
     return true;
@@ -1935,6 +1948,9 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     bool pool_writable = false;
     bool progress = false; // at least one step a frame
     const bool help = budget >= k_help_ms;
+    m_helping = help;
+    // (More under way with more workers to build them: eight a worker.)
+    const usize most_builds = k_most_builds + (help && m_more_jobs != nullptr ? usize{8} * m_more_jobs->worker_count() : 0u);
     ++m_updates;
     bool rescued = false; // one build left waiting too long, built here this frame
     const std::function<bool()> out_of_time = [&] { return elapsed() >= budget; };
@@ -1973,7 +1989,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         if (m_gathering != nullptr) {
             gather(meshes, out_of_time);
             stepped = true;
-        } else if (start_build(out_of_time, m_builds.size() < k_most_builds)) {
+        } else if (start_build(out_of_time, m_builds.size() < most_builds)) {
             // (with the workers full, only those with nothing over them, emptied here)
             if (m_gathering != nullptr) {
                 gather(meshes, out_of_time); // (most bricks are over a few instances: done at once)

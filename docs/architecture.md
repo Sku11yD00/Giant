@@ -5752,9 +5752,17 @@ and load, settings), which also route the real mouse and keys to screens.
   not the backlog of what moves on them, which may never end) and
   `geometry` (cluster groups asked for and not loaded, `waiting`, and
   the ground's tiles waiting for room), for at most `k_most_gpu_seconds` (5, of the clock rather than of
-  frames: on a software device a frame takes seconds; a pool too
-  small may never let them all be done; play then begins with a line
-  in the log saying what was left, and the bar still ends full). Before
+  frames) with none of the voxel world built or lit meanwhile (a pool
+  too small may never let it all be done) and `k_most_gpu_seconds_in_all` (30) in all (on a
+  software device a frame takes seconds); play then begins with a line
+  in the log saying what was left, and the bar still ends full. While
+  the screen stands nothing is played, so the frame's shares are a
+  loading screen's (main.cpp): plants are placed 32 cells at once and
+  65,536 instances swapped in a frame (4 and 4,096 in play), the
+  ground's tiles meshed and put up 64 a frame (8), cells read 64 at
+  once and put in the scene 65,536 entities a frame, and the voxel
+  world has 12 ms a frame and more workers (up to half the cores, eight
+  at most, beside the two to four of play). Before
   that wait, once the bodies are in, the view is moved to where the
   player's eyes will be (`PlayState::eye_at_start`: a new game's view is
   wherever the world's was left, its player stands on the ground under

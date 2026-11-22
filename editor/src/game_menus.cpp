@@ -572,7 +572,7 @@ void GameMenus::show_loading() {
     m_arriving_before = 0;
     m_arriving_done = 0;
     m_arriving_quiet = 0;
-    m_arriving_seconds = m_arriving_bodies = m_arriving_gpu = 0.0;
+    m_arriving_seconds = m_arriving_bodies = m_arriving_gpu = m_arriving_gpu_in_all = 0.0;
     m_arriving_frame = std::chrono::steady_clock::now();
     m_arriving_streamed = 0;
     open(Menu::loading);
@@ -672,8 +672,17 @@ void GameMenus::arrive() {
     const u32 gpu = m_arriving.voxels + m_arriving.light + m_arriving.shadows + m_arriving.geometry;
     bool gpu_waited = false;
     if (counted == 0 && gpu != 0) {
+        // (While the voxel world's bricks are being built or lit, the last frame's among them, it is
+        // waited for on: k_most_gpu_seconds is for what is not getting done, a pool too small say,
+        // k_most_gpu_seconds_in_all for a device too slow to wait for and for work that never ends.
+        // The counts themselves say less: bricks built become bricks to light, changes become bricks.)
+        const bool at_work = (m_arriving.voxels != 0 && drawn.voxel_built != 0) || (m_arriving.light != 0 && drawn.gi_lit != 0);
+        if (at_work) m_arriving_gpu = 0.0;
         m_arriving_gpu += real;
-        gpu_waited = m_arriving_gpu <= k_most_gpu_seconds;
+        m_arriving_gpu_in_all += real;
+        gpu_waited = m_arriving_gpu <= k_most_gpu_seconds && m_arriving_gpu_in_all <= k_most_gpu_seconds_in_all;
+    } else if (gpu == 0) {
+        m_arriving_gpu = 0.0; // (what comes after, the view moved say, has its own wait)
     }
     const u32 coming = counted + (bodies ? 1u : 0u) + (gpu_waited ? 1u : 0u);
     // What has come in since the screen stood, of all that was ever to come: more found to come
@@ -706,7 +715,7 @@ void GameMenus::arrive() {
                                 std::to_string(m_arriving.poses) + " poses" + (m_arriving.bodies ? ", bodies" : "") + "; " + gpu_left() +
                                 "): play begins without them");
     else if (m_arriving.voxels + m_arriving.light + m_arriving.shadows + m_arriving.geometry != 0)
-        log_info("game", "play begins with the GPU still at it after " + std::to_string(static_cast<int>(k_most_gpu_seconds)) + " s (" +
+        log_info("game", "play begins with the GPU still at it after " + std::to_string(static_cast<int>(m_arriving_gpu_in_all)) + " s (" +
                              gpu_left() + ")");
     m_arriving.on = false;
     // (A loaded game that was saved in play is playing already, held still behind the screen: it goes on.)

@@ -54,13 +54,18 @@ def main():
             if name == "get_engine_info":
                 return {"frame_times": {"recorded": self.frame}}
             if name == "get_menu":
-                return {"menu": "loading" if self.frame < 120 else "none", "notice": ""}
+                # (Cells still coming until frame 110, the voxel world after them; `on` is no count.)
+                return {"menu": "loading" if self.frame < 120 else "none", "notice": "",
+                        "loading": {"on": True, "shown": 1, "progress": 0.5, "cells": 3 if self.frame < 110 else 0,
+                                    "voxels": 5 if self.frame < 118 else 0, "textures": 0}}
             return {"playing": self.frame >= 120}
 
     game = Game()
     presses = []
     count, _, menu = begun(game, lambda: presses.append(1) or len(presses) == 3, 100)
     check(len(presses) == 3 and menu["menu"] == "none", "the button is pressed until it takes, the loading waited through")
+    waited = [part.split()[0] for part in menu["waited"].split(", ")]
+    check(waited == ["cells", "voxels"], f"what the loading screen waited for, in the order it came in: {menu['waited']}")
     reads = [i for i, name in enumerate(game.calls) if name == "get_engine_info"]
     check(100 <= count < 120 and count == 100 + reads[-2] + 1, f"the count is the read before the last: {count}")
 

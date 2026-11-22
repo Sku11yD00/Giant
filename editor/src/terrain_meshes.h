@@ -86,9 +86,11 @@ public:
     TerrainMeshStats stats() const;
     // Its workers, for other terrain work (making heights) between frames.
     JobSystem& jobs() { return m_jobs; }
-    u32 builds_per_frame = 8;
-    u32 uploads_per_frame = 8;
-    u32 builds_in_flight = 8;
+    // In play, and behind a game's loading screen (a frame there may take what it takes).
+    static constexpr u32 k_per_frame = 8, k_loading_per_frame = 64;
+    u32 builds_per_frame = k_per_frame;
+    u32 uploads_per_frame = k_per_frame;
+    u32 builds_in_flight = k_per_frame;
     u32 drops_per_frame = 64; // meshes of tiles gone, freed a frame
     // Frames a newly added tile (and its neighbours) wait before they are
     // looked at, so tiles arriving one after another (a world streaming

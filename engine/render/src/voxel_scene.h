@@ -97,7 +97,11 @@ public:
     // missing are looked up again. Shared: a brick being built holds it.
     using MeshLookup = std::function<std::shared_ptr<const geometry::ClusterMesh>(MeshId)>;
 
-    VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u32 brick_capacity);
+    // `more_workers`: threads that build bricks only when update's budget is a loading screen's
+    // (4 ms or more), beside the two to four that always do. k_auto: up to half the cores in all,
+    // eight at most.
+    static constexpr u32 k_auto = ~0u;
+    VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u32 brick_capacity, u32 more_workers = k_auto);
     ~VoxelScene();
     VoxelScene(const VoxelScene&) = delete;
     VoxelScene& operator=(const VoxelScene&) = delete;
@@ -147,6 +151,7 @@ public:
     rhi::BufferHandle pool() const { return m_pool; }
     rhi::BufferHandle table() const { return m_table; }
     const VoxelStats& stats() const { return m_stats; }
+    u64 handed_to_more_workers() const { return m_more_handed; } // builds given to the loading screen's workers, ever (tests)
 
     // Whether the voxel world shows instance `index` (of the last update's
     // instances) as it is now: a stand-in, inside the coarsest window, with every brick
@@ -482,10 +487,16 @@ private:
     double m_inline_ms = 0.0;  // what a small build on the main thread has been taking (a running average)
     u32 m_inline_skipped = 0;  // small builds handed to the workers since the last built here
     bool building(const Key& key) const; // in m_builds
-    WaitGroup m_build_group;
+    WaitGroup m_build_group; // (counted only, never waited on: its jobs run on two JobSystems)
     VoxelStats m_stats;
     bool m_overflow_logged = false;
     JobSystem m_build_jobs; // last: destroyed (finishing its builds) first
+    // More of them behind a loading screen (none: no cores for them), given every (base + more)th
+    // build past the base's share while update's budget says so.
+    std::unique_ptr<JobSystem> m_more_jobs;
+    bool m_helping = false; // the last update's budget was a loading screen's
+    u32 m_submitted = 0;
+    u64 m_more_handed = 0; // builds given to m_more_jobs, ever
 };
 
 } // namespace giant::render
