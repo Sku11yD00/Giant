@@ -19,7 +19,10 @@ bool in_i32(i64 v) { return v >= std::numeric_limits<i32>::min() && v <= std::nu
 
 ScatterPlacer::ScatterPlacer() = default;
 
-ScatterPlacer::~ScatterPlacer() { m_jobs.wait(m_jobs_done); }
+ScatterPlacer::~ScatterPlacer() {
+    m_jobs.wait(m_jobs_done);
+    m_more.wait();
+}
 
 const ScatterPlacer::Cell* ScatterPlacer::find(world::CellCoord cell) const {
     const auto it = m_cells.find(cell);
@@ -326,8 +329,11 @@ void ScatterPlacer::update(const world::Scene& scene, const world::TerrainChange
         const u64 serial = ++m_serial;
         m_wanted[cell] = {serial, key};
         ++m_in_flight;
-        m_jobs.submit(m_jobs_done, [this, cell, serial, key, layers = m_layers, ground = std::move(ground),
-                                    weights = std::move(weights), first_item = std::move(first_item)]() mutable {
+        JobSystem* const more = m_more.next(more_workers, m_jobs.worker_count());
+        JobSystem& jobs = more != nullptr ? *more : m_jobs;
+        jobs.submit(more != nullptr ? m_more.group() : m_jobs_done,
+                    [this, cell, serial, key, layers = m_layers, ground = std::move(ground),
+                     weights = std::move(weights), first_item = std::move(first_item)]() mutable {
             Result r;
             r.cell = cell;
             r.serial = serial;
@@ -363,6 +369,7 @@ void ScatterPlacer::finish(const world::Scene& scene, const world::TerrainChange
     update(scene, changes);
     for (;;) {
         m_jobs.wait(m_jobs_done);
+        m_more.wait();
         update(scene, {});
         if (m_queue.empty() && m_in_flight == 0 && m_arrived.empty()) break;
     }

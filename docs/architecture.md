@@ -5757,12 +5757,21 @@ and load, settings), which also route the real mouse and keys to screens.
   software device a frame takes seconds); play then begins with a line
   in the log saying what was left, and the bar still ends full. While
   the screen stands nothing is played, so the frame's shares are a
-  loading screen's (main.cpp): plants are placed 32 cells at once and
+  loading screen's (main.cpp): plants are placed 128 cells at once and
   65,536 instances swapped in a frame (4 and 4,096 in play), the
-  ground's tiles meshed and put up 64 a frame (8), cells read 64 at
+  ground's tiles meshed and put up 256 a frame (8), cells read 1,024 at
   once and put in the scene 65,536 entities a frame, and the voxel
   world has 12 ms a frame and more workers (up to half the cores, eight
-  at most, beside the two to four of play). Before
+  at most, beside the two to four of play). The cells' reader, the
+  ground's builders and the plants' placers each get more threads too
+  (`MoreWorkers`, more_workers.h: a quarter of the cores each, one to
+  six, started the first time a loading screen asks and given nothing
+  in play, where they sleep once what the screen left them is done;
+  jobs take turns between them and the system's own one or two, so
+  play's threads and its frame are as they were; cells read in one
+  frame join the scene in the order they were asked for, whichever
+  thread was done first). `game_gate` prints
+  the frames each loading screen stood beside its seconds. Before
   that wait, once the bodies are in, the view is moved to where the
   player's eyes will be (`PlayState::eye_at_start`: a new game's view is
   wherever the world's was left, its player stands on the ground under

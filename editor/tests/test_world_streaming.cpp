@@ -527,6 +527,53 @@ GIANT_TEST("world streaming: cells near the camera are read before cells left be
     GIANT_CHECK(w.named("far") == 1);
 }
 
+GIANT_TEST("world streaming: a loading screen's extra readers bring in the same world") {
+    World w;
+    if (w.renderer == nullptr)
+        return;
+    for (int z = -2; z <= 2; ++z)
+        for (int x = -2; x <= 2; ++x)
+            w.add(x * 64.0 + 10.0, z * 64.0 + 10.0, "home");
+    GIANT_CHECK(w.streaming.create(w.folder, w.scene, w.generation, {}).error.empty());
+    // The one reader alone hands nothing to the others...
+    w.reopen();
+    w.streaming.settings.reads_in_flight = 64;
+    w.settle(0.0, 0.0);
+    GIANT_CHECK(w.named("home") == 25 && w.streaming.handed_to_more_readers() == 0);
+    // ...and with three more, three reads in four go to them, and every cell arrives once.
+    w.reopen();
+    w.streaming.settings.more_readers = 3;
+    w.step({0.0, 10.0, 0.0});
+    GIANT_CHECK(w.streaming.stats().reading == 25 && w.streaming.handed_to_more_readers() == 18);
+    w.settle(0.0, 0.0);
+    const u64 handed = w.streaming.handed_to_more_readers();
+    GIANT_CHECK(w.named("home") == 25 && handed == 18);
+    // Back in play, the reads are the one reader's again.
+    w.reopen();
+    w.streaming.settings.more_readers = 0;
+    w.settle(0.0, 0.0);
+    GIANT_CHECK(w.named("home") == 25 && w.streaming.handed_to_more_readers() == handed);
+}
+
+GIANT_TEST("more workers: a loading screen's threads take their share of the turns, and none in play") {
+    MoreWorkers more;
+    GIANT_CHECK(more.next(0, 2) == nullptr && more.handed() == 0); // play: the system's own, always
+    std::atomic<u32> ran{0};
+    u32 own = 0;
+    for (int i = 0; i < 50; ++i) {
+        if (JobSystem* jobs = more.next(3, 2)) {
+            jobs->submit(more.group(), [&ran] { ++ran; });
+        } else {
+            ++own;
+        }
+    }
+    more.wait();
+    GIANT_CHECK(own == 20 && more.handed() == 30 && ran == 30); // two turns in five are the system's
+    GIANT_CHECK(more.next(MoreWorkers::k_most + 50, 1) != nullptr); // (turn 50 of 1 + k_most: theirs; no more than k_most are started)
+    GIANT_CHECK(more.next(0, 2) == nullptr && more.handed() == 31); // play again
+    GIANT_CHECK(MoreWorkers::for_loading() >= 1 && MoreWorkers::for_loading() <= MoreWorkers::k_most);
+}
+
 namespace {
 usize count_named(const world::Scene& scene, const char* name) {
     usize n = 0;

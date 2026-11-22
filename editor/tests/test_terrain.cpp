@@ -147,6 +147,28 @@ GIANT_TEST("terrain meshes: edge vertices survive every level of detail") {
     GIANT_CHECK(coarse < coarse_locked);
 }
 
+GIANT_TEST("terrain meshes: a loading screen's extra workers build the same meshes") {
+    Terrain t;
+    t.set_samples(8);
+    for (i32 z = 0; z < 5; ++z) {
+        for (i32 x = 0; x < 5; ++x) t.set({x, z}, Terrain::Heights(64, static_cast<float>(x + z)));
+    }
+    TerrainMeshes own(nullptr);
+    own.finish(t);
+    TerrainMeshes more(nullptr);
+    more.more_workers = 3;
+    more.finish(t);
+    // Three builds in five went to the three more (two are its own), and what was built is the same.
+    GIANT_CHECK(own.handed_to_more_workers() == 0 && more.handed_to_more_workers() == 15);
+    GIANT_CHECK(more.stats().tiles == 25 && more.stats().building == 0 && more.stats().built == 25);
+    GIANT_CHECK(more.stats().triangles == own.stats().triangles);
+    // In play again: its own two only.
+    more.more_workers = 0;
+    t.modify({2, 2})->at(9) = 40.0f;
+    more.finish(t);
+    GIANT_CHECK(more.stats().built > 25 && more.stats().building == 0 && more.handed_to_more_workers() == 15);
+}
+
 GIANT_TEST("terrain meshes: built off the main thread, a change rebuilds its neighbours") {
     Terrain t;
     t.set_samples(8);

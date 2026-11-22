@@ -10,6 +10,8 @@
 // scene_frame draws them with the cell's entities.
 #pragma once
 
+#include "more_workers.h"
+
 #include "giant/core/jobs.h"
 #include "giant/world/scatter.h"
 #include "giant/world/scene.h"
@@ -75,10 +77,14 @@ public:
     u64 max_instances = 1u << 19;
     u32 looks_per_frame = 256;
     u32 cells_in_flight = k_cells_in_flight;
+    // Threads that place beside the two that always do, while above zero (a
+    // game's loading screen: MoreWorkers::for_loading).
+    u32 more_workers = 0;
+    u64 handed_to_more_workers() const { return m_more.handed(); } // placements given to them, ever (tests)
     usize instances_per_frame = k_instances_per_frame; // every part of the renderer looks at each one the frame it arrives
     // In play, and behind a game's loading screen (nothing is played there: a frame may take
-    // what it takes; the workers are play's, kept busy).
-    static constexpr u32 k_cells_in_flight = 4, k_loading_cells_in_flight = 32;
+    // what it takes).
+    static constexpr u32 k_cells_in_flight = 4, k_loading_cells_in_flight = 128;
     static constexpr usize k_instances_per_frame = 4096, k_loading_instances_per_frame = 1u << 16;
 
 private:
@@ -133,7 +139,8 @@ private:
     std::mutex m_mutex; // protects m_done
     std::vector<Result> m_done;
     WaitGroup m_jobs_done;
-    JobSystem m_jobs{2}; // last: destroyed (finishing its jobs) first
+    JobSystem m_jobs{2};
+    MoreWorkers m_more; // last two: destroyed (finishing their jobs) first
 };
 
 } // namespace giant::editor

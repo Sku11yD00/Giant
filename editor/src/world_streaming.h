@@ -11,6 +11,7 @@
 #pragma once
 
 #include "mods.h"
+#include "more_workers.h"
 #include "scene_render.h"
 
 #include "giant/core/jobs.h"
@@ -33,7 +34,7 @@ constexpr double k_max_load_radius = 8192.0;
 // StreamingSettings::entities_per_frame at least, behind a game's loading screen.
 constexpr u32 k_loading_entities_per_frame = 1u << 16;
 // ...and StreamingSettings::reads_in_flight.
-constexpr u32 k_loading_reads_in_flight = 64;
+constexpr u32 k_loading_reads_in_flight = 1024;
 
 struct StreamingSettings {
     // Cells with any part this near the camera (on the ground, x and z) load.
@@ -44,6 +45,9 @@ struct StreamingSettings {
     // Entities added to the scene per frame (at least one whole cell).
     u32 entities_per_frame = 4096;
     u32 reads_in_flight = 16;
+    // Threads that read cells beside the one that always does, while this is
+    // above zero (a game's loading screen: MoreWorkers::for_loading).
+    u32 more_readers = 0;
     // Frames between looks for cells to unload (each look walks the loaded
     // cells, and an unload is a pass over the scene's entities).
     u32 unload_every = 30;
@@ -70,6 +74,8 @@ class WorldStreaming {
 public:
     WorldStreaming();
     ~WorldStreaming();
+    // Reads given to settings.more_readers' threads, ever (tests).
+    u64 handed_to_more_readers() const { return m_more.handed(); }
     WorldStreaming(const WorldStreaming&) = delete;
     WorldStreaming& operator=(const WorldStreaming&) = delete;
 
@@ -194,6 +200,7 @@ private:
     struct Read {
         world::CellCoord cell;
         u64 epoch = 0;
+        u64 serial = 0; // of its start: reads done in one frame join the scene in the order asked for
         std::vector<world::Entity> entities; // sorted by id
         std::optional<world::Terrain::Heights> heights;
         world::Terrain::Paint paint; // the tile's (empty: none)
@@ -220,6 +227,8 @@ private:
     bool follows(const world::Scene& scene); // false: replaced, streaming stops
     void start_read(world::CellCoord cell);
     void take_reads();
+    void wait_reads(); // until no read is in flight on either pool
+    u64 m_read_serial = 0;
     void insert(world::Scene& scene);
     // True when it stopped at unloads_per_frame with more far cells to look at.
     bool unload(world::Scene& scene, const DVec3& camera, const SceneFrame& frame);
@@ -285,7 +294,8 @@ private:
     std::mutex m_mutex; // protects m_finished
     std::vector<Read> m_finished;
     WaitGroup m_reads;
-    JobSystem m_jobs{1}; // last: destroyed (finishing its jobs) first
+    JobSystem m_jobs{1};
+    MoreWorkers m_more; // last two: destroyed (finishing their jobs) first
 };
 
 } // namespace giant::editor

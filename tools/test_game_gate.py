@@ -68,6 +68,7 @@ def main():
     check(waited == ["cells", "voxels"], f"what the loading screen waited for, in the order it came in: {menu['waited']}")
     reads = [i for i, name in enumerate(game.calls) if name == "get_engine_info"]
     check(100 <= count < 120 and count == 100 + reads[-2] + 1, f"the count is the read before the last: {count}")
+    check(menu["loading_frames"] == reads[-1] - reads[0], f"the frames the loading stood, first read to last: {menu['loading_frames']}")
 
     class Failing(Game):
         def tool(self, name, arguments=None):

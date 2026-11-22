@@ -131,7 +131,12 @@ bool WorldStreaming::ground_on_disk(CellCoord cell) const {
 
 WorldStreaming::WorldStreaming() = default;
 
-WorldStreaming::~WorldStreaming() { m_jobs.wait(m_reads); }
+WorldStreaming::~WorldStreaming() { wait_reads(); }
+
+void WorldStreaming::wait_reads() {
+    m_jobs.wait(m_reads);
+    m_more.wait();
+}
 
 std::filesystem::path WorldStreaming::cell_path(CellCoord cell) const {
     return m_folder / "cells" / world::cell_file_name(cell);
@@ -364,11 +369,16 @@ void WorldStreaming::restore(const Memo& memo, world::Scene& scene) {
 
 void WorldStreaming::start_read(CellCoord cell) {
     set_state(cell, m_cells[cell], State::reading);
-    m_jobs.submit(m_reads, [this, cell, path = cell_path(cell), epoch = m_epoch,
-                            samples = m_index.terrain_samples] {
+    // The loading screen's readers take turns with the one that always reads.
+    JobSystem* const more = m_more.next(settings.more_readers, m_jobs.worker_count());
+    JobSystem& jobs = more != nullptr ? *more : m_jobs;
+    jobs.submit(more != nullptr ? m_more.group() : m_reads,
+                [this, cell, path = cell_path(cell), epoch = m_epoch, serial = ++m_read_serial,
+                 samples = m_index.terrain_samples] {
         Read read;
         read.cell = cell;
         read.epoch = epoch;
+        read.serial = serial;
         if (const auto text = read_text(path)) {
             if (const auto error = world::load_cell(*text, cell, samples, read.entities, read.heights, &read.damage,
                                                 &read.paint)) {
@@ -395,6 +405,8 @@ void WorldStreaming::take_reads() {
         const std::lock_guard lock(m_mutex);
         finished.swap(m_finished);
     }
+    // (Several readers finish in any order: the order asked for, nearest first, whatever the threads did.)
+    std::sort(finished.begin(), finished.end(), [](const Read& a, const Read& b) { return a.serial < b.serial; });
     for (Read& r : finished) {
         if (r.epoch != m_epoch) {
             continue;
@@ -421,7 +433,7 @@ void WorldStreaming::take_reads() {
 }
 
 void WorldStreaming::finish_reads() {
-    m_jobs.wait(m_reads);
+    wait_reads();
     take_reads();
 }
 
