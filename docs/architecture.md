@@ -5951,28 +5951,51 @@ Done in N2 part 2:
   building, bricks never built first (coarse levels first), then those
   built already whose contents changed, oldest first whatever their level
   (else a 2 km brick that scatter streaming in keeps changing goes back
-  before everything nearer, again and again). Bricks are built on worker
-  threads (a quarter of the cores, two to four), up to 32 at once (a
-  brick with nothing over it is emptied on the spot with no build, and
-  so is one no instance over it has a triangle near: each mesh of up to
-  32,768 triangles keeps a grid of 16 cells a side saying where its
-  triangles are, made the first time a brick asks (`may_touch`), and a
-  brick's box, two voxels wider for the simplified cuts and turned into the
-  mesh's space, is looked up in it. Nine bricks in ten under a terrain
-  tile's bounds are air or earth, and building each to find it empty was
-  what kept the voxel world from keeping up with a player at 30 m/s; one
-  over at most 16 instances and water triangles is built on the main
-  thread as it is gathered while such builds average under 0.05 ms, else
-  it goes to the workers too, as in a debug build): the
-  main thread copies what is over a brick (its instances' places, colours,
-  meshes and LOD cuts, held so a mesh removed meanwhile stays until the
-  build is done; its water's triangles), a few hundred instances between
-  looks at the clock, and copies the finished brick into the pool. A
+  before everything nearer, again and again). Bricks are prepared and
+  built on worker threads (a quarter of the cores, two to four), up to
+  512 under way at once: the main thread only hands the workers the
+  bricks, 16 a job, and copies each finished brick into the pool (one
+  with nothing in it just frees its slot). A worker finds what is over
+  its brick and copies it out (the instances' places, colours and
+  meshes) while it holds a share of the scene (`m_scene_lock`: the
+  instance copies, the grid they are filed in, the water's boxes), a few
+  microseconds a brick. With none held it then rules out the instances
+  with no triangle near (each mesh of up to 32,768 triangles keeps a grid
+  of 16 cells a side saying where its triangles are, made the first time
+  a brick asks (`may_touch`), and a brick's box, two voxels wider for the
+  simplified cuts and turned into the mesh's space, is looked up in it:
+  nine bricks in ten under a terrain tile's bounds are air or earth),
+  picks the rest's LOD cuts (meshes and cuts held, so a mesh removed
+  meanwhile stays until the build is done) and builds. The main thread
+  takes the whole scene for the part of `update` that changes it
+  (`see_changes`), for `set_water` and `set_stand_in_radius`, and the
+  workers take no new share while it wants it (`m_writing`), so it waits
+  only for the shares held then: each one brick's finding and copying
+  out, which gives up past 2,048 instances found or 32,768 looked at (a
+  wait on other threads all the same: see "Frame budget").
+  The mesh cache's map, cuts and grids are under `m_mesh_mutex` (its
+  entries shared, so one a worker looks at outlives `forget_mesh`). Three
+  kinds of brick stay the main thread's to begin, as before the workers
+  prepared them (a few hundred instances copied between looks at the
+  clock; one over at most 16 instances and water triangles built there
+  too while such builds average under 0.05 ms): one with water over it
+  (its triangles are stamped as they are taken; told as it is started,
+  with no trip to a worker), one over more than 2,048
+  instances (too many to copy out in one go) and one over a mesh never
+  looked up. Preparing on the main thread was what kept the voxel world
+  from keeping up at 90 m/s: about 40 bricks a frame of the 440 marked,
+  against 350 to 400 with the workers preparing (null device, 4 cores,
+  1 ms; what is left is the marking's half of the budget). A
   change over a brick under way builds it again once it is done (waiting
-  its turn with the other rebuilds); builds not yet taken by a worker
+  its turn with the other rebuilds), unless no thread has read the scene
+  for it yet (it is built from what is there after; a frame's thousands
+  of changes look only at the builds that have); builds not yet taken by a worker
   whose bricks leave the window are dropped. With a budget of 4 ms or
   more (a game's loading screen gives it 12 ms) the main thread builds
-  bricks too (the smallest waiting, in the first half of the budget) and
+  bricks too (the smallest copied, else the last handed to the workers,
+  in the first half of the budget; in play it prepares one itself only
+  when one has waited 30 updates and the workers have finished none in
+  as long) and
   otherwise waits on the workers' (yielding) for the rest of the budget,
   which `cpu_ms` counts. Something far smaller than a voxel (its sphere at
   most a quarter of one: a grass tuft at 4 m voxels, a tree at 64 m) is
@@ -6319,6 +6342,14 @@ Frame pacing counts as much as the average (AGENTS.md rule 9). Performance
 gates check the 99th percentile frame and count hitches (frames half again
 over the target frame time). Where it stands:
 
+- Known wait (voxel bricks prepared on workers): once a frame
+  `VoxelScene::update` takes the scene's lock whole to apply the frame's
+  changes, and waits for the workers holding a share of it. Each share is
+  one brick's finding and copying out (microseconds, capped at 2,048
+  instances found), but a worker the system took off its core while it
+  held one is waited for too. Not seen in the gates; if it shows as
+  hitches on a machine with every core busy, the fix is fewer voxel
+  workers there, not a longer hold.
 - Done: no shader compiles at run time (shaders are built ahead) and every
   pipeline is created at load (`Renderer::init`, the device's UI pipeline).
   The C# GC runs in background, sustained low latency mode, and the script
