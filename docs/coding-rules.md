@@ -25,6 +25,9 @@ person can read cold, and that sanitizers can check.
   blocks on stdin; a blocking OS read would tie up a worker forever.
 - Shared mutable state needs a comment naming what protects it.
 - Jobs must not throw, and a job may only wait on work it submitted itself.
+  (One stated exception: a voxel brick job waits for the main thread to
+  let go of the scene's lock, `VoxelScene::work`; the main thread holds it
+  for part of one `update` and never waits on a job while it does.)
 - Log sinks must not add or remove sinks; logging from inside a sink goes
   straight to stderr.
 

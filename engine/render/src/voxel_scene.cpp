@@ -50,6 +50,12 @@ constexpr u64 k_most_waiting_updates = 30;
 // With at least this budget a frame (behind a loading screen, in tests), the main thread builds
 // bricks too, a whole brick at a time, and waits on the workers' rather than leave time unused.
 constexpr double k_help_ms = 4.0;
+// Bricks under way at once when the workers prepare them (waiting for a worker, most of them),
+// how many are handed over in one job, and the most instances over one a worker copies out while
+// it holds its share of the scene (the main thread waits for that share to change anything).
+constexpr usize k_most_under_way = 512;
+constexpr usize k_batch = 16;
+constexpr usize k_worker_items = 2048;
 // An instance whose sphere's radius is at most this share of a voxel is added as one point
 // (BrickBuilder::add_point), not triangle by triangle: a quarter, so it spans a voxel or two.
 constexpr float k_point_share = 0.25f;
@@ -124,6 +130,8 @@ VoxelScene::VoxelScene(rhi::Device& device, const voxel::ClipmapDesc& clipmap, u
     if (more > 0) {
         m_more_jobs = std::make_unique<JobSystem>(more);
     }
+    static std::atomic<u64> scenes{0};
+    m_serial = scenes.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 VoxelScene::~VoxelScene() {
@@ -201,41 +209,90 @@ VoxelScene::Cut VoxelScene::cut(const geometry::ClusterMesh& mesh, float error, 
 
 // --- Instances ------------------------------------------------------------
 
-VoxelScene::MeshCache* VoxelScene::mesh_cache(MeshId id, const MeshLookup& meshes) {
+VoxelScene::Writing::Writing(VoxelScene& voxels) : scene(voxels) {
+    scene.m_writing.store(true, std::memory_order_release); // (the workers take no new share)
+    scene.m_scene_lock.lock();
+    scene.m_touchable_ready = false;
+}
+
+VoxelScene::Writing::~Writing() {
+    scene.m_copy_count.store(scene.m_copies.size(), std::memory_order_relaxed);
+    scene.m_scene_lock.unlock();
+    scene.m_writing.store(false, std::memory_order_release);
+    scene.m_writing.notify_all();
+}
+
+VoxelScene::MeshCache* VoxelScene::known_mesh(MeshId id, bool& known, std::shared_ptr<MeshCache>* hold) {
+    const std::lock_guard lock(m_mesh_mutex);
     const auto found = m_meshes.find(id);
-    if (found != m_meshes.end()) {
-        return found->second.mesh != nullptr ? &found->second : nullptr;
+    known = found != m_meshes.end();
+    if (!known || found->second->mesh == nullptr) {
+        return nullptr;
     }
-    MeshCache cache;
-    cache.mesh = meshes ? meshes(id) : nullptr;
-    if (cache.mesh != nullptr && !cache.mesh->empty()) {
+    if (hold != nullptr) {
+        *hold = found->second;
+    }
+    return found->second.get();
+}
+
+VoxelScene::MeshCache* VoxelScene::mesh_cache(MeshId id, const MeshLookup& meshes) {
+    {
+        bool known = false;
+        MeshCache* const cache = known_mesh(id, known, nullptr);
+        if (known) {
+            return cache;
+        }
+    }
+    // (Only the main thread adds: looked up outside the lock, the workers not held meanwhile.)
+    std::shared_ptr<const geometry::ClusterMesh> mesh = meshes ? meshes(id) : nullptr;
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    Vec3 min{inf, inf, inf};
+    Vec3 max{-inf, -inf, -inf};
+    if (mesh != nullptr && !mesh->empty()) {
         // Around the original clusters' spheres: one pass over the clusters,
         // not the vertices.
-        constexpr float inf = std::numeric_limits<float>::infinity();
-        cache.min = {inf, inf, inf};
-        cache.max = {-inf, -inf, -inf};
-        for (const geometry::Cluster& c : cache.mesh->clusters) {
+        for (const geometry::Cluster& c : mesh->clusters) {
             if (c.refined >= 0) {
                 continue;
             }
             const Vec3 p = c.bounds.center;
             const float r = c.bounds.radius;
-            cache.min = {std::min(cache.min.x, p.x - r), std::min(cache.min.y, p.y - r),
-                         std::min(cache.min.z, p.z - r)};
-            cache.max = {std::max(cache.max.x, p.x + r), std::max(cache.max.y, p.y + r),
-                         std::max(cache.max.z, p.z + r)};
+            min = {std::min(min.x, p.x - r), std::min(min.y, p.y - r), std::min(min.z, p.z - r)};
+            max = {std::max(max.x, p.x + r), std::max(max.y, p.y + r), std::max(max.z, p.z + r)};
         }
-        if (!(cache.min.x <= cache.max.x)) {
-            const geometry::Sphere& s = cache.mesh->bounds;
-            cache.min = s.center - Vec3{s.radius, s.radius, s.radius};
-            cache.max = s.center + Vec3{s.radius, s.radius, s.radius};
+        if (!(min.x <= max.x)) {
+            const geometry::Sphere& sphere = mesh->bounds;
+            min = sphere.center - Vec3{sphere.radius, sphere.radius, sphere.radius};
+            max = sphere.center + Vec3{sphere.radius, sphere.radius, sphere.radius};
         }
     } else {
-        cache.mesh = nullptr; // remembered as missing until the meshes change
+        mesh = nullptr; // remembered as missing until the meshes change
         m_missing.insert(id);
     }
-    MeshCache& stored = m_meshes.emplace(id, std::move(cache)).first->second;
+    const std::lock_guard lock(m_mesh_mutex);
+    std::shared_ptr<MeshCache>& entry = m_meshes[id];
+    entry = std::make_shared<MeshCache>();
+    MeshCache& stored = *entry;
+    stored.mesh = std::move(mesh);
+    stored.min = min;
+    stored.max = max;
     return stored.mesh != nullptr ? &stored : nullptr;
+}
+
+std::shared_ptr<const VoxelScene::Cut> VoxelScene::cut_for(MeshCache& cache, i32 exponent, bool point) {
+    const i32 key = exponent * 2 + (point ? 1 : 0);
+    {
+        const std::lock_guard lock(m_mesh_mutex);
+        const auto it = cache.cuts.find(key);
+        if (it != cache.cuts.end()) {
+            return it->second;
+        }
+    }
+    // Made outside the lock (a walk over the mesh): two threads may each make one, and the first
+    // filed is the one kept.
+    std::shared_ptr<const Cut> made = std::make_shared<const Cut>(cut(*cache.mesh, std::ldexp(1.0f, exponent), point));
+    const std::lock_guard lock(m_mesh_mutex);
+    return cache.cuts.try_emplace(key, std::move(made)).first->second;
 }
 
 namespace {
@@ -252,16 +309,32 @@ u32 grid_cell(float v, float from, float to) {
 bool finite(const Vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 } // namespace
 
-void VoxelScene::make_grid(MeshCache& cache) {
+void VoxelScene::ensure_grid(MeshCache& cache) {
     static_assert(MeshCache::k_grid == 16);
-    cache.grid_made = true;
+    if (cache.grid_ready.load(std::memory_order_acquire)) {
+        return;
+    }
+    // Made outside the lock (a walk over the mesh's triangles), filed under it: two threads may
+    // each make one, and the first filed is the one kept.
+    std::vector<u16> grid;
+    Vec3 grid_min{};
+    Vec3 grid_max{};
+    const auto file = [&] {
+        const std::lock_guard lock(m_mesh_mutex);
+        if (!cache.grid_ready.load(std::memory_order_relaxed)) {
+            cache.grid = std::move(grid);
+            cache.grid_min = grid_min;
+            cache.grid_max = grid_max;
+            cache.grid_ready.store(true, std::memory_order_release);
+        }
+    };
     const geometry::ClusterMesh& mesh = *cache.mesh;
     u64 triangles = 0;
     for (const geometry::Cluster& c : mesh.clusters) {
         triangles += c.refined < 0 ? c.triangle_count : 0u;
     }
     if (triangles == 0 || triangles > MeshCache::k_grid_triangles) {
-        return;
+        return file();
     }
     constexpr float inf = std::numeric_limits<float>::infinity();
     Vec3 lo{inf, inf, inf};
@@ -289,12 +362,12 @@ void VoxelScene::make_grid(MeshCache& cache) {
         hi = {std::max(hi.x, b.x), std::max(hi.y, b.y), std::max(hi.z, b.z)};
     });
     if (!finite(lo) || !finite(hi)) {
-        return; // (no triangle with every corner a number: nothing ruled out)
+        return file(); // (no triangle with every corner a number: nothing ruled out)
     }
     constexpr u32 n = MeshCache::k_grid;
-    cache.grid_min = lo;
-    cache.grid_max = hi;
-    cache.grid.assign(usize{n} * n, 0);
+    grid_min = lo;
+    grid_max = hi;
+    grid.assign(usize{n} * n, 0);
     each([&](const Vec3& a, const Vec3& b) {
         const u32 x0 = grid_cell(a.x, lo.x, hi.x), x1 = grid_cell(b.x, lo.x, hi.x);
         const u32 y0 = grid_cell(a.y, lo.y, hi.y), y1 = grid_cell(b.y, lo.y, hi.y);
@@ -302,18 +375,16 @@ void VoxelScene::make_grid(MeshCache& cache) {
         const u16 bits = static_cast<u16>((u32{2} << x1) - (u32{1} << x0));
         for (u32 z = z0; z <= z1; ++z) {
             for (u32 y = y0; y <= y1; ++y) {
-                cache.grid[y + usize{n} * z] |= bits;
+                grid[y + usize{n} * z] |= bits;
             }
         }
     });
+    file();
 }
 
-bool VoxelScene::may_touch(const Copy& copy, const MeshLookup& meshes, const Box& box, double voxel) {
+bool VoxelScene::may_touch(const Copy& copy, MeshCache& cache, const Box& box, double voxel) {
     const Instance& in = copy.instance;
-    MeshCache* const m = mesh_cache(in.mesh, meshes);
-    if (m == nullptr) {
-        return false; // no mesh: a build skips it too
-    }
+    MeshCache* const m = &cache;
     const float s = max_abs_scale(in.scale);
     if (!(s > 0.0f) || !std::isfinite(s)) {
         return false; // (as a build)
@@ -324,10 +395,7 @@ bool VoxelScene::may_touch(const Copy& copy, const MeshLookup& meshes, const Box
     if (!(std::abs(in.scale.x) > 0.0f && std::abs(in.scale.y) > 0.0f && std::abs(in.scale.z) > 0.0f)) {
         return true; // flattened: not turned back into the mesh's space
     }
-    if (!m->grid_made) {
-        make_grid(*m);
-        m_touch_work += k_touch_work; // (a walk over its triangles: the clock is looked at next)
-    }
+    ensure_grid(*m);
     if (m->grid.empty()) {
         return true;
     }
@@ -336,7 +404,6 @@ bool VoxelScene::may_touch(const Copy& copy, const MeshLookup& meshes, const Box
     if (!(std::abs(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w - 1.0f) <= 1e-4f)) {
         return true;
     }
-    ++m_touch_work;
     // The box, two voxels wider (a build draws a simplified cut, off the original triangles by
     // half a voxel as its error is told, and that error is the largest of its levels', not their
     // sum), in the mesh's space: the box around its eight corners there.
@@ -479,7 +546,10 @@ float stand_in_radius_of(const geometry::ClusterMesh& mesh, const Vec3& scale) {
 }
 
 void VoxelScene::forget_mesh(MeshId mesh) {
-    m_meshes.erase(mesh);
+    { // (nothing of the scene's: the workers are not held for it)
+        const std::lock_guard lock(m_mesh_mutex);
+        m_meshes.erase(mesh);
+    }
     m_missing.erase(mesh);
     m_forgotten.push_back(mesh);
 }
@@ -490,11 +560,12 @@ void VoxelScene::set_stand_in_radius(float radius) {
         return;
     }
     m_stand_in_radius = r;
+    const Writing writing(*this);
     bool any = false;
     for (Copy& c : m_copies) {
         // The same rule as set_copy, from the copy's own instance.
         const auto it = m_meshes.find(c.instance.mesh);
-        const geometry::ClusterMesh* mesh = it != m_meshes.end() ? it->second.mesh.get() : nullptr;
+        const geometry::ClusterMesh* mesh = it != m_meshes.end() ? it->second->mesh.get() : nullptr;
         const bool stand_in = !c.instance.always_mesh && !c.box.empty() && mesh != nullptr &&
                               stand_in_radius_of(*mesh, c.instance.scale) <= r;
         any = any || stand_in != c.stand_in;
@@ -600,22 +671,32 @@ void VoxelScene::grid_rebuild() {
     }
 }
 
-void VoxelScene::find(const Box& q) {
-    m_found.clear();
+void VoxelScene::find(const Box& q) { find_into(q, m_found, m_seen, m_find_stamp, ~usize{0}); }
+
+bool VoxelScene::find_into(const Box& q, std::vector<u32>& found, std::vector<u32>& seen, u32& stamp, usize most) const {
+    found.clear();
     if (q.empty()) {
-        return;
+        return true;
     }
-    m_seen.resize(m_copies.size(), 0);
-    if (++m_find_stamp == 0) {
-        std::fill(m_seen.begin(), m_seen.end(), 0);
-        m_find_stamp = 1;
+    seen.resize(m_copies.size(), 0);
+    if (++stamp == 0) {
+        std::fill(seen.begin(), seen.end(), 0);
+        stamp = 1;
     }
+    // (`most`: given up once more are found, or sixteen times as many looked at: a worker's.)
+    const usize most_looks = most > ~usize{0} / 16 ? ~usize{0} : most * 16;
+    usize looks = 0;
+    bool over = false;
     const auto look = [&](u32 i) {
-        if (m_seen[i] != m_find_stamp) {
-            m_seen[i] = m_find_stamp;
+        if (over) {
+            return;
+        }
+        if (seen[i] != stamp) {
+            over = ++looks > most_looks || found.size() > most;
+            seen[i] = stamp;
             const Box& b = m_copies[i].box;
             if (overlaps(b.min, b.max, q.min, q.max)) {
-                m_found.push_back(i);
+                found.push_back(i);
             }
         }
     };
@@ -630,6 +711,9 @@ void VoxelScene::find(const Box& q) {
         const auto fine = [&](const std::vector<Fine>& cells_in) {
             for (const Fine& f : cells_in) {
                 const Cell& cell = f.cell;
+                if (over) {
+                    return;
+                }
                 if (cell.x >= lo.x && cell.x <= hi.x && cell.y >= lo.y && cell.y <= hi.y && cell.z >= lo.z &&
                     cell.z <= hi.z) {
                     for (const u32 i : *f.list) {
@@ -662,7 +746,7 @@ void VoxelScene::find(const Box& q) {
             for (i32 y = lo.y; y <= hi.y; ++y) {
                 for (i32 x = lo.x; x <= hi.x; ++x) {
                     const auto it = m_grid.find(Cell{x, y, z});
-                    if (it != m_grid.end()) {
+                    if (it != m_grid.end() && !over) {
                         for (const u32 i : it->second) {
                             look(i);
                         }
@@ -674,6 +758,7 @@ void VoxelScene::find(const Box& q) {
     for (const u32 i : m_large) {
         look(i);
     }
+    return !over;
 }
 
 // --- Seeing changes -------------------------------------------------------
@@ -866,6 +951,7 @@ void VoxelScene::set_water(std::span<const WaterVertex> vertices, std::span<cons
         h.add(body.color.z);
         body.hash = h.h;
     }
+    const Writing writing(*this);
     // Bodies the same as before are kept (pieces and all); the others go
     // and come, their bricks built again.
     std::unordered_map<u64, usize> before;
@@ -987,7 +1073,7 @@ void VoxelScene::copy_all(std::span<const Instance> instances, std::span<const M
     // covers whatever they miss. Restarting them on every bulk change
     // would starve them.
     for (const std::shared_ptr<Build>& b : m_builds) {
-        b->again = true; // so are the bricks under way
+        b->again = b->again || !b->untouched(); // so are the bricks under way (that have read what was)
     }
 }
 
@@ -1061,7 +1147,7 @@ void VoxelScene::remove_range(u32 first, u32 count) {
         }
     }
     for (const std::shared_ptr<Build>& b : m_builds) {
-        b->again = true;
+        b->again = b->again || !b->untouched();
     }
     if (m_gathering != nullptr) {
         // The one still copying holds indices: shifted too (the instances it has yet to copy).
@@ -1084,7 +1170,10 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
             const std::shared_ptr<const geometry::ClusterMesh> now = meshes ? meshes(*it) : nullptr;
             if (now != nullptr && !now->empty()) {
                 stale.insert(*it);
-                m_meshes.erase(*it);
+                {
+                    const std::lock_guard lock(m_mesh_mutex);
+                    m_meshes.erase(*it);
+                }
                 it = m_missing.erase(it);
             } else {
                 ++it;
@@ -1511,7 +1600,18 @@ void VoxelScene::touch_building(const Box& box) {
     if (box.empty()) {
         return;
     }
-    for (const std::shared_ptr<Build>& b : m_builds) {
+    if (!m_touchable_ready) {
+        // (Scatter streaming in changes thousands of instances a frame: each looks only at the
+        // builds that have read the scene, a few of the hundreds waiting.)
+        m_touchable.clear();
+        for (const std::shared_ptr<Build>& b : m_builds) {
+            if (!b->untouched()) {
+                m_touchable.push_back(b.get());
+            }
+        }
+        m_touchable_ready = true;
+    }
+    for (Build* const b : m_touchable) {
         const double size = b->brick_size;
         if (!b->again && overlaps(box.min, box.max, b->origin, b->origin + DVec3{size, size, size})) {
             b->again = true;
@@ -1524,6 +1624,19 @@ bool VoxelScene::Build::run() {
     if (!state.compare_exchange_strong(expected, k_running, std::memory_order_acq_rel)) {
         return false; // another thread has it
     }
+    build_voxels();
+    state.store(k_built, std::memory_order_release);
+    return true;
+}
+
+void VoxelScene::Build::build_voxels() {
+    if (items.empty() && water.empty()) {
+        meshes.clear();
+        cuts.clear();
+        return; // nothing over it
+    }
+    // (One a thread: 20 KB, and reset clears only what the last brick touched.)
+    static thread_local voxel::BrickBuilder builder;
     builder.reset(voxel_size, seed);
     const float voxel = voxel_size;
     const float edge = voxel * static_cast<float>(voxel::k_brick_edge);
@@ -1604,134 +1717,334 @@ bool VoxelScene::Build::run() {
         builder.add_water_triangle(w.a, w.b, w.c, w.color);
     }
     // Empty also when cut-outs touched voxels but thinned every one away.
-    result = builder.build();
+    if (!builder.empty()) {
+        auto made = std::make_unique<const voxel::Brick>(builder.build());
+        if (!made->empty()) {
+            result = std::move(made);
+        }
+    }
     items.clear();
     items.shrink_to_fit();
     meshes.clear(); // they may go now
     cuts.clear();
     water.clear();
     water.shrink_to_fit();
-    state.store(k_built, std::memory_order_release);
-    return true;
 }
 
-bool VoxelScene::building(const Key& key) const {
-    for (const std::shared_ptr<Build>& b : m_builds) {
-        if (b->level == key.level && b->brick == key.brick) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool VoxelScene::start_build(const MeshLookup& meshes, const std::function<bool()>& out_of_time, bool room) {
+bool VoxelScene::start_build(const std::function<bool()>& out_of_time, usize most) {
     // Every level's never built, coarsest first; then those to build again, oldest first.
-    u32 emptied = 0;
+    u32 started = 0;
     for (u32 n = m_clipmap.levels() + 1; n-- > 0;) {
         std::deque<Key>& order = n > 0 ? m_order[n - 1] : m_again;
         while (!order.empty()) {
+            if (m_builds.size() >= most) {
+                submit_batch();
+                return started > 0; // the rest wait where they are
+            }
             const Key key = order.front();
             order.pop_front();
             if (m_pending.erase(key) == 0 || !m_clipmap.contains(key.level, key.brick)) {
                 continue; // left the window while waiting
             }
-            bool under_way = false;
-            for (const std::shared_ptr<Build>& b : m_builds) {
-                if (b->level == key.level && b->brick == key.brick) {
-                    b->again = true; // built once more when it is done (never two at once)
-                    under_way = true;
-                }
-            }
-            if (under_way) {
-                continue;
-            }
-            const DVec3 origin = m_clipmap.brick_min(key.level, key.brick);
-            const double size = m_clipmap.brick_size(key.level);
-            const Box box{origin, origin + DVec3{size, size, size}};
-            find(box);
-            bool ruled = false;
-            if (m_ruling_out && !m_found.empty()) {
-                // Most bricks under an instance's bounds have none of its triangles near (the air
-                // over a slope's ground and the earth under it): told from the mesh's grid, far
-                // cheaper than building each to find it empty.
-                const double voxel = m_clipmap.voxel_size(key.level);
-                std::erase_if(m_found, [&](u32 i) { return !may_touch(m_copies[i], meshes, box, voxel); });
-                ruled = m_found.empty();
-            }
-            if (m_found.empty() && !water_over(box)) {
-                // Nothing over it (most of the window, and all that a removal left): emptied here,
-                // with no build to hand over or copy back.
-                remove(key.level, m_clipmap.slot(key.level, key.brick), key.brick);
-                m_retry.erase(key);
-                ++m_stats.built;
-                m_ruled_out += ruled ? 1u : 0u;
-                // (The clock: every 16, and whenever the instances looked at were many or a grid was made.)
-                if (++emptied % 16 == 0 || m_touch_work >= k_touch_work) {
-                    m_touch_work = 0;
-                    if (out_of_time()) {
-                        return true;
-                    }
+            if (const auto under_way = m_building.find(key); under_way != m_building.end()) {
+                // Built once more when it is done (never two at once), unless it has yet to read
+                // the scene: whatever marked it is there to be read.
+                if (!under_way->second->untouched()) {
+                    under_way->second->again = true;
                 }
                 continue;
-            }
-            if (!room) {
-                // The workers are full: it waits at the front, as it was.
-                m_pending.insert(key);
-                order.push_front(key);
-                return emptied > 0;
             }
             auto job = std::make_shared<Build>();
             Build& b = *job;
             b.level = key.level;
             b.brick = key.brick;
-            b.origin = origin;
-            b.brick_size = size;
+            b.origin = m_clipmap.brick_min(key.level, key.brick);
+            b.brick_size = m_clipmap.brick_size(key.level);
+            b.box = {b.origin, b.origin + DVec3{b.brick_size, b.brick_size, b.brick_size}};
             b.voxel_size = static_cast<float>(m_clipmap.voxel_size(key.level));
             b.seed = static_cast<u32>(KeyHash{}(key));
-            const DVec3 far_corner = box.max;
-            b.found = m_found;
-            b.items.reserve(m_found.size());
-            // Water's surfaces over it: each triangle once (the bodies as they are now; a change
-            // meanwhile sets `again`).
-            const u32 stamp = ++m_water_stamp;
-            for (const auto& body : m_water) {
-                if (!overlaps(body->box.min, body->box.max, b.origin, far_corner)) {
-                    continue;
-                }
-                for (const WaterPiece& piece : body->pieces) {
-                    if (!overlaps(piece.box.min, piece.box.max, b.origin, far_corner)) {
-                        continue;
-                    }
-                    for (const u32 t : piece.triangles) {
-                        if (body->stamps[t] == stamp) {
-                            continue;
-                        }
-                        body->stamps[t] = stamp;
-                        const DVec3& p0 = body->corners[usize{t} * 3];
-                        const DVec3& p1 = body->corners[usize{t} * 3 + 1];
-                        const DVec3& p2 = body->corners[usize{t} * 3 + 2];
-                        if (overlaps(lower(lower(p0, p1), p2), upper(upper(p0, p1), p2), b.origin, far_corner)) {
-                            b.water.push_back({to_camera_relative(p0, b.origin), to_camera_relative(p1, b.origin),
-                                               to_camera_relative(p2, b.origin), body->color});
-                        }
-                    }
-                }
-            }
+            b.queued_at = m_updates;
             m_builds.push_back(job);
-            m_gathering = job; // its instances copied next, a few hundred between looks at the clock
-            return true;
+            m_building.emplace(key, job.get());
+            ++started;
+            if (!m_prepare_on_workers) {
+                b.state.store(Build::k_for_main, std::memory_order_release);
+                return true; // one a call: update begins it
+            }
+            if (water_over(b.box)) {
+                // Water's triangles are stamped as they are taken: the main thread's to begin,
+                // with no trip to a worker first.
+                b.state.store(Build::k_for_main, std::memory_order_release);
+                if (started % 64 == 0 && out_of_time()) {
+                    submit_batch();
+                    return true;
+                }
+                continue;
+            }
+            b.state.store(Build::k_waiting, std::memory_order_release);
+            m_batch.push_back(std::move(job));
+            if (m_batch.size() >= k_batch) {
+                submit_batch();
+            }
+            if (started % 64 == 0 && out_of_time()) {
+                submit_batch();
+                return true;
+            }
         }
     }
-    return emptied > 0;
+    submit_batch();
+    return started > 0;
+}
+
+JobSystem& VoxelScene::next_workers(u32 builds) {
+    const u32 base = m_build_jobs.worker_count();
+    const u32 all = base + (m_helping && m_more_jobs != nullptr ? m_more_jobs->worker_count() : 0u);
+    const bool more = m_submitted++ % all >= base;
+    m_more_handed += more ? builds : 0u;
+    return more ? *m_more_jobs : m_build_jobs;
+}
+
+void VoxelScene::submit_batch() {
+    if (m_batch.empty()) {
+        return;
+    }
+    JobSystem& jobs = next_workers(static_cast<u32>(m_batch.size()));
+    jobs.submit(m_build_group, [this, batch = std::move(m_batch)] {
+        for (const std::shared_ptr<Build>& b : batch) {
+            work(*b);
+        }
+    });
+    m_batch.clear();
+}
+
+bool VoxelScene::work(Build& b) {
+    u32 expected = Build::k_waiting;
+    if (!b.state.compare_exchange_strong(expected, Build::k_running, std::memory_order_acq_rel)) {
+        return false; // another thread has it, or it was dropped
+    }
+    static thread_local FindScratch scratch;
+    if (scratch.scene != m_serial) {
+        scratch.scene = m_serial;
+        scratch.seen.clear();
+        scratch.stamp = 0;
+    }
+    // (Room for every copy made ready before the scene is held: megabytes, the first time.)
+    if (const usize copies = m_copy_count.load(std::memory_order_relaxed); scratch.seen.size() < copies) {
+        scratch.seen.resize(copies, 0);
+    }
+    // A share of the scene, only to find what is over this one brick and copy it out; never taken
+    // while the main thread wants the whole (it would wait on one brick after another).
+    for (;;) {
+        m_writing.wait(true, std::memory_order_acquire);
+        m_scene_lock.lock_shared();
+        if (!m_writing.load(std::memory_order_acquire)) {
+            break;
+        }
+        m_scene_lock.unlock_shared();
+    }
+    const bool taken = take(b, scratch);
+    m_scene_lock.unlock_shared();
+    if (!taken || !prepare(b, scratch)) {
+        b.state.store(Build::k_for_main, std::memory_order_release);
+        return true;
+    }
+    b.prepared = true;
+    b.build_voxels();
+    b.state.store(Build::k_built, std::memory_order_release);
+    return true;
+}
+
+bool VoxelScene::take(const Build& b, FindScratch& scratch) const {
+    if (water_over(b.box)) {
+        return false; // (its triangles are stamped as they are taken: the main thread's)
+    }
+    if (!find_into(b.box, scratch.found, scratch.seen, scratch.stamp, k_worker_items)) {
+        return false; // too many to find and copy in one go: copied a slice a frame, as before
+    }
+    scratch.copies.clear();
+    for (const u32 i : scratch.found) {
+        scratch.copies.push_back(m_copies[i]);
+    }
+    return true;
+}
+
+bool VoxelScene::prepare(Build& b, FindScratch& scratch) {
+    std::vector<Copy>& found = scratch.copies;
+    bool ruled = false;
+    std::shared_ptr<MeshCache> hold; // (a mesh forgotten meanwhile: its entry stays while looked at)
+    if (m_ruling_out && !found.empty()) {
+        // Most bricks under an instance's bounds have none of its triangles near (the air over a
+        // slope's ground and the earth under it): told from the mesh's grid, far cheaper than
+        // building each to find it empty. (Runs of one mesh look it up once.)
+        MeshId last = k_no_mesh;
+        MeshCache* cache = nullptr;
+        bool known = false;
+        bool have = false;
+        bool unknown = false;
+        const double voxel = static_cast<double>(b.voxel_size);
+        std::erase_if(found, [&](const Copy& copy) {
+            if (!have || copy.instance.mesh != last) {
+                cache = known_mesh(copy.instance.mesh, known, &hold);
+                last = copy.instance.mesh;
+                have = true;
+            }
+            if (!known) {
+                unknown = true;
+                return false;
+            }
+            return cache == nullptr || !may_touch(copy, *cache, b.box, voxel); // (no mesh: a build skips it too)
+        });
+        if (unknown) {
+            return false;
+        }
+        ruled = found.empty();
+    }
+    b.items.reserve(found.size());
+    GatherRun run;
+    for (const Copy& copy : found) {
+        if (!gather_item(b, copy, run, nullptr)) {
+            b.items.clear();
+            b.meshes.clear();
+            b.cuts.clear();
+            return false;
+        }
+    }
+    b.ruled = ruled;
+    b.count = static_cast<u32>(b.items.size());
+    return true;
+}
+
+void VoxelScene::begin_here(const std::shared_ptr<Build>& job, const MeshLookup& meshes) {
+    Build& b = *job;
+    if (!m_clipmap.contains(b.level, b.brick)) {
+        b.state.store(Build::k_built, std::memory_order_release); // left the window: dropped as it is placed
+        return;
+    }
+    ++m_begun_here;
+    find(b.box);
+    bool ruled = false;
+    if (m_ruling_out && !m_found.empty()) {
+        const double voxel = static_cast<double>(b.voxel_size);
+        MeshId last = k_no_mesh;
+        MeshCache* cache = nullptr;
+        bool have = false;
+        std::erase_if(m_found, [&](u32 i) {
+            const Copy& copy = m_copies[i];
+            if (!have || copy.instance.mesh != last) {
+                cache = mesh_cache(copy.instance.mesh, meshes);
+                last = copy.instance.mesh;
+                have = true;
+            }
+            return cache == nullptr || !may_touch(copy, *cache, b.box, voxel);
+        });
+        ruled = m_found.empty();
+    }
+    b.ruled = ruled;
+    if (m_found.empty() && !water_over(b.box)) {
+        // Nothing over it: done, with nothing in it.
+        b.count = 0;
+        b.state.store(Build::k_built, std::memory_order_release);
+        return;
+    }
+    b.found = m_found;
+    b.next = 0;
+    b.items.reserve(m_found.size());
+    gather_water(b);
+    b.state.store(Build::k_gathering, std::memory_order_release);
+    m_gathering = job; // its instances copied next, a few hundred between looks at the clock
+}
+
+void VoxelScene::gather_water(Build& b) {
+    // Water's surfaces over it: each triangle once (the bodies as they are now; a change
+    // meanwhile sets `again`).
+    const DVec3 far_corner = b.box.max;
+    const u32 stamp = ++m_water_stamp;
+    for (const auto& body : m_water) {
+        if (!overlaps(body->box.min, body->box.max, b.origin, far_corner)) {
+            continue;
+        }
+        for (const WaterPiece& piece : body->pieces) {
+            if (!overlaps(piece.box.min, piece.box.max, b.origin, far_corner)) {
+                continue;
+            }
+            for (const u32 t : piece.triangles) {
+                if (body->stamps[t] == stamp) {
+                    continue;
+                }
+                body->stamps[t] = stamp;
+                const DVec3& p0 = body->corners[usize{t} * 3];
+                const DVec3& p1 = body->corners[usize{t} * 3 + 1];
+                const DVec3& p2 = body->corners[usize{t} * 3 + 2];
+                if (overlaps(lower(lower(p0, p1), p2), upper(upper(p0, p1), p2), b.origin, far_corner)) {
+                    b.water.push_back({to_camera_relative(p0, b.origin), to_camera_relative(p1, b.origin),
+                                       to_camera_relative(p2, b.origin), body->color});
+                }
+            }
+        }
+    }
+}
+
+bool VoxelScene::gather_item(Build& b, const Copy& copy, GatherRun& run, const MeshLookup* meshes) {
+    const Instance& in = copy.instance;
+    const float s = max_abs_scale(in.scale);
+    if (!(s > 0.0f) || !std::isfinite(s)) {
+        return true;
+    }
+    // Detail to half a voxel: the cut whose error is the power of
+    // two at or under that (shared by instances of similar scale).
+    const float wanted = 0.5f * b.voxel_size / s;
+    const i32 exponent = static_cast<i32>(std::clamp(std::floor(std::log2(wanted)), -40.0f, 40.0f));
+    const bool fresh = !run.have || in.mesh != run.last_mesh || exponent != run.last_exponent;
+    bool known = true;
+    std::shared_ptr<MeshCache> hold;
+    const auto look_up = [&]() -> MeshCache* {
+        return meshes != nullptr ? mesh_cache(in.mesh, *meshes) : known_mesh(in.mesh, known, &hold);
+    };
+    MeshCache* m = fresh ? look_up() : nullptr;
+    if (!known) {
+        return false;
+    }
+    if (fresh && m == nullptr) {
+        return true;
+    }
+    // A point needs the cut's sums (Build::build_voxels), the rest only its clusters: kept apart,
+    // so a fine cut of a dense mesh is not walked triangle by triangle for nothing.
+    const geometry::ClusterMesh& mesh = fresh ? *m->mesh : *b.meshes.back();
+    const bool point = mesh.bounds.radius * s <= k_point_share * b.voxel_size;
+    if (fresh || point != run.last_point) {
+        if (m == nullptr) {
+            m = look_up();
+            if (!known) {
+                return false;
+            }
+            if (m == nullptr) {
+                return true;
+            }
+        }
+        b.meshes.push_back(m->mesh);
+        b.cuts.push_back(cut_for(*m, exponent, point));
+        run.have = true;
+        run.last_mesh = in.mesh;
+        run.last_exponent = exponent;
+        run.last_point = point;
+    }
+    Build::Item item;
+    item.position = in.position;
+    item.rotation = in.rotation;
+    item.scale = in.scale;
+    item.color = copy.color;
+    item.coverage = copy.coverage;
+    item.canopy = copy.canopy;
+    item.stand_in = copy.stand_in;
+    item.mesh = static_cast<u32>(b.meshes.size() - 1);
+    item.cut = static_cast<u32>(b.cuts.size() - 1);
+    b.items.push_back(item);
+    return true;
 }
 
 bool VoxelScene::gather(const MeshLookup& meshes, const std::function<bool()>& out_of_time) {
     Build& b = *m_gathering;
-    // Runs of one mesh at one detail (a scatter cell's) look it up once.
-    MeshId last_mesh = k_no_mesh;
-    i32 last_exponent = 0;
-    bool last_point = false;
-    bool have = false; // looked one up in this call
+    GatherRun run; // (of this call: what it copied in an earlier one may have changed since)
     bool looked = false;
     while (b.next < b.found.size()) {
         if (b.next % 256 == 0 && looked && out_of_time()) {
@@ -1739,55 +2052,9 @@ bool VoxelScene::gather(const MeshLookup& meshes, const std::function<bool()>& o
         }
         looked = true;
         const u32 i = b.found[b.next++];
-        if (i >= m_copies.size()) {
-            continue; // removed meanwhile (`again` is set)
+        if (i < m_copies.size()) { // (else removed meanwhile: `again` is set)
+            gather_item(b, m_copies[i], run, &meshes);
         }
-        const Copy& copy = m_copies[i];
-        const Instance& in = copy.instance;
-        const float s = max_abs_scale(in.scale);
-        if (!(s > 0.0f) || !std::isfinite(s)) {
-            continue;
-        }
-        // Detail to half a voxel: the cut whose error is the power of
-        // two at or under that (shared by instances of similar scale).
-        const float wanted = 0.5f * b.voxel_size / s;
-        const i32 exponent = static_cast<i32>(std::clamp(std::floor(std::log2(wanted)), -40.0f, 40.0f));
-        const bool fresh = !have || in.mesh != last_mesh || exponent != last_exponent;
-        MeshCache* m = fresh ? mesh_cache(in.mesh, meshes) : nullptr;
-        if (fresh && m == nullptr) {
-            continue;
-        }
-        // A point needs the cut's sums (Build::run), the rest only its clusters: kept apart, so a
-        // fine cut of a dense mesh is not walked triangle by triangle for nothing.
-        const geometry::ClusterMesh& mesh = fresh ? *m->mesh : *b.meshes.back();
-        const bool point = mesh.bounds.radius * s <= k_point_share * b.voxel_size;
-        if (fresh || point != last_point) {
-            if (m == nullptr && (m = mesh_cache(in.mesh, meshes)) == nullptr) {
-                continue;
-            }
-            const i32 key = exponent * 2 + (point ? 1 : 0);
-            auto cut_it = m->cuts.find(key);
-            if (cut_it == m->cuts.end()) {
-                cut_it = m->cuts.emplace(key, std::make_shared<const Cut>(cut(*m->mesh, std::ldexp(1.0f, exponent), point))).first;
-            }
-            b.meshes.push_back(m->mesh);
-            b.cuts.push_back(cut_it->second);
-            have = true;
-            last_mesh = in.mesh;
-            last_exponent = exponent;
-            last_point = point;
-        }
-        Build::Item item;
-        item.position = in.position;
-        item.rotation = in.rotation;
-        item.scale = in.scale;
-        item.color = copy.color;
-        item.coverage = copy.coverage;
-        item.canopy = copy.canopy;
-        item.stand_in = copy.stand_in;
-        item.mesh = static_cast<u32>(b.meshes.size() - 1);
-        item.cut = static_cast<u32>(b.cuts.size() - 1);
-        b.items.push_back(item);
     }
     b.found.clear();
     b.found.shrink_to_fit();
@@ -1804,12 +2071,7 @@ bool VoxelScene::gather(const MeshLookup& meshes, const std::function<bool()>& o
         m_inline_ms += (took - m_inline_ms) * 0.125;
     } else {
         b.queued_at = m_updates;
-        const u32 base = m_build_jobs.worker_count();
-        const u32 all = base + (m_helping && m_more_jobs != nullptr ? m_more_jobs->worker_count() : 0u);
-        const bool more = m_submitted++ % all >= base;
-        m_more_handed += more ? 1u : 0u;
-        JobSystem& jobs = more ? *m_more_jobs : m_build_jobs;
-        jobs.submit(m_build_group, [job = m_gathering] { job->run(); });
+        next_workers(1).submit(m_build_group, [job = m_gathering] { job->run(); });
     }
     m_gathering.reset();
     return true;
@@ -1826,26 +2088,30 @@ bool VoxelScene::finish_build(rhi::CommandList& cmd, bool& pool_writable, const 
 }
 
 void VoxelScene::cancel_builds(bool all) {
-    for (auto it = m_builds.begin(); it != m_builds.end();) {
-        Build& b = **it;
+    m_touchable_ready = false;
+    std::erase_if(m_builds, [&](const std::shared_ptr<Build>& held) {
+        Build& b = *held;
         if (!all && m_clipmap.contains(b.level, b.brick)) {
-            ++it;
-            continue;
+            return false;
         }
+        // Those no thread has: waiting for one, or the main thread's own.
         u32 expected = Build::k_queued;
-        const bool queued = b.state.compare_exchange_strong(expected, Build::k_cancelled, std::memory_order_acq_rel);
-        if (queued || (*it == m_gathering)) {
-            if (*it == m_gathering) {
-                m_gathering.reset();
-            }
-            if (!all && b.again) {
-                mark(b.level, b.brick); // (no-op: it left the window)
-            }
-            it = m_builds.erase(it);
-        } else {
-            ++it; // under way or done: finished as usual
+        bool dropped = b.state.compare_exchange_strong(expected, Build::k_cancelled, std::memory_order_acq_rel);
+        expected = Build::k_waiting;
+        dropped = dropped || b.state.compare_exchange_strong(expected, Build::k_cancelled, std::memory_order_acq_rel);
+        dropped = dropped || expected == Build::k_for_main || held == m_gathering;
+        if (!dropped) {
+            return false; // under way or done: finished as usual
         }
-    }
+        if (held == m_gathering) {
+            m_gathering.reset();
+        }
+        if (!all && b.again) {
+            mark(b.level, b.brick); // (no-op: it left the window)
+        }
+        m_building.erase(Key{b.level, b.brick});
+        return true;
+    });
 }
 
 bool VoxelScene::place_build(rhi::CommandList& cmd, bool& pool_writable, const Build& build) {
@@ -1860,12 +2126,12 @@ bool VoxelScene::place_build(rhi::CommandList& cmd, bool& pool_writable, const B
     if (m_slots[s] < gpu::k_unbuilt && !here) {
         remove(level, slot, key.brick); // a brick that left the window (entering frees them; never kept)
     }
-    const voxel::Brick& brick = build.result;
-    if (brick.empty()) {
+    if (build.result == nullptr) {
         remove(level, slot, key.brick);
         m_retry.erase(key);
         return true;
     }
+    const voxel::Brick& brick = *build.result;
     u32 index = here ? m_slots[s] : gpu::k_no_brick;
     if (index == gpu::k_no_brick) {
         if (m_free.empty()) {
@@ -1969,6 +2235,63 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     const auto elapsed = [&start] {
         return std::chrono::duration<double, std::milli>(clock::now() - start).count();
     };
+    // Built bricks leave m_builds for the pool: those with something in them while there is time
+    // and uploads left, those with nothing in them (most) always. `for_main`: the first one
+    // found waiting for the main thread to begin it.
+    bool pool_writable = false;
+    std::shared_ptr<Build> for_main;
+    const auto finish_ready = [&](bool empty_only, bool& stepped, bool& failed, bool& timed_out) {
+        for_main.reset();
+        const usize count = m_builds.size();
+        usize keep = 0;
+        usize i = 0;
+        u32 emptied = 0;
+        for (; i < count; ++i) {
+            std::shared_ptr<Build>& held = m_builds[i];
+            const u32 state = held->state.load(std::memory_order_acquire);
+            const bool nothing = state == Build::k_built && held->result == nullptr;
+            const bool placing = state == Build::k_built && (nothing || (!empty_only && m_stats.uploaded < k_max_uploads));
+            // (The clock: before each with something in it, and every 64 with nothing.)
+            if (placing && (nothing ? ++emptied % 64 == 0 : stepped) && elapsed() >= budget) {
+                timed_out = true;
+                break; // one a step, more while there is time
+            }
+            if (!placing) {
+                if (state == Build::k_for_main && for_main == nullptr) {
+                    for_main = held;
+                }
+                if (keep != i) {
+                    m_builds[keep] = std::move(held);
+                }
+                ++keep;
+                continue;
+            }
+            const std::shared_ptr<Build> done = std::move(held);
+            m_building.erase(Key{done->level, done->brick});
+            ++m_stats.built;
+            m_ruled_out += done->ruled ? 1u : 0u;
+            m_prepared_on_workers += done->prepared ? 1u : 0u;
+            m_progress_at = done->prepared ? m_updates : m_progress_at;
+            stepped = stepped || !nothing;
+            if (!finish_build(cmd, pool_writable, *done)) {
+                failed = true;
+                ++i;
+                break;
+            }
+        }
+        for (; i < count; ++i, ++keep) {
+            if (keep != i) {
+                m_builds[keep] = std::move(m_builds[i]);
+            }
+        }
+        m_builds.resize(keep);
+        stepped = stepped || keep != count;
+    };
+    {
+        // Those with nothing in them, before this frame's changes look at every build under way.
+        bool stepped = false, failed = false, timed_out = false;
+        finish_ready(true, stepped, failed, timed_out);
+    }
 
     // Coarse levels' slabs first (recenter lists them finest first).
     const std::vector<voxel::BrickBox> entered = m_clipmap.recenter(camera);
@@ -2006,8 +2329,11 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         }
         m_again = std::move(kept);
     }
-    const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells);
-    see_changes(instances, materials, only ? &m_changed_cells : nullptr, meshes_version, meshes);
+    {
+        const Writing writing(*this); // (the workers stand back while the copies change)
+        const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells);
+        see_changes(instances, materials, only ? &m_changed_cells : nullptr, meshes_version, meshes);
+    }
     // Waiting changes become jobs while the queue is short.
     while (m_jobs.size() < k_max_jobs && !m_region_order.empty()) {
         const u64 key = m_region_order.front();
@@ -2095,15 +2421,18 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         m_jobs.pop_front();
         job_done(done);
     }
-    // Bricks: those built copied to the pool, and more started (coarsest waiting first) while the
-    // workers have room. With time to spare, the main thread builds some itself and waits on the
-    // workers' rather than leave it unused.
-    bool pool_writable = false;
+    // Bricks: those built copied to the pool, and more started (coarsest waiting first) while
+    // fewer than the most are under way. With time to spare, the main thread builds some itself
+    // and waits on the workers' rather than leave it unused.
     bool progress = false; // at least one step a frame
     const bool help = budget >= k_help_ms;
     m_helping = help;
-    // (More under way with more workers to build them: eight a worker.)
-    const usize most_builds = k_most_builds + (help && m_more_jobs != nullptr ? usize{8} * m_more_jobs->worker_count() : 0u);
+    // (Prepared on the workers, a brick under way costs the main thread next to nothing. Prepared
+    // here: more under way with more workers to build them, eight a worker.)
+    const usize most_builds = m_prepare_on_workers ? k_most_under_way
+                                                   : k_most_builds + (help && m_more_jobs != nullptr
+                                                                          ? usize{8} * m_more_jobs->worker_count()
+                                                                          : 0u);
     ++m_updates;
     bool rescued = false; // one build left waiting too long, built here this frame
     const std::function<bool()> out_of_time = [&] { return elapsed() >= budget; };
@@ -2114,24 +2443,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         bool stepped = false;
         bool failed = false;
         bool timed_out = false;
-        for (auto it = m_builds.begin(); it != m_builds.end() && m_stats.uploaded < k_max_uploads;) {
-            if (stepped && elapsed() >= budget) {
-                timed_out = true;
-                break; // one a step, more while there is time
-            }
-            if ((*it)->state.load(std::memory_order_acquire) != Build::k_built) {
-                ++it;
-                continue;
-            }
-            const std::shared_ptr<Build> done = *it;
-            it = m_builds.erase(it);
-            ++m_stats.built;
-            stepped = true;
-            if (!finish_build(cmd, pool_writable, *done)) {
-                failed = true;
-                break;
-            }
-        }
+        finish_ready(false, stepped, failed, timed_out);
         if (failed) {
             break;
         }
@@ -2142,35 +2454,47 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         if (m_gathering != nullptr) {
             gather(meshes, out_of_time);
             stepped = true;
-        } else if (start_build(meshes, out_of_time, m_builds.size() < most_builds)) {
-            // (with the workers full, only those with nothing over them, emptied here)
+        } else if (for_main != nullptr) {
+            // One a worker left (water over it, or too much): found and copied here.
+            begin_here(for_main, meshes);
             if (m_gathering != nullptr) {
                 gather(meshes, out_of_time); // (most bricks are over a few instances: done at once)
             }
             stepped = true;
+        } else if (start_build(out_of_time, most_builds)) {
+            stepped = true;
         } else if (help && !m_builds.empty()) {
-            // None more to start: build one here (the smallest waiting, and only in the first
-            // half of the budget, as a whole brick is not split), or wait for the workers'.
+            // None more to start: build one here (the smallest copied, else the last handed to
+            // the workers, and only in the first half of the budget, as a whole brick is not
+            // split), or wait for the workers'.
             Build* smallest = nullptr;
+            Build* waiting = nullptr;
             if (elapsed() < budget * 0.5) {
                 for (const std::shared_ptr<Build>& b : m_builds) {
-                    if (b->state.load(std::memory_order_acquire) == Build::k_queued &&
-                        (smallest == nullptr || b->count < smallest->count)) {
+                    const u32 state = b->state.load(std::memory_order_acquire);
+                    if (state == Build::k_queued && (smallest == nullptr || b->count < smallest->count)) {
                         smallest = b.get();
+                    } else if (state == Build::k_waiting) {
+                        waiting = b.get();
                     }
                 }
             }
-            if (smallest == nullptr || !smallest->run()) {
+            const bool built = smallest != nullptr ? smallest->run() : waiting != nullptr && work(*waiting);
+            if (!built) {
                 std::this_thread::yield();
             }
             stepped = true;
         }
         if (!stepped && !rescued) {
             for (const std::shared_ptr<Build>& b : m_builds) {
-                if (b->state.load(std::memory_order_acquire) == Build::k_queued &&
+                const u32 state = b->state.load(std::memory_order_acquire);
+                // (One waiting to be prepared: only when the workers have finished none for as
+                // long, with no core to run on. Else it is behind others, and its turn comes.)
+                if ((state == Build::k_queued ||
+                     (state == Build::k_waiting && m_updates - m_progress_at > k_most_waiting_updates)) &&
                     m_updates - b->queued_at > k_most_waiting_updates) {
                     rescued = true;
-                    stepped = b->run();
+                    stepped = state == Build::k_queued ? b->run() : work(*b);
                     break;
                 }
             }
@@ -2232,6 +2556,7 @@ void VoxelScene::idle() {
         const std::shared_ptr<Build> b = m_gathering;
         m_gathering.reset();
         m_builds.erase(std::find(m_builds.begin(), m_builds.end(), b));
+        m_building.erase(Key{b->level, b->brick});
         mark(b->level, b->brick);
     }
     m_placed.clear();

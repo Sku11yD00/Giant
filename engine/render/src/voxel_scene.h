@@ -45,6 +45,8 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -154,7 +156,11 @@ public:
     // Bricks emptied without a build because no instance over them has a triangle near, ever
     // (tests), and that check switched off (tests: every such brick is built, and comes out empty).
     u64 ruled_out() const { return m_ruled_out; }
-    void set_ruling_out(bool on) { m_ruling_out = on; }
+    void set_ruling_out(bool on) { m_ruling_out.store(on, std::memory_order_relaxed); }
+    // Bricks prepared on the main thread as before (tests: the world built is the same).
+    void set_preparing_on_workers(bool on) { m_prepare_on_workers = on; }
+    u64 prepared_on_workers() const { return m_prepared_on_workers; } // ever (tests)
+    u64 begun_on_main_thread() const { return m_begun_here; } // those a worker could not prepare, ever (tests)
     u64 handed_to_more_workers() const { return m_more_handed; } // builds given to the loading screen's workers, ever (tests)
 
     // Whether the voxel world shows instance `index` (of the last update's
@@ -244,13 +250,13 @@ private:
         // left empty for a mesh of too many triangles to walk in a frame (nothing is ruled out).
         static constexpr u32 k_grid = 16;
         static constexpr u32 k_grid_triangles = 1u << 15;
-        bool grid_made = false;
+        std::atomic<bool> grid_ready{false}; // (made under m_mesh_mutex, read by the workers once set)
         std::vector<u16> grid;
         Vec3 grid_min{};
         Vec3 grid_max{};
     };
     // A brick being built away from the main thread (start_build): what it is built from, copied
-    // when it started, and the result.
+    // out of the scene by the thread that prepares it, and the result.
     struct Build {
         struct Item { // an instance over it, as it was
             DVec3 position{};
@@ -271,6 +277,13 @@ private:
         // running; built: `result` is ready.
         // Cancelled: dropped before a thread took it (it left the window, or the scene is going).
         static constexpr u32 k_gathering = 0, k_queued = 1, k_running = 2, k_built = 3, k_cancelled = 4;
+        // Waiting: handed to the workers with nothing found yet; one of them finds what is over
+        // it, copies it and builds it (VoxelScene::work). For main: a worker met something only
+        // the main thread does (water over it, a mesh never looked up): started there instead.
+        static constexpr u32 k_waiting = 5, k_for_main = 6;
+        Box box;               // its bounds, world
+        bool ruled = false;    // emptied because no instance over it has a triangle near
+        bool prepared = false; // by work(), not the main thread's gather
 
         u32 level = 0;
         voxel::BrickCoord brick{};
@@ -283,8 +296,7 @@ private:
         std::vector<std::shared_ptr<const geometry::ClusterMesh>> meshes;
         std::vector<std::shared_ptr<const Cut>> cuts;
         std::vector<WaterTriangle> water;
-        voxel::BrickBuilder builder;
-        voxel::Brick result;
+        std::unique_ptr<const voxel::Brick> result; // (built) null: nothing in it
         std::vector<u32> found; // (gathering) the instances over it, and the next to copy
         u32 next = 0;
         u32 count = 0;          // items, once gathered (items itself is the builder's then)
@@ -294,6 +306,14 @@ private:
 
         // Builds it, if no other thread has begun (true if this one did).
         bool run();
+        void build_voxels(); // items and water into `result`, on the thread that has it
+        // Nothing of the scene read for it yet (whatever changes, it is built from what is there
+        // after). Only for the main thread to ask while it holds the scene (Writing), or of a
+        // change already made.
+        bool untouched() const {
+            const u32 s = state.load(std::memory_order_acquire);
+            return s == k_waiting || s == k_for_main;
+        }
     };
     enum class JobKind : u8 {
         find,    // mark the bricks under the instances over the box, then
@@ -340,6 +360,9 @@ private:
     void grid_erase(u32 index);
     void grid_rebuild();
     void find(const Box& box); // into m_found, each instance once
+    // The same into the caller's own (a worker's): `seen` and `stamp` are its, kept between calls.
+    // `most`: given up (false) once more than that are found, or far more looked at.
+    bool find_into(const Box& box, std::vector<u32>& found, std::vector<u32>& seen, u32& stamp, usize most) const;
 
     // `only`: the cells to compare (the rest are as last time); null: all.
     void see_changes(std::span<const Instance> instances, std::span<const Material> materials,
@@ -361,16 +384,50 @@ private:
     bool run_job(Job& job, const OutOfTime& out_of_time);
     void job_done(const Job& job);
 
-    // Starts building the next brick waiting (m_gathering) if there is `room`; false if none waits
-    // or none fits. Those with nothing over them are emptied on the way, room or not, until out of
-    // time (true, with no m_gathering).
-    bool start_build(const MeshLookup& meshes, const std::function<bool()>& out_of_time, bool room);
+    // Starts the bricks waiting, coarsest level first, until `most` are under way or out of time:
+    // each handed to the workers to prepare and build (or, with that switched off, left for the
+    // main thread to begin, one a call). False if none was started.
+    bool start_build(const std::function<bool()>& out_of_time, usize most);
+    // The workers the next job goes to (the loading screen's get their share), a job of that many builds.
+    JobSystem& next_workers(u32 builds);
+    // Bricks are prepared on the workers (start_build only hands them their keys, a batch a job):
+    // each finds what is over its brick and copies it out, reading the copies, their grid and the
+    // water's boxes under m_scene_lock; then rules out what has no triangle near and builds.
+    struct FindScratch {
+        std::vector<u32> found;
+        std::vector<Copy> copies; // those found, as they were while the scene was held
+        std::vector<u32> seen;
+        u32 stamp = 0;
+        u64 scene = 0; // whose `seen` it holds (a thread may work for one scene after another)
+    };
+    struct GatherRun { // runs of one mesh at one detail (a scatter cell's) look it up once
+        MeshId last_mesh = ~MeshId{0};
+        i32 last_exponent = 0;
+        bool last_point = false;
+        bool have = false;
+    };
+    void submit_batch();
+    bool work(Build& build); // a worker, or the main thread helping: false if another has it
+    // With a share of the scene held: what is over the brick, copied into the scratch. Then, with
+    // none: ruled out, the rest made the build's items. False from either: the main thread's to
+    // begin (begin_here).
+    bool take(const Build& build, FindScratch& scratch) const;
+    bool prepare(Build& build, FindScratch& scratch);
+    void begin_here(const std::shared_ptr<Build>& build, const MeshLookup& meshes);
+    void gather_water(Build& build);
+    // Copies an instance into the build. `meshes` null (a worker): false when its mesh was never
+    // looked up, which only the main thread may do.
+    bool gather_item(Build& build, const Copy& copy, GatherRun& run, const MeshLookup* meshes);
+    // The cache entry of a mesh already looked up (`known`; null: the mesh is missing). `hold`:
+    // keeps it for a caller that is not the main thread.
+    MeshCache* known_mesh(MeshId id, bool& known, std::shared_ptr<MeshCache>* hold);
+    std::shared_ptr<const Cut> cut_for(MeshCache& cache, i32 exponent, bool point);
+    void ensure_grid(MeshCache& cache);
     // Whether the instance's triangles may reach into `box` (world; a brick of voxels `voxel`
     // wide, taken two voxels wider each way for the simplified cuts a build draws): false only when
     // its mesh has none there, by the mesh's grid. An instance small enough to be built as a
     // point always may.
-    bool may_touch(const Copy& copy, const MeshLookup& meshes, const Box& box, double voxel);
-    static void make_grid(MeshCache& cache);
+    bool may_touch(const Copy& copy, MeshCache& cache, const Box& box, double voxel);
     // Copies what is over m_gathering, until done (then a worker builds it: true) or out of time.
     bool gather(const MeshLookup& meshes, const std::function<bool()>& out_of_time);
     // Copies a built brick to the pool (and marks it again if something over it changed
@@ -490,7 +547,8 @@ private:
     u32 m_find_stamp = 0;
     std::vector<u32> m_found;
     u64 m_meshes_version = ~u64{0};
-    std::unordered_map<MeshId, MeshCache> m_meshes;
+    // (Shared: a worker looking at an entry keeps it though the mesh is forgotten meanwhile.)
+    std::unordered_map<MeshId, std::shared_ptr<MeshCache>> m_meshes;
     std::vector<MeshId> m_forgotten; // by forget_mesh, for the next see_changes
     // Cached as missing: looked up again when the meshes change (the rest stay as they are until
     // forget_mesh: a mesh never changes once added, so the cache is not walked every time one is
@@ -498,18 +556,49 @@ private:
     std::unordered_set<MeshId> m_missing;
 
     // Bricks being built, on m_build_jobs' workers (or, with time to spare, the main thread),
-    // each from what was over it when it started (so changes meanwhile cannot touch it: they set
-    // `again`, and it is built once more after). Copied to the pool as each is done.
+    // each from what was over it when the thread preparing it copied that out (so changes after
+    // cannot touch it: they set `again`, and it is built once more after). Copied to the pool as
+    // each is done.
     std::deque<std::shared_ptr<Build>> m_builds;
     std::shared_ptr<Build> m_gathering; // the one of them whose instances are being copied
+    std::vector<std::shared_ptr<Build>> m_batch; // waiting ones not handed to a worker yet
+    std::unordered_map<Key, Build*, KeyHash> m_building; // m_builds by brick
+    // The builds a change must look at (touch_building): those that have read the scene, listed
+    // the first time one is asked for while the scene is held (Writing), and again the next time.
+    std::vector<Build*> m_touchable;
+    bool m_touchable_ready = false;
+    u64 m_serial = 0; // this scene among all ever made (FindScratch::scene)
+    bool m_prepare_on_workers = true;
+    u64 m_prepared_on_workers = 0;
+    u64 m_begun_here = 0;
+    u64 m_progress_at = 0; // the update a brick a worker prepared was last finished in
+    std::atomic<usize> m_copy_count{0}; // m_copies.size(), for a worker to size its scratch by
+    // What the workers read while they prepare bricks (the copies, the grid they are filed in,
+    // the water's boxes) changes only while the main thread holds this whole (Writing); a worker
+    // holds a share of it to find and copy out what is over one brick (microseconds: the main
+    // thread waits for it), and stands back while m_writing.
+    std::shared_mutex m_scene_lock;
+    std::atomic<bool> m_writing{false};
+    struct Writing {
+        explicit Writing(VoxelScene& voxels);
+        ~Writing();
+        Writing(const Writing&) = delete;
+        Writing& operator=(const Writing&) = delete;
+        VoxelScene& scene;
+    };
+    // The mesh cache's map, and each mesh's cuts and grid as they are made.
+    std::mutex m_mesh_mutex;
     u64 m_updates = 0; // update() calls, for how long a build has waited for a worker
     double m_inline_ms = 0.0;  // what a small build on the main thread has been taking (a running average)
     u32 m_inline_skipped = 0;  // small builds handed to the workers since the last built here
-    bool building(const Key& key) const; // in m_builds
+    bool building(const Key& key) const { return m_building.count(key) != 0; } // in m_builds
     WaitGroup m_build_group; // (counted only, never waited on: its jobs run on two JobSystems)
     VoxelStats m_stats;
     bool m_overflow_logged = false;
-    JobSystem m_build_jobs; // last: destroyed (finishing its builds) first
+    // The two job systems last but for plain values: destroyed (finishing their jobs) before
+    // everything above, which their jobs use (work() reads the scene through `this`). Nothing
+    // with a destructor may be declared after them.
+    JobSystem m_build_jobs;
     // More of them behind a loading screen (none: no cores for them), given every (base + more)th
     // build past the base's share while update's budget says so.
     std::unique_ptr<JobSystem> m_more_jobs;
@@ -517,11 +606,7 @@ private:
     u32 m_submitted = 0;
     u64 m_more_handed = 0; // builds given to m_more_jobs, ever
     u64 m_ruled_out = 0;
-    // Instances may_touch looked at since start_build last looked at the clock (a grid made
-    // counts as k_touch_work of them).
-    static constexpr u32 k_touch_work = 1024;
-    u32 m_touch_work = 0;
-    bool m_ruling_out = true;
+    std::atomic<bool> m_ruling_out{true}; // (read by the workers)
 };
 
 } // namespace giant::render
