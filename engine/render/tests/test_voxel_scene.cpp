@@ -836,13 +836,14 @@ GIANT_TEST("voxel scene: bricks waiting on the workers survive a jump, a mesh fo
                          static_cast<double>(i / 30 % 10) * 0.5 - 2.0};
         b.instances.push_back(cube);
     }
-    // A zero budget hands bricks over and takes few back: many wait (once the bricks are found,
-    // a step of that a frame).
-    const auto until_many_wait = [&] {
-        for (int i = 0; i < 2000 && b.voxels->stats().building <= 8; ++i) b.step(0.0f);
-        GIANT_CHECK(b.voxels->stats().building > 8);
+    // A zero budget hands bricks over and takes back only what was done by the next frame: some
+    // are under way after any frame that started one (how many is the machine's: the bricks are
+    // found a step a frame, and a fast worker has built each by the next).
+    const auto until_some_wait = [&] {
+        for (int i = 0; i < 2000 && b.voxels->stats().building == 0; ++i) b.step(0.0f);
+        GIANT_CHECK(b.voxels->stats().building > 0);
     };
-    until_many_wait();
+    until_some_wait();
     // A jump 300 m away with them waiting, then the mesh under them forgotten and back.
     b.camera = {300.0, 0.0, 0.0};
     b.step(0.0f);
@@ -863,7 +864,7 @@ GIANT_TEST("voxel scene: bricks waiting on the workers survive a jump, a mesh fo
     GIANT_CHECK(b.voxels->probe(0, {300.0, 4.0, 0.0}) == VoxelProbe::empty);
     // Back, and gone with bricks waiting (the workers stop first; nothing is read after).
     b.camera = {0.0, 0.0, 0.0};
-    until_many_wait();
+    until_some_wait();
     b.voxels.reset();
 }
 
