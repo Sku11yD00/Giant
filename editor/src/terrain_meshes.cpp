@@ -151,6 +151,7 @@ TerrainMeshes::TerrainMeshes(render::Renderer* renderer) : m_renderer(renderer) 
 
 TerrainMeshes::~TerrainMeshes() {
     m_jobs.wait(m_builds);
+    m_more.wait();
     if (m_renderer != nullptr) {
         for (const auto& [cell, tile] : m_tiles) {
             if (tile.mesh != render::k_no_mesh) m_renderer->remove_mesh(tile.mesh);
@@ -199,7 +200,10 @@ void TerrainMeshes::start(world::CellCoord cell, Tile& tile, TileHeights heights
     tile.wanted = ++m_serial;
     tile.in_flight = true;
     ++m_in_flight;
-    m_jobs.submit(m_builds, [this, cell, serial = tile.wanted, hash, heights = std::move(heights)] {
+    JobSystem* const more = m_more.next(more_workers, m_jobs.worker_count());
+    JobSystem& jobs = more != nullptr ? *more : m_jobs;
+    jobs.submit(more != nullptr ? m_more.group() : m_builds,
+                [this, cell, serial = tile.wanted, hash, heights = std::move(heights)] {
         TileSurface surface = tile_surface(heights);
         Result r;
         r.cell = cell;
@@ -382,6 +386,7 @@ void TerrainMeshes::finish(world::Terrain& terrain) {
         m_waiting.clear();
         if (m_queue.empty() && m_in_flight == 0 && m_arrived.empty()) break;
         m_jobs.wait(m_builds);
+        m_more.wait();
     }
     m_finishing = false;
     m_last_changes = std::move(taken);

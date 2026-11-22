@@ -782,6 +782,7 @@ int run(const Options& options) {
             const bool loading = state.menus != nullptr && state.menus->loading().on;
             const u32 most = loading ? editor::TerrainMeshes::k_loading_per_frame : editor::TerrainMeshes::k_per_frame;
             terrain_meshes.builds_per_frame = terrain_meshes.uploads_per_frame = terrain_meshes.builds_in_flight = most;
+            terrain_meshes.more_workers = loading ? editor::MoreWorkers::for_loading() : 0u;
         }
         terrain_meshes.update(state.scene.terrain);
         terrain_paint.update(state.scene.terrain, *renderer);
@@ -794,6 +795,7 @@ int run(const Options& options) {
             // Behind a game's loading screen the plants are placed as fast as the machine can.
             const bool loading = state.menus != nullptr && state.menus->loading().on;
             scatter.cells_in_flight = loading ? editor::ScatterPlacer::k_loading_cells_in_flight : editor::ScatterPlacer::k_cells_in_flight;
+            scatter.more_workers = loading ? editor::MoreWorkers::for_loading() : 0u;
             scatter.instances_per_frame =
                 loading ? editor::ScatterPlacer::k_loading_instances_per_frame : editor::ScatterPlacer::k_instances_per_frame;
         }
@@ -1200,13 +1202,16 @@ int run(const Options& options) {
             // (Behind a game's loading screen, cells read are put in the scene whole frames' worth at once.)
             const u32 a_frame = world_streaming.settings.entities_per_frame;
             const u32 at_once = world_streaming.settings.reads_in_flight;
+            const u32 readers = world_streaming.settings.more_readers;
             if (state.menus != nullptr && state.menus->loading().on) {
                 world_streaming.settings.entities_per_frame = std::max(a_frame, editor::k_loading_entities_per_frame);
                 world_streaming.settings.reads_in_flight = std::max(at_once, editor::k_loading_reads_in_flight);
+                world_streaming.settings.more_readers = std::max(readers, editor::MoreWorkers::for_loading());
             }
             world_streaming.update(state.scene, state.scene_generation, state.camera.position, scene_frame);
             world_streaming.settings.entities_per_frame = a_frame;
             world_streaming.settings.reads_in_flight = at_once;
+            world_streaming.settings.more_readers = readers;
         }
         mark(editor::FramePhase::streaming);
         if (state.selected != 0 && state.scene.find(state.selected) == nullptr) {

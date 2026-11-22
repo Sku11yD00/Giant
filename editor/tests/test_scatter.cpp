@@ -109,6 +109,33 @@ GIANT_TEST("scatter placer: cells with ground are placed as the rules say, again
     GIANT_CHECK(p.stats().cells == 0 && p.stats().points == 0);
 }
 
+GIANT_TEST("scatter placer: a loading screen's extra workers place the same things") {
+    world::Scene scene;
+    flat(scene.terrain, 0, 0, 3, 3);
+    scene.scatter.push_back(stones());
+    ScatterPlacer own;
+    own.finish(scene, {});
+    ScatterPlacer more;
+    more.more_workers = 2;
+    more.finish(scene, {});
+    // Half the sixteen cells went to the two more (two are its own), and each cell holds the same.
+    GIANT_CHECK(own.handed_to_more_workers() == 0 && more.handed_to_more_workers() == 8);
+    GIANT_CHECK(more.stats().cells == 16 && more.stats().points == own.stats().points && more.stats().building == 0);
+    for (i32 z = 0; z < 4; ++z) {
+        for (i32 x = 0; x < 4; ++x) {
+            const ScatterPlacer::Cell* a = own.find({x, z});
+            const ScatterPlacer::Cell* b = more.find({x, z});
+            GIANT_CHECK(a != nullptr && b != nullptr && a->points.size() == b->points.size());
+            GIANT_CHECK(a->points[7].transform == b->points[7].transform);
+        }
+    }
+    // In play again: its own two only.
+    more.more_workers = 0;
+    scene.scatter[0].density = 0.5f;
+    more.finish(scene, {});
+    GIANT_CHECK(more.handed_to_more_workers() == 8 && more.stats().building == 0);
+}
+
 GIANT_TEST("scatter placer: a frame swaps in a budget of instances, a whole cell at a time") {
     world::Scene scene;
     flat(scene.terrain, 0, 0, 3, 0);

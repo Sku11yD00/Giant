@@ -9,6 +9,8 @@
 // tiles drawn at different detail still meet without cracks.
 #pragma once
 
+#include "more_workers.h"
+
 #include "giant/core/jobs.h"
 #include "giant/geometry/clusters.h"
 #include "giant/render/renderer.h"
@@ -87,11 +89,15 @@ public:
     // Its workers, for other terrain work (making heights) between frames.
     JobSystem& jobs() { return m_jobs; }
     // In play, and behind a game's loading screen (a frame there may take what it takes).
-    static constexpr u32 k_per_frame = 8, k_loading_per_frame = 64;
+    static constexpr u32 k_per_frame = 8, k_loading_per_frame = 256;
     u32 builds_per_frame = k_per_frame;
     u32 uploads_per_frame = k_per_frame;
     u32 builds_in_flight = k_per_frame;
     u32 drops_per_frame = 64; // meshes of tiles gone, freed a frame
+    // Threads that build beside the two that always do, while above zero (a
+    // game's loading screen: MoreWorkers::for_loading).
+    u32 more_workers = 0;
+    u64 handed_to_more_workers() const { return m_more.handed(); } // builds given to them, ever (tests)
     // Frames a newly added tile (and its neighbours) wait before they are
     // looked at, so tiles arriving one after another (a world streaming
     // in) build once, not again as each neighbour arrives. Changes to tiles
@@ -147,7 +153,8 @@ private:
     std::mutex m_mutex; // protects m_done
     std::vector<Result> m_done;
     WaitGroup m_builds;
-    JobSystem m_jobs{2}; // last: destroyed (finishing its jobs) first
+    JobSystem m_jobs{2};
+    MoreWorkers m_more; // last two: destroyed (finishing their jobs) first
 };
 
 } // namespace giant::editor

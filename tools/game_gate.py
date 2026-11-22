@@ -27,7 +27,7 @@ runs back the way it came. It passes when:
 - the player ran (RUN_METRES or more over the ground: frames are counted, not seconds) and ended on the
   ground, and the game taken up again is where it was saved;
 - streaming never failed.
-How long each loading took, what was still behind when play began
+How long each loading took and over how many frames, what was still behind when play began
 (the voxel world, its light, the shadows: waited for by the loading
 screen while they get done, 30 s at most) and when each thing the
 screen waited for was last still to come (where its time went) is printed.
@@ -98,14 +98,17 @@ def begun(game, press, recorded):
         if time.monotonic() - start > 60:
             raise RuntimeError("the main menu's button could not be pressed")
     earlier = before = recorded
+    first = None  # the frame count at the first read after the button took (a figure to print: a few frames short)
     last = {}  # what the loading screen waited for: the seconds in at which each was last still to come
     while True:
         earlier, before = before, game.tool("get_engine_info")["frame_times"]["recorded"]
+        first = before if first is None else first
         menu = game.tool("get_menu")
         for key, value in menu.get("loading", {}).items():
             if key in WAITED_FOR and value:
                 last[key] = time.monotonic() - start
         if menu["menu"] == "none" and game.tool("get_player")["playing"]:
+            menu["loading_frames"] = before - first
             menu["waited"] = ", ".join(f"{k} {v:.1f} s" for k, v in sorted(last.items(), key=lambda kv: kv[1])) or "nothing"
             return earlier, time.monotonic() - start, menu
         if menu["menu"] == "main" and menu["notice"]:
@@ -227,7 +230,8 @@ def main() -> int:
             went = math.hypot(ended[0] - at[0], ended[2] - at[2])
             ground = tool("get_terrain", {"points": [[ended[0], ended[2]]]})["heights"][0]
             times = frame_stats(flown)
-            print(f"game_gate: {name}: loading took {seconds:.1f} s; behind when play began: {behind}")
+            print(f"game_gate: {name}: loading took {seconds:.1f} s over {menu['loading_frames']} frames; "
+                  f"behind when play began: {behind}")
             print(f"game_gate: {name}: the loading screen last waited for: {menu['waited']}")
             print(f"game_gate: {name}: {times['frames']} frames from the first of play: {describe(times)}; "
                   f"the player ran {went:.0f} m, from {at[1]:.1f} m up to {ended[1]:.1f} m (the ground there: "
