@@ -149,12 +149,16 @@ public:
     static constexpr double k_most_loading_seconds = 120.0;
     // The voxel world's CPU budget a frame while the screen stands (RenderSettings::voxel_ms_per_frame, 1 in play).
     static constexpr float k_loading_voxel_ms = 12.0f;
-    static constexpr double k_most_gpu_seconds = 5.0; // the GPU's own (voxels, light, shadows, geometry), once the rest is in: of the clock, not of frames
+    // The GPU's own (voxels, light, shadows, geometry), once the rest is in, of the clock, not of frames:
+    // this long with none of the voxel world built or lit meanwhile (some never is done), and this long in all (a
+    // software device takes seconds a frame).
+    static constexpr double k_most_gpu_seconds = 5.0;
+    static constexpr double k_most_gpu_seconds_in_all = 30.0;
     // (The bodies alone are waited for no longer than play itself waits for them, PlayState::k_most_placing_seconds: some never come.)
     // Tests: the loading screen as if `seconds` more of frames had passed.
     void loading_waited(double seconds) { m_arriving_seconds += seconds; }
     // Tests: as if the GPU's own had been waited for `seconds` more.
-    void loading_gpu_waited(double seconds) { m_arriving_gpu += seconds; }
+    void loading_gpu_waited(double seconds) { m_arriving_gpu += seconds, m_arriving_gpu_in_all += seconds; }
     // The slot list still being read; wait() blocks until it is in (tests).
     bool reading() const { return m_reading; }
     void wait();
@@ -197,7 +201,7 @@ private:
     std::optional<DVec3> m_arriving_view;
     DVec3 m_arriving_eye;
     void restore_view();
-    double m_arriving_seconds = 0.0, m_arriving_bodies = 0.0, m_arriving_gpu = 0.0;
+    double m_arriving_seconds = 0.0, m_arriving_bodies = 0.0, m_arriving_gpu = 0.0, m_arriving_gpu_in_all = 0.0;
     std::chrono::steady_clock::time_point m_arriving_frame;
     void show_loading();  // the screen stands from now
     void arrive();        // each frame while it is on

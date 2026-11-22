@@ -16,6 +16,7 @@
 #include "giant/core/jobs.h"
 #include "giant/world/scene.h"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <memory>
@@ -29,6 +30,10 @@
 namespace giant::editor {
 
 constexpr double k_max_load_radius = 8192.0;
+// StreamingSettings::entities_per_frame at least, behind a game's loading screen.
+constexpr u32 k_loading_entities_per_frame = 1u << 16;
+// ...and StreamingSettings::reads_in_flight.
+constexpr u32 k_loading_reads_in_flight = 64;
 
 struct StreamingSettings {
     // Cells with any part this near the camera (on the ground, x and z) load.

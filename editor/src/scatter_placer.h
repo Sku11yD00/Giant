@@ -74,8 +74,12 @@ public:
     double radius = 2048.0; // metres from the camera to a cell's centre, at most, for it to be placed
     u64 max_instances = 1u << 19;
     u32 looks_per_frame = 256;
-    u32 cells_in_flight = 4;
-    usize instances_per_frame = 4096; // every part of the renderer looks at each one the frame it arrives
+    u32 cells_in_flight = k_cells_in_flight;
+    usize instances_per_frame = k_instances_per_frame; // every part of the renderer looks at each one the frame it arrives
+    // In play, and behind a game's loading screen (nothing is played there: a frame may take
+    // what it takes; the workers are play's, kept busy).
+    static constexpr u32 k_cells_in_flight = 4, k_loading_cells_in_flight = 32;
+    static constexpr usize k_instances_per_frame = 4096, k_loading_instances_per_frame = 1u << 16;
 
 private:
     struct Placed {

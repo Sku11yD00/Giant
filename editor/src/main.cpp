@@ -776,6 +776,13 @@ int run(const Options& options) {
         figures.hold = people.hold;
         figures.update(state.scene, state.camera.position);
         mark(editor::FramePhase::people);
+        {
+            // Behind a game's loading screen nothing is played: the ground's tiles are meshed and
+            // put up as fast as the machine can, not a few a frame.
+            const bool loading = state.menus != nullptr && state.menus->loading().on;
+            const u32 most = loading ? editor::TerrainMeshes::k_loading_per_frame : editor::TerrainMeshes::k_per_frame;
+            terrain_meshes.builds_per_frame = terrain_meshes.uploads_per_frame = terrain_meshes.builds_in_flight = most;
+        }
         terrain_meshes.update(state.scene.terrain);
         terrain_paint.update(state.scene.terrain, *renderer);
         mark(editor::FramePhase::terrain);
@@ -783,6 +790,13 @@ int run(const Options& options) {
                           state.scene.terrain);
         mark(editor::FramePhase::far_ground);
         scatter.camera = state.camera.position;
+        {
+            // Behind a game's loading screen the plants are placed as fast as the machine can.
+            const bool loading = state.menus != nullptr && state.menus->loading().on;
+            scatter.cells_in_flight = loading ? editor::ScatterPlacer::k_loading_cells_in_flight : editor::ScatterPlacer::k_cells_in_flight;
+            scatter.instances_per_frame =
+                loading ? editor::ScatterPlacer::k_loading_instances_per_frame : editor::ScatterPlacer::k_instances_per_frame;
+        }
         scatter.update(state.scene, terrain_meshes.last_changes());
         physics.refresh_forest(state.scene, scatter); // fallen trees of cells placed again, drawn lying this frame
         mark(editor::FramePhase::scatter);
@@ -1182,7 +1196,18 @@ int run(const Options& options) {
         mark(editor::FramePhase::end_frame);
         // After the frame's cells were built from the scene: loads and
         // unloads world cells (what joins the scene draws next frame).
-        world_streaming.update(state.scene, state.scene_generation, state.camera.position, scene_frame);
+        {
+            // (Behind a game's loading screen, cells read are put in the scene whole frames' worth at once.)
+            const u32 a_frame = world_streaming.settings.entities_per_frame;
+            const u32 at_once = world_streaming.settings.reads_in_flight;
+            if (state.menus != nullptr && state.menus->loading().on) {
+                world_streaming.settings.entities_per_frame = std::max(a_frame, editor::k_loading_entities_per_frame);
+                world_streaming.settings.reads_in_flight = std::max(at_once, editor::k_loading_reads_in_flight);
+            }
+            world_streaming.update(state.scene, state.scene_generation, state.camera.position, scene_frame);
+            world_streaming.settings.entities_per_frame = a_frame;
+            world_streaming.settings.reads_in_flight = at_once;
+        }
         mark(editor::FramePhase::streaming);
         if (state.selected != 0 && state.scene.find(state.selected) == nullptr) {
             state.selected = 0;

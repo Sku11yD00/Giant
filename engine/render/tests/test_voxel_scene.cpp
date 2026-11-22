@@ -51,7 +51,7 @@ struct Bench {
     u64 version = 1;
     DVec3 camera{0.0, 1.0, 0.0};
 
-    explicit Bench(u32 capacity = 1024) {
+    explicit Bench(u32 capacity = 1024, u32 more_workers = VoxelScene::k_auto) {
         rhi::DeviceDesc desc;
         desc.backend = rhi::Backend::null;
         device = rhi::create_device(desc);
@@ -59,7 +59,7 @@ struct Bench {
         clip.levels = 2;
         clip.voxel_size = 0.25f; // bricks of 2 m and 4 m
         clip.bricks_per_axis = 8;
-        voxels = std::make_unique<VoxelScene>(*device, clip, capacity);
+        voxels = std::make_unique<VoxelScene>(*device, clip, capacity, more_workers);
     }
     std::vector<CellRange> cells; // empty: none handed over
     void step(float budget_ms = 1000.0f) {
@@ -567,6 +567,39 @@ GIANT_TEST("voxel scene: bricks left with nothing over them are emptied a lot at
     GIANT_CHECK(b.voxels->stats().bricks > 0 && b.voxels->stats().bricks <= 4);
     GIANT_CHECK(b.voxels->probe(0, {-7.0, 1.2, -7.0}) == VoxelProbe::solid);
     GIANT_CHECK(b.voxels->probe(0, {-6.3, 1.2, -7.0}) == VoxelProbe::empty);
+}
+
+// Behind a loading screen (a budget of 4 ms or more) more workers build bricks: the same world,
+// and none of them once the budget is play's again.
+GIANT_TEST("voxel scene: a loading screen's extra workers build the same world") {
+    u32 bricks[2] = {};
+    for (const u32 more : {0u, 3u}) {
+        Bench b(4096, more);
+        GIANT_CHECK(b.voxels->init());
+        // (Each brick over more than a few instances: built on the workers.)
+        for (int i = 0; i < 2000; ++i) {
+            Instance cube;
+            cube.mesh = 0;
+            cube.scale = {0.2f, 0.2f, 0.2f};
+            cube.position = {static_cast<double>(i % 50) * 0.3 - 7.0, 1.1, static_cast<double>(i / 50) * 0.3 - 6.0};
+            b.instances.push_back(cube);
+        }
+        b.step(); // (a loading screen's budget)
+        for (int i = 0; i < 100 && b.voxels->stats().pending > 0; ++i) b.step();
+        GIANT_CHECK(b.voxels->stats().pending == 0);
+        bricks[more != 0] = b.voxels->stats().bricks;
+        GIANT_CHECK(b.voxels->probe(0, {-7.0, 1.2, -6.0}) == VoxelProbe::solid);
+        const u64 handed = b.voxels->handed_to_more_workers();
+        GIANT_CHECK((handed != 0) == (more != 0));
+        // Play's budget: built all the same, on the usual workers.
+        for (Instance& in : b.instances) in.position.y += 2.0;
+        for (int i = 0; i < 20000 && (i < 2 || b.voxels->stats().pending > 0); ++i) b.step(0.5f);
+        GIANT_CHECK(b.voxels->stats().pending == 0);
+        GIANT_CHECK(b.voxels->probe(0, {-7.0, 3.2, -6.0}) == VoxelProbe::solid);
+        GIANT_CHECK(b.voxels->probe(0, {-7.0, 1.2, -6.0}) == VoxelProbe::empty);
+        GIANT_CHECK(b.voxels->handed_to_more_workers() == handed);
+    }
+    GIANT_CHECK(bricks[0] > 20 && bricks[0] == bricks[1]);
 }
 
 // Scatter arrives a cell at a time: thousands of placements over a few
