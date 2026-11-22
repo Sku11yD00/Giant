@@ -238,6 +238,145 @@ VoxelScene::MeshCache* VoxelScene::mesh_cache(MeshId id, const MeshLookup& meshe
     return stored.mesh != nullptr ? &stored : nullptr;
 }
 
+namespace {
+// The grid cell of `v` on an axis the mesh spans from `from` to `to` (make_grid and may_touch
+// number them the same way; a flat mesh has no width on an axis: every cell of it is cell 0).
+u32 grid_cell(float v, float from, float to) {
+    constexpr u32 n = 16;
+    const float at = (v - from) / (to - from) * static_cast<float>(n);
+    if (!(at > 0.0f)) {
+        return 0; // (also not a number: no width, or a span no float holds)
+    }
+    return static_cast<u32>(std::min(at, static_cast<float>(n - 1)));
+}
+bool finite(const Vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+} // namespace
+
+void VoxelScene::make_grid(MeshCache& cache) {
+    static_assert(MeshCache::k_grid == 16);
+    cache.grid_made = true;
+    const geometry::ClusterMesh& mesh = *cache.mesh;
+    u64 triangles = 0;
+    for (const geometry::Cluster& c : mesh.clusters) {
+        triangles += c.refined < 0 ? c.triangle_count : 0u;
+    }
+    if (triangles == 0 || triangles > MeshCache::k_grid_triangles) {
+        return;
+    }
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    Vec3 lo{inf, inf, inf};
+    Vec3 hi{-inf, -inf, -inf};
+    const auto each = [&](const auto& fn) {
+        for (const geometry::Cluster& c : mesh.clusters) {
+            if (c.refined >= 0) {
+                continue;
+            }
+            for (u32 t = 0; t < c.triangle_count; ++t) {
+                const u32* idx = &mesh.indices[c.first_index + t * 3];
+                const Vec3& p0 = mesh.vertices[idx[0]].position;
+                const Vec3& p1 = mesh.vertices[idx[1]].position;
+                const Vec3& p2 = mesh.vertices[idx[2]].position;
+                if (!finite(p0) || !finite(p1) || !finite(p2)) {
+                    continue; // (a corner not a number: a build adds no voxel for it either)
+                }
+                fn(Vec3{std::min({p0.x, p1.x, p2.x}), std::min({p0.y, p1.y, p2.y}), std::min({p0.z, p1.z, p2.z})},
+                   Vec3{std::max({p0.x, p1.x, p2.x}), std::max({p0.y, p1.y, p2.y}), std::max({p0.z, p1.z, p2.z})});
+            }
+        }
+    };
+    each([&](const Vec3& a, const Vec3& b) {
+        lo = {std::min(lo.x, a.x), std::min(lo.y, a.y), std::min(lo.z, a.z)};
+        hi = {std::max(hi.x, b.x), std::max(hi.y, b.y), std::max(hi.z, b.z)};
+    });
+    if (!finite(lo) || !finite(hi)) {
+        return; // (no triangle with every corner a number: nothing ruled out)
+    }
+    constexpr u32 n = MeshCache::k_grid;
+    cache.grid_min = lo;
+    cache.grid_max = hi;
+    cache.grid.assign(usize{n} * n, 0);
+    each([&](const Vec3& a, const Vec3& b) {
+        const u32 x0 = grid_cell(a.x, lo.x, hi.x), x1 = grid_cell(b.x, lo.x, hi.x);
+        const u32 y0 = grid_cell(a.y, lo.y, hi.y), y1 = grid_cell(b.y, lo.y, hi.y);
+        const u32 z0 = grid_cell(a.z, lo.z, hi.z), z1 = grid_cell(b.z, lo.z, hi.z);
+        const u16 bits = static_cast<u16>((u32{2} << x1) - (u32{1} << x0));
+        for (u32 z = z0; z <= z1; ++z) {
+            for (u32 y = y0; y <= y1; ++y) {
+                cache.grid[y + usize{n} * z] |= bits;
+            }
+        }
+    });
+}
+
+bool VoxelScene::may_touch(const Copy& copy, const MeshLookup& meshes, const Box& box, double voxel) {
+    const Instance& in = copy.instance;
+    MeshCache* const m = mesh_cache(in.mesh, meshes);
+    if (m == nullptr) {
+        return false; // no mesh: a build skips it too
+    }
+    const float s = max_abs_scale(in.scale);
+    if (!(s > 0.0f) || !std::isfinite(s)) {
+        return false; // (as a build)
+    }
+    if (m->mesh->bounds.radius * s <= k_point_share * static_cast<float>(voxel)) {
+        return true; // built as a point, wherever its triangles are
+    }
+    if (!(std::abs(in.scale.x) > 0.0f && std::abs(in.scale.y) > 0.0f && std::abs(in.scale.z) > 0.0f)) {
+        return true; // flattened: not turned back into the mesh's space
+    }
+    if (!m->grid_made) {
+        make_grid(*m);
+        m_touch_work += k_touch_work; // (a walk over its triangles: the clock is looked at next)
+    }
+    if (m->grid.empty()) {
+        return true;
+    }
+    // Not a rotation (its length not one): `rotate` skews with it, and is not undone below.
+    const Quat& q = in.rotation;
+    if (!(std::abs(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w - 1.0f) <= 1e-4f)) {
+        return true;
+    }
+    ++m_touch_work;
+    // The box, two voxels wider (a build draws a simplified cut, off the original triangles by
+    // half a voxel as its error is told, and that error is the largest of its levels', not their
+    // sum), in the mesh's space: the box around its eight corners there.
+    const double pad = 2.0 * voxel;
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    Vec3 lo{inf, inf, inf};
+    Vec3 hi{-inf, -inf, -inf};
+    const Quat back = conjugate(in.rotation);
+    for (u32 corner = 0; corner < 8; ++corner) {
+        const DVec3 world{(corner & 1) != 0 ? box.max.x + pad : box.min.x - pad,
+                          (corner & 2) != 0 ? box.max.y + pad : box.min.y - pad,
+                          (corner & 4) != 0 ? box.max.z + pad : box.min.z - pad};
+        const Vec3 turned = rotate(back, to_camera_relative(world, in.position));
+        const Vec3 p{turned.x / in.scale.x, turned.y / in.scale.y, turned.z / in.scale.z};
+        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+    }
+    if (!finite(lo) || !finite(hi)) {
+        return true;
+    }
+    const Vec3& from = m->grid_min;
+    const Vec3& to = m->grid_max;
+    if (hi.x < from.x || hi.y < from.y || hi.z < from.z || lo.x > to.x || lo.y > to.y || lo.z > to.z) {
+        return false;
+    }
+    constexpr u32 n = MeshCache::k_grid;
+    const u32 x0 = grid_cell(lo.x, from.x, to.x), x1 = grid_cell(hi.x, from.x, to.x);
+    const u32 y0 = grid_cell(lo.y, from.y, to.y), y1 = grid_cell(hi.y, from.y, to.y);
+    const u32 z0 = grid_cell(lo.z, from.z, to.z), z1 = grid_cell(hi.z, from.z, to.z);
+    const u16 bits = static_cast<u16>((u32{2} << x1) - (u32{1} << x0));
+    for (u32 z = z0; z <= z1; ++z) {
+        for (u32 y = y0; y <= y1; ++y) {
+            if ((m->grid[y + usize{n} * z] & bits) != 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 VoxelScene::Box VoxelScene::bounds_of(const Instance& in, const MeshLookup& meshes) {
     constexpr double inf = std::numeric_limits<double>::infinity();
     const Box none{{inf, inf, inf}, {-inf, -inf, -inf}}; // empty: overlaps nothing
@@ -1485,7 +1624,7 @@ bool VoxelScene::building(const Key& key) const {
     return false;
 }
 
-bool VoxelScene::start_build(const std::function<bool()>& out_of_time, bool room) {
+bool VoxelScene::start_build(const MeshLookup& meshes, const std::function<bool()>& out_of_time, bool room) {
     // Every level's never built, coarsest first; then those to build again, oldest first.
     u32 emptied = 0;
     for (u32 n = m_clipmap.levels() + 1; n-- > 0;) {
@@ -1510,14 +1649,28 @@ bool VoxelScene::start_build(const std::function<bool()>& out_of_time, bool room
             const double size = m_clipmap.brick_size(key.level);
             const Box box{origin, origin + DVec3{size, size, size}};
             find(box);
+            bool ruled = false;
+            if (m_ruling_out && !m_found.empty()) {
+                // Most bricks under an instance's bounds have none of its triangles near (the air
+                // over a slope's ground and the earth under it): told from the mesh's grid, far
+                // cheaper than building each to find it empty.
+                const double voxel = m_clipmap.voxel_size(key.level);
+                std::erase_if(m_found, [&](u32 i) { return !may_touch(m_copies[i], meshes, box, voxel); });
+                ruled = m_found.empty();
+            }
             if (m_found.empty() && !water_over(box)) {
                 // Nothing over it (most of the window, and all that a removal left): emptied here,
                 // with no build to hand over or copy back.
                 remove(key.level, m_clipmap.slot(key.level, key.brick), key.brick);
                 m_retry.erase(key);
                 ++m_stats.built;
-                if (++emptied % 16 == 0 && out_of_time()) {
-                    return true;
+                m_ruled_out += ruled ? 1u : 0u;
+                // (The clock: every 16, and whenever the instances looked at were many or a grid was made.)
+                if (++emptied % 16 == 0 || m_touch_work >= k_touch_work) {
+                    m_touch_work = 0;
+                    if (out_of_time()) {
+                        return true;
+                    }
                 }
                 continue;
             }
@@ -1989,7 +2142,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         if (m_gathering != nullptr) {
             gather(meshes, out_of_time);
             stepped = true;
-        } else if (start_build(out_of_time, m_builds.size() < most_builds)) {
+        } else if (start_build(meshes, out_of_time, m_builds.size() < most_builds)) {
             // (with the workers full, only those with nothing over them, emptied here)
             if (m_gathering != nullptr) {
                 gather(meshes, out_of_time); // (most bricks are over a few instances: done at once)

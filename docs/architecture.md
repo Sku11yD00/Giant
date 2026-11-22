@@ -5953,7 +5953,14 @@ Done in N2 part 2:
   (else a 2 km brick that scatter streaming in keeps changing goes back
   before everything nearer, again and again). Bricks are built on worker
   threads (a quarter of the cores, two to four), up to 32 at once (a
-  brick with nothing over it is emptied on the spot with no build; one
+  brick with nothing over it is emptied on the spot with no build, and
+  so is one no instance over it has a triangle near: each mesh of up to
+  32,768 triangles keeps a grid of 16 cells a side saying where its
+  triangles are, made the first time a brick asks (`may_touch`), and a
+  brick's box, two voxels wider for the simplified cuts and turned into the
+  mesh's space, is looked up in it. Nine bricks in ten under a terrain
+  tile's bounds are air or earth, and building each to find it empty was
+  what kept the voxel world from keeping up with a player at 30 m/s; one
   over at most 16 instances and water triangles is built on the main
   thread as it is gathered while such builds average under 0.05 ms, else
   it goes to the workers too, as in a debug build): the
