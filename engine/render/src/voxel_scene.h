@@ -151,6 +151,10 @@ public:
     rhi::BufferHandle pool() const { return m_pool; }
     rhi::BufferHandle table() const { return m_table; }
     const VoxelStats& stats() const { return m_stats; }
+    // Bricks emptied without a build because no instance over them has a triangle near, ever
+    // (tests), and that check switched off (tests: every such brick is built, and comes out empty).
+    u64 ruled_out() const { return m_ruled_out; }
+    void set_ruling_out(bool on) { m_ruling_out = on; }
     u64 handed_to_more_workers() const { return m_more_handed; } // builds given to the loading screen's workers, ever (tests)
 
     // Whether the voxel world shows instance `index` (of the last update's
@@ -235,6 +239,15 @@ private:
         Vec3 min{}; // mesh-space bounds of its original clusters
         Vec3 max{};
         std::unordered_map<i32, std::shared_ptr<const Cut>> cuts; // by log2 of the error, twice, +1 with sums
+        // Where its original triangles are (may_touch): k_grid cells a side over [grid_min,
+        // grid_max], a row of bits along x for each (y, z). Made the first time it is asked for;
+        // left empty for a mesh of too many triangles to walk in a frame (nothing is ruled out).
+        static constexpr u32 k_grid = 16;
+        static constexpr u32 k_grid_triangles = 1u << 15;
+        bool grid_made = false;
+        std::vector<u16> grid;
+        Vec3 grid_min{};
+        Vec3 grid_max{};
     };
     // A brick being built away from the main thread (start_build): what it is built from, copied
     // when it started, and the result.
@@ -351,7 +364,13 @@ private:
     // Starts building the next brick waiting (m_gathering) if there is `room`; false if none waits
     // or none fits. Those with nothing over them are emptied on the way, room or not, until out of
     // time (true, with no m_gathering).
-    bool start_build(const std::function<bool()>& out_of_time, bool room);
+    bool start_build(const MeshLookup& meshes, const std::function<bool()>& out_of_time, bool room);
+    // Whether the instance's triangles may reach into `box` (world; a brick of voxels `voxel`
+    // wide, taken two voxels wider each way for the simplified cuts a build draws): false only when
+    // its mesh has none there, by the mesh's grid. An instance small enough to be built as a
+    // point always may.
+    bool may_touch(const Copy& copy, const MeshLookup& meshes, const Box& box, double voxel);
+    static void make_grid(MeshCache& cache);
     // Copies what is over m_gathering, until done (then a worker builds it: true) or out of time.
     bool gather(const MeshLookup& meshes, const std::function<bool()>& out_of_time);
     // Copies a built brick to the pool (and marks it again if something over it changed
@@ -497,6 +516,12 @@ private:
     bool m_helping = false; // the last update's budget was a loading screen's
     u32 m_submitted = 0;
     u64 m_more_handed = 0; // builds given to m_more_jobs, ever
+    u64 m_ruled_out = 0;
+    // Instances may_touch looked at since start_build last looked at the clock (a grid made
+    // counts as k_touch_work of them).
+    static constexpr u32 k_touch_work = 1024;
+    u32 m_touch_work = 0;
+    bool m_ruling_out = true;
 };
 
 } // namespace giant::render

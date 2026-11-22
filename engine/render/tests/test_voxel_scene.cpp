@@ -602,6 +602,123 @@ GIANT_TEST("voxel scene: a loading screen's extra workers build the same world")
     GIANT_CHECK(bricks[0] > 20 && bricks[0] == bricks[1]);
 }
 
+// Most bricks under an instance's bounds hold none of its triangles (the air over a slope and the
+// earth under it): they are emptied from the mesh's grid without a build, and the world built is
+// the same as with every one of them built.
+GIANT_TEST("voxel scene: bricks with no triangle near are emptied without a build, the world the same") {
+    std::vector<VoxelProbe> seen[2];
+    u32 bricks[2] = {};
+    for (const bool ruling : {false, true}) {
+        Bench b(4096);
+        GIANT_CHECK(b.voxels->init());
+        b.voxels->set_ruling_out(ruling);
+        b.held = std::make_shared<const geometry::ClusterMesh>(geometry::build_clusters(geometry::make_plane()));
+        // A slope across both windows, a wall mirrored and stretched, and a box (hollow inside).
+        Instance slope;
+        slope.mesh = 1;
+        slope.scale = {30.0f, 1.0f, 30.0f};
+        slope.rotation = quat_from_axis_angle({0, 0, 1}, 0.5f) * quat_from_axis_angle({0, 1, 0}, 0.3f);
+        slope.position = {0.3, 1.0, -0.2};
+        b.instances.push_back(slope);
+        Instance wall;
+        wall.mesh = 1;
+        wall.scale = {-6.0f, 1.0f, 9.0f};
+        wall.rotation = quat_from_axis_angle({1, 0, 0}, 1.4f);
+        wall.position = {-3.0, 2.0, 4.0};
+        b.instances.push_back(wall);
+        Instance box;
+        box.mesh = 0;
+        box.scale = {5.0f, 7.0f, 5.0f};
+        box.position = {4.0, 0.0, -5.0};
+        b.instances.push_back(box);
+        b.step();
+        for (int i = 0; i < 200 && b.voxels->stats().pending > 0; ++i) b.step();
+        GIANT_CHECK(b.voxels->stats().pending == 0);
+        // (Many: the slope's bounds are a box 30 m a side, its triangles a sheet through it.)
+        GIANT_CHECK(ruling ? b.voxels->ruled_out() > 100 : b.voxels->ruled_out() == 0);
+        bricks[ruling] = b.voxels->stats().bricks;
+        for (u32 level = 0; level < 2; ++level) {
+            for (double z = -15.9; z < 16.0; z += 0.4) {
+                for (double y = -15.9; y < 16.0; y += 0.4) {
+                    for (double x = -15.9; x < 16.0; x += 0.4) seen[ruling].push_back(b.voxels->probe(level, {x, y, z}));
+                }
+            }
+        }
+        // Moved: the bricks it left and those it is over now, the same again.
+        b.instances[0].position.y += 3.3;
+        b.instances[1].position.x += 1.7;
+        ++b.version;
+        for (int i = 0; i < 20000 && (i < 2 || b.voxels->stats().pending > 0); ++i) b.step(0.5f);
+        GIANT_CHECK(b.voxels->stats().pending == 0);
+        for (double z = -7.9; z < 8.0; z += 0.4) {
+            for (double y = -7.9; y < 8.0; y += 0.4) {
+                for (double x = -7.9; x < 8.0; x += 0.4) seen[ruling].push_back(b.voxels->probe(0, {x, y, z}));
+            }
+        }
+    }
+    GIANT_CHECK(bricks[0] > 50 && bricks[0] == bricks[1]);
+    GIANT_CHECK(seen[0].size() == seen[1].size() && seen[0] == seen[1]);
+    GIANT_CHECK(std::count(seen[1].begin(), seen[1].end(), VoxelProbe::solid) > 500);
+}
+
+// The same with a round mesh whose coarser level is built from a simplified cut (off its original
+// triangles by up to the cut's error), stretched and mirrored, its rotation told at any length,
+// and with a corner that is not a number (its triangles add nothing, either way).
+GIANT_TEST("voxel scene: ruling bricks out keeps the world the same for simplified, mirrored and broken meshes") {
+    for (const int kind : {0, 1, 2}) {
+        std::vector<VoxelProbe> seen[2];
+        u64 ruled = 0;
+        for (const bool ruling : {false, true}) {
+            Bench b(4096);
+            GIANT_CHECK(b.voxels->init());
+            b.voxels->set_ruling_out(ruling);
+            geometry::ClusterMesh ball = geometry::build_clusters(geometry::make_sphere(96, 48));
+            if (kind == 2) ball.vertices[ball.vertices.size() / 2].position.y = std::numeric_limits<float>::quiet_NaN();
+            b.held = std::make_shared<const geometry::ClusterMesh>(std::move(ball));
+            Instance in;
+            in.mesh = 1;
+            in.scale = {-13.0f, 9.0f, 15.0f};
+            in.rotation = quat_from_axis_angle({0.6f, 0.0f, 0.8f}, 0.7f);
+            if (kind == 1) in.rotation = {in.rotation.x * 1.3f, in.rotation.y * 1.3f, in.rotation.z * 1.3f, in.rotation.w * 1.3f};
+            in.position = {0.4, 1.3, -0.6};
+            b.instances.push_back(in);
+            b.step();
+            for (int i = 0; i < 400 && b.voxels->stats().pending > 0; ++i) b.step();
+            GIANT_CHECK(b.voxels->stats().pending == 0);
+            if (ruling) ruled = b.voxels->ruled_out();
+            for (u32 level = 0; level < 2; ++level) {
+                for (double z = -15.9; z < 16.0; z += 0.3) {
+                    for (double y = -15.9; y < 16.0; y += 0.3) {
+                        for (double x = -15.9; x < 16.0; x += 0.3) seen[ruling].push_back(b.voxels->probe(level, {x, y, z}));
+                    }
+                }
+            }
+        }
+        // (A rotation of another length is no rotation: nothing under it is ruled out.)
+        GIANT_CHECK(kind == 1 ? ruled == 0 : ruled > 20);
+        GIANT_CHECK(seen[0] == seen[1]);
+        GIANT_CHECK(std::count(seen[1].begin(), seen[1].end(), VoxelProbe::solid) > 500);
+    }
+}
+
+// A mesh of too many triangles to walk in a frame has no grid: nothing under it is ruled out
+// (its bricks are built, and come out empty where it has nothing).
+GIANT_TEST("voxel scene: a mesh too dense for a grid rules nothing out") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    b.held = std::make_shared<const geometry::ClusterMesh>(geometry::build_clusters(geometry::make_sphere(256, 128)));
+    Instance ball;
+    ball.mesh = 1;
+    ball.scale = {12.0f, 12.0f, 12.0f};
+    ball.position = {0.0, 1.0, 0.0};
+    b.instances.push_back(ball);
+    b.step();
+    for (int i = 0; i < 400 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0 && b.voxels->ruled_out() == 0);
+    GIANT_CHECK(b.voxels->probe(0, {0.0, 6.9, 0.0}) == VoxelProbe::solid); // its shell
+    GIANT_CHECK(b.voxels->probe(0, {0.0, 1.0, 0.0}) == VoxelProbe::empty); // its inside
+}
+
 // Scatter arrives a cell at a time: thousands of placements over a few
 // frames, each frame under the bulk limit. They wait gathered by region, so
 // the backlog never overflows into rebuilding every window.
