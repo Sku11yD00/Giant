@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <thread>
 
 namespace giant::render {
@@ -56,6 +57,9 @@ constexpr double k_help_ms = 4.0;
 constexpr usize k_most_under_way = 512;
 constexpr usize k_batch = 16;
 constexpr usize k_worker_items = 2048;
+// A brick a worker left for a mesh never looked up goes back to the workers this many times (the
+// meshes forgotten again meanwhile, each time), then is the main thread's.
+constexpr u32 k_most_sent_back = 2;
 // An instance whose sphere's radius is at most this share of a voxel is added as one point
 // (BrickBuilder::add_point), not triangle by triangle: a quarter, so it spans a voxel or two.
 constexpr float k_point_share = 0.25f;
@@ -217,6 +221,7 @@ VoxelScene::Writing::Writing(VoxelScene& voxels) : scene(voxels) {
 
 VoxelScene::Writing::~Writing() {
     scene.m_copy_count.store(scene.m_copies.size(), std::memory_order_relaxed);
+    ++scene.m_writes;
     scene.m_scene_lock.unlock();
     scene.m_writing.store(false, std::memory_order_release);
     scene.m_writing.notify_all();
@@ -671,15 +676,22 @@ void VoxelScene::grid_rebuild() {
     }
 }
 
-void VoxelScene::find(const Box& q) { find_into(q, m_found, m_seen, m_find_stamp, ~usize{0}); }
+void VoxelScene::find(const Box& q) { find_into(q, m_found, m_seen, m_find_stamp, ~usize{0}, nullptr); }
 
-bool VoxelScene::find_into(const Box& q, std::vector<u32>& found, std::vector<u32>& seen, u32& stamp, usize most) const {
+bool VoxelScene::find_into(const Box& q, std::vector<u32>& found, std::vector<u32>& seen, u32& stamp, usize most,
+                           usize* resume) const {
     found.clear();
+    // More of a walk an earlier call cut short (else the first of one, or one on its own).
+    const bool more = resume != nullptr && *resume != k_from_start;
+    const usize skip = more ? *resume : 0;
+    if (resume != nullptr) {
+        *resume = 0;
+    }
     if (q.empty()) {
         return true;
     }
     seen.resize(m_copies.size(), 0);
-    if (++stamp == 0) {
+    if (!more && ++stamp == 0) {
         std::fill(seen.begin(), seen.end(), 0);
         stamp = 1;
     }
@@ -688,9 +700,6 @@ bool VoxelScene::find_into(const Box& q, std::vector<u32>& found, std::vector<u3
     usize looks = 0;
     bool over = false;
     const auto look = [&](u32 i) {
-        if (over) {
-            return;
-        }
         if (seen[i] != stamp) {
             over = ++looks > most_looks || found.size() > most;
             seen[i] = stamp;
@@ -698,6 +707,25 @@ bool VoxelScene::find_into(const Box& q, std::vector<u32>& found, std::vector<u3
             if (overlaps(b.min, b.max, q.min, q.max)) {
                 found.push_back(i);
             }
+        }
+    };
+    // The lists are walked in the same order every time while the grid is as it was: `at` counts
+    // the entries passed, and a call that takes up a walk skips those the calls before it passed
+    // (whole lists at a time), so it holds the scene only for what is new to it.
+    usize at = 0;
+    const auto each = [&](const std::vector<u32>& list) {
+        if (over) {
+            return;
+        }
+        if (at + list.size() <= skip) {
+            at += list.size();
+            return;
+        }
+        usize k = skip > at ? skip - at : 0;
+        at += k;
+        while (k < list.size() && !over) {
+            look(list[k++]);
+            ++at; // (the one that went over is taken too)
         }
     };
     const Cell lo{cell_of(q.min.x), cell_of(q.min.y), cell_of(q.min.z)};
@@ -716,9 +744,7 @@ bool VoxelScene::find_into(const Box& q, std::vector<u32>& found, std::vector<u3
                 }
                 if (cell.x >= lo.x && cell.x <= hi.x && cell.y >= lo.y && cell.y <= hi.y && cell.z >= lo.z &&
                     cell.z <= hi.z) {
-                    for (const u32 i : *f.list) {
-                        look(i);
-                    }
+                    each(*f.list);
                 }
             }
         };
@@ -730,7 +756,7 @@ bool VoxelScene::find_into(const Box& q, std::vector<u32>& found, std::vector<u3
                 }
             }
         } else {
-            for (i32 z = clo.z; z <= chi.z; ++z) {
+            for (i32 z = clo.z; z <= chi.z && !over; ++z) {
                 for (i32 y = clo.y; y <= chi.y; ++y) {
                     for (i32 x = clo.x; x <= chi.x; ++x) {
                         const auto it = m_coarse.find(Cell{x, y, z});
@@ -746,17 +772,16 @@ bool VoxelScene::find_into(const Box& q, std::vector<u32>& found, std::vector<u3
             for (i32 y = lo.y; y <= hi.y; ++y) {
                 for (i32 x = lo.x; x <= hi.x; ++x) {
                     const auto it = m_grid.find(Cell{x, y, z});
-                    if (it != m_grid.end() && !over) {
-                        for (const u32 i : it->second) {
-                            look(i);
-                        }
+                    if (it != m_grid.end()) {
+                        each(it->second);
                     }
                 }
             }
         }
     }
-    for (const u32 i : m_large) {
-        look(i);
+    each(m_large);
+    if (resume != nullptr) {
+        *resume = at;
     }
     return !over;
 }
@@ -984,7 +1009,6 @@ void VoxelScene::set_water(std::span<const WaterVertex> vertices, std::span<cons
         // the squares under its span in each).
         std::unordered_map<u64, usize> square;
         const usize triangles = body.corners.size() / 3;
-        body.stamps.assign(triangles, 0);
         for (usize t = 0; t < triangles; ++t) {
             const DVec3& a = body.corners[t * 3];
             const DVec3& b = body.corners[t * 3 + 1];
@@ -1778,16 +1802,6 @@ bool VoxelScene::start_build(const std::function<bool()>& out_of_time, usize mos
                 b.state.store(Build::k_for_main, std::memory_order_release);
                 return true; // one a call: update begins it
             }
-            if (water_over(b.box)) {
-                // Water's triangles are stamped as they are taken: the main thread's to begin,
-                // with no trip to a worker first.
-                b.state.store(Build::k_for_main, std::memory_order_release);
-                if (started % 64 == 0 && out_of_time()) {
-                    submit_batch();
-                    return true;
-                }
-                continue;
-            }
             b.state.store(Build::k_waiting, std::memory_order_release);
             m_batch.push_back(std::move(job));
             if (m_batch.size() >= k_batch) {
@@ -1818,13 +1832,13 @@ void VoxelScene::submit_batch() {
     JobSystem& jobs = next_workers(static_cast<u32>(m_batch.size()));
     jobs.submit(m_build_group, [this, batch = std::move(m_batch)] {
         for (const std::shared_ptr<Build>& b : batch) {
-            work(*b);
+            work(*b, false);
         }
     });
     m_batch.clear();
 }
 
-bool VoxelScene::work(Build& b) {
+bool VoxelScene::work(Build& b, bool here) {
     u32 expected = Build::k_waiting;
     if (!b.state.compare_exchange_strong(expected, Build::k_running, std::memory_order_acq_rel)) {
         return false; // another thread has it, or it was dropped
@@ -1839,19 +1853,21 @@ bool VoxelScene::work(Build& b) {
     if (const usize copies = m_copy_count.load(std::memory_order_relaxed); scratch.seen.size() < copies) {
         scratch.seen.resize(copies, 0);
     }
-    // A share of the scene, only to find what is over this one brick and copy it out; never taken
-    // while the main thread wants the whole (it would wait on one brick after another).
-    for (;;) {
-        m_writing.wait(true, std::memory_order_acquire);
-        m_scene_lock.lock_shared();
-        if (!m_writing.load(std::memory_order_acquire)) {
-            break;
-        }
-        m_scene_lock.unlock_shared();
+    // (`here`: the main thread, helping or with the workers starved. A brick over more than one
+    // share finds is not its to take whole in a frame: begun as before the workers took them,
+    // a slice a frame.)
+    const bool prepared = take(b, scratch, here) && prepare(b, scratch);
+    if (prepared) {
+        gather_water(b, scratch.water, scratch.triangles);
     }
-    const bool taken = take(b, scratch);
-    m_scene_lock.unlock_shared();
-    if (!taken || !prepare(b, scratch)) {
+    scratch.water.clear(); // (the bodies may go now)
+    if (scratch.copies.capacity() > k_worker_items * 4) {
+        // (A coarse brick's tens of thousands, megabytes: not kept by every thread for good.)
+        std::vector<Copy>().swap(scratch.copies);
+        std::vector<Copy>().swap(scratch.sorted);
+        std::vector<u32>().swap(scratch.taken);
+    }
+    if (!prepared) {
         b.state.store(Build::k_for_main, std::memory_order_release);
         return true;
     }
@@ -1861,16 +1877,67 @@ bool VoxelScene::work(Build& b) {
     return true;
 }
 
-bool VoxelScene::take(const Build& b, FindScratch& scratch) const {
-    if (water_over(b.box)) {
-        return false; // (its triangles are stamped as they are taken: the main thread's)
-    }
-    if (!find_into(b.box, scratch.found, scratch.seen, scratch.stamp, k_worker_items)) {
-        return false; // too many to find and copy in one go: copied a slice a frame, as before
-    }
+bool VoxelScene::take(const Build& b, FindScratch& scratch, bool one_share) {
+    // A share of the scene, only to find what is over this one brick and copy it out; never taken
+    // while the main thread wants the whole (it would wait on one brick after another), and never
+    // kept for more than k_worker_items found: a brick over more (a coarse one over a forest) is
+    // taken in as many shares, each let go before the next and each taking the walk up where the
+    // last left it. Whatever changes over the brick meanwhile sets its `again` (touch_building),
+    // as for any build that has read the scene, so a copy that moved between two shares is put
+    // right by the build after.
     scratch.copies.clear();
-    for (const u32 i : scratch.found) {
-        scratch.copies.push_back(m_copies[i]);
+    scratch.taken.clear();
+    scratch.water.clear();
+    usize place = k_from_start;
+    u64 writes = 0;
+    for (bool all = false; !all;) {
+        for (;;) {
+            m_writing.wait(true, std::memory_order_acquire);
+            m_scene_lock.lock_shared();
+            if (!m_writing.load(std::memory_order_acquire)) {
+                break;
+            }
+            m_scene_lock.unlock_shared();
+        }
+        const bool first = place == k_from_start;
+        if (!first && writes != m_writes) {
+            // The scene was written between two shares: the lists may not be as they were, so
+            // the walk starts over, passing those it has seen (they are not looked at twice).
+            place = 0;
+        }
+        writes = m_writes;
+        all = find_into(b.box, scratch.found, scratch.seen, scratch.stamp, k_worker_items, &place);
+        if (!all && one_share) {
+            m_scene_lock.unlock_shared();
+            return false;
+        }
+        for (const u32 i : scratch.found) {
+            scratch.copies.push_back(m_copies[i]); // (what a share cut short found is over the brick too)
+            scratch.taken.push_back(i);
+        }
+        if (first) {
+            for (const auto& body : m_water) {
+                if (overlaps(body->box.min, body->box.max, b.box.min, b.box.max)) {
+                    scratch.water.push_back(body);
+                }
+            }
+        }
+        m_scene_lock.unlock_shared();
+    }
+    // In the instances' order, however they were found: a brick's voxels depend a little on the
+    // order its instances are added in (sums of floats), and it is built the same whether taken
+    // in one share, in many, or on the main thread (begin_here).
+    if (!std::is_sorted(scratch.taken.begin(), scratch.taken.end())) {
+        std::vector<u32>& order = scratch.found;
+        order.resize(scratch.taken.size());
+        std::iota(order.begin(), order.end(), 0u);
+        std::sort(order.begin(), order.end(), [&](u32 l, u32 r) { return scratch.taken[l] < scratch.taken[r]; });
+        scratch.sorted.clear();
+        scratch.sorted.reserve(order.size());
+        for (const u32 at : order) {
+            scratch.sorted.push_back(scratch.copies[at]);
+        }
+        scratch.copies.swap(scratch.sorted);
     }
     return true;
 }
@@ -1896,12 +1963,18 @@ bool VoxelScene::prepare(Build& b, FindScratch& scratch) {
                 have = true;
             }
             if (!known) {
+                if (!unknown || b.unknown.back() != last) {
+                    b.unknown.push_back(last);
+                }
                 unknown = true;
                 return false;
             }
             return cache == nullptr || !may_touch(copy, *cache, b.box, voxel); // (no mesh: a build skips it too)
         });
         if (unknown) {
+            // Every mesh never looked up is told at once (each once): one trip to the main thread.
+            std::sort(b.unknown.begin(), b.unknown.end());
+            b.unknown.erase(std::unique(b.unknown.begin(), b.unknown.end()), b.unknown.end());
             return false;
         }
         ruled = found.empty();
@@ -1909,12 +1982,18 @@ bool VoxelScene::prepare(Build& b, FindScratch& scratch) {
     b.items.reserve(found.size());
     GatherRun run;
     for (const Copy& copy : found) {
-        if (!gather_item(b, copy, run, nullptr)) {
-            b.items.clear();
-            b.meshes.clear();
-            b.cuts.clear();
-            return false;
+        // (False: its mesh was never looked up, or was forgotten since it was ruled in.)
+        if (!gather_item(b, copy, run, nullptr) && (b.unknown.empty() || b.unknown.back() != copy.instance.mesh)) {
+            b.unknown.push_back(copy.instance.mesh);
         }
+    }
+    if (!b.unknown.empty()) {
+        b.items.clear();
+        b.meshes.clear();
+        b.cuts.clear();
+        std::sort(b.unknown.begin(), b.unknown.end());
+        b.unknown.erase(std::unique(b.unknown.begin(), b.unknown.end()), b.unknown.end());
+        return false;
     }
     b.ruled = ruled;
     b.count = static_cast<u32>(b.items.size());
@@ -1929,6 +2008,7 @@ void VoxelScene::begin_here(const std::shared_ptr<Build>& job, const MeshLookup&
     }
     ++m_begun_here;
     find(b.box);
+    std::sort(m_found.begin(), m_found.end()); // (the order a worker adds them in: take)
     bool ruled = false;
     if (m_ruling_out && !m_found.empty()) {
         const double voxel = static_cast<double>(b.voxel_size);
@@ -1956,39 +2036,39 @@ void VoxelScene::begin_here(const std::shared_ptr<Build>& job, const MeshLookup&
     b.found = m_found;
     b.next = 0;
     b.items.reserve(m_found.size());
-    gather_water(b);
+    gather_water(b, m_water, m_water_triangles);
     b.state.store(Build::k_gathering, std::memory_order_release);
     m_gathering = job; // its instances copied next, a few hundred between looks at the clock
 }
 
-void VoxelScene::gather_water(Build& b) {
-    // Water's surfaces over it: each triangle once (the bodies as they are now; a change
-    // meanwhile sets `again`).
+void VoxelScene::gather_water(Build& b, std::span<const std::shared_ptr<const WaterBody>> bodies,
+                              std::vector<u32>& triangles) {
+    // Water's surfaces over it: each triangle once, though it is filed in every piece it reaches
+    // (the bodies as they were when the scene was read; a change meanwhile sets `again`).
     const DVec3 far_corner = b.box.max;
-    const u32 stamp = ++m_water_stamp;
-    for (const auto& body : m_water) {
+    for (const auto& body : bodies) {
         if (!overlaps(body->box.min, body->box.max, b.origin, far_corner)) {
             continue;
         }
+        triangles.clear();
         for (const WaterPiece& piece : body->pieces) {
-            if (!overlaps(piece.box.min, piece.box.max, b.origin, far_corner)) {
-                continue;
+            if (overlaps(piece.box.min, piece.box.max, b.origin, far_corner)) {
+                triangles.insert(triangles.end(), piece.triangles.begin(), piece.triangles.end());
             }
-            for (const u32 t : piece.triangles) {
-                if (body->stamps[t] == stamp) {
-                    continue;
-                }
-                body->stamps[t] = stamp;
-                const DVec3& p0 = body->corners[usize{t} * 3];
-                const DVec3& p1 = body->corners[usize{t} * 3 + 1];
-                const DVec3& p2 = body->corners[usize{t} * 3 + 2];
-                if (overlaps(lower(lower(p0, p1), p2), upper(upper(p0, p1), p2), b.origin, far_corner)) {
-                    b.water.push_back({to_camera_relative(p0, b.origin), to_camera_relative(p1, b.origin),
-                                       to_camera_relative(p2, b.origin), body->color});
-                }
+        }
+        std::sort(triangles.begin(), triangles.end());
+        triangles.erase(std::unique(triangles.begin(), triangles.end()), triangles.end());
+        for (const u32 t : triangles) {
+            const DVec3& p0 = body->corners[usize{t} * 3];
+            const DVec3& p1 = body->corners[usize{t} * 3 + 1];
+            const DVec3& p2 = body->corners[usize{t} * 3 + 2];
+            if (overlaps(lower(lower(p0, p1), p2), upper(upper(p0, p1), p2), b.origin, far_corner)) {
+                b.water.push_back({to_camera_relative(p0, b.origin), to_camera_relative(p1, b.origin),
+                                   to_camera_relative(p2, b.origin), body->color});
             }
         }
     }
+    b.water_count = static_cast<u32>(b.water.size());
 }
 
 bool VoxelScene::gather_item(Build& b, const Copy& copy, GatherRun& run, const MeshLookup* meshes) {
@@ -2281,6 +2361,8 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
             ++m_stats.built;
             m_ruled_out += done->ruled ? 1u : 0u;
             m_prepared_on_workers += done->prepared ? 1u : 0u;
+            m_most_in_a_brick = std::max(m_most_in_a_brick, done->count);
+            m_most_water_in_a_brick = std::max(m_most_water_in_a_brick, done->water_count);
             m_progress_at = done->prepared ? m_updates : m_progress_at;
             stepped = stepped || !nothing;
             if (!finish_build(cmd, pool_writable, *done)) {
@@ -2443,7 +2525,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     // fewer than the most are under way. With time to spare, the main thread builds some itself
     // and waits on the workers' rather than leave it unused.
     bool progress = false; // at least one step a frame
-    const bool help = budget >= k_help_ms;
+    const bool help = budget >= k_help_ms && m_main_thread_helps;
     m_helping = help;
     // (Prepared on the workers, a brick under way costs the main thread next to nothing. Prepared
     // here: more under way with more workers to build them, eight a worker.)
@@ -2472,8 +2554,29 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         if (m_gathering != nullptr) {
             gather(meshes, out_of_time);
             stepped = true;
+        } else if (for_main != nullptr && !for_main->unknown.empty() && for_main->sent_back < k_most_sent_back) {
+            // One a worker left for a mesh never looked up, which only the main thread may do:
+            // looked up (a pass over its clusters), and the brick goes back to the workers.
+            Build& b = *for_main;
+            for (const MeshId id : b.unknown) {
+                mesh_cache(id, meshes);
+            }
+            b.unknown.clear();
+            b.again = false; // (it reads the scene afresh)
+            ++b.sent_back;
+            ++m_sent_back;
+            b.queued_at = m_updates;
+            b.state.store(Build::k_waiting, std::memory_order_release);
+            m_batch.push_back(for_main);
+            if (m_batch.size() >= k_batch) {
+                submit_batch();
+            }
+            stepped = true;
         } else if (for_main != nullptr) {
-            // One a worker left (water over it, or too much): found and copied here.
+            // The main thread's own (set_preparing_on_workers(false)), one sent back to the
+            // workers more than once, or one it met while helping or with the workers starved
+            // (work, `here`): found and copied here.
+            for_main->unknown.clear();
             begin_here(for_main, meshes);
             if (m_gathering != nullptr) {
                 gather(meshes, out_of_time); // (most bricks are over a few instances: done at once)
@@ -2497,13 +2600,13 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
                     }
                 }
             }
-            const bool built = smallest != nullptr ? smallest->run() : waiting != nullptr && work(*waiting);
+            const bool built = smallest != nullptr ? smallest->run() : waiting != nullptr && work(*waiting, true);
             if (!built) {
                 std::this_thread::yield();
             }
             stepped = true;
         }
-        if (!stepped && !rescued) {
+        if (!stepped && !rescued && m_main_thread_helps) {
             for (const std::shared_ptr<Build>& b : m_builds) {
                 const u32 state = b->state.load(std::memory_order_acquire);
                 // (One waiting to be prepared: only when the workers have finished none for as
@@ -2512,7 +2615,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
                      (state == Build::k_waiting && m_updates - m_progress_at > k_most_waiting_updates)) &&
                     m_updates - b->queued_at > k_most_waiting_updates) {
                     rescued = true;
-                    stepped = state == Build::k_queued ? b->run() : work(*b);
+                    stepped = state == Build::k_queued ? b->run() : work(*b, true);
                     break;
                 }
             }
@@ -2522,6 +2625,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         }
         progress = true;
     }
+    submit_batch(); // (those sent back to the workers)
     if (pool_writable) {
         cmd.barrier(m_pool, rhi::ResourceState::shader_read);
     }

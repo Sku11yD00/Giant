@@ -83,7 +83,10 @@ struct VoxelStats {
     float changes_ms = 0.0f;
     float find_ms = 0.0f;
     float bricks_ms = 0.0f;
-    u32 begun_here = 0; // bricks the main thread began itself this frame (a worker could not prepare them)
+    // Bricks the main thread began itself this frame. With the workers preparing them: only one
+    // sent back to them twice for its meshes, or one over many that the main thread met while
+    // helping or with the workers starved.
+    u32 begun_here = 0;
 };
 
 // What the voxel world holds at a point, on one level.
@@ -170,8 +173,16 @@ public:
     void set_ruling_out(bool on) { m_ruling_out.store(on, std::memory_order_relaxed); }
     // Bricks prepared on the main thread as before (tests: the world built is the same).
     void set_preparing_on_workers(bool on) { m_prepare_on_workers = on; }
+    // (Tests) off: the main thread never takes a brick the workers have, with time to spare or
+    // with them starved, so which thread did what does not depend on their timing.
+    void set_main_thread_helping(bool on) { m_main_thread_helps = on; }
     u64 prepared_on_workers() const { return m_prepared_on_workers; } // ever (tests)
-    u64 begun_on_main_thread() const { return m_begun_here; } // those a worker could not prepare, ever (tests)
+    u64 begun_on_main_thread() const { return m_begun_here; } // those no worker prepared, ever (tests)
+    // (Tests) bricks sent back to the workers once the main thread had looked up their meshes,
+    // and the most instances and water triangles any brick placed was built from.
+    u64 sent_back_to_workers() const { return m_sent_back; }
+    u32 most_instances_in_a_brick() const { return m_most_in_a_brick; }
+    u32 most_water_triangles_in_a_brick() const { return m_most_water_in_a_brick; }
     u64 handed_to_more_workers() const { return m_more_handed; } // builds given to the loading screen's workers, ever (tests)
 
     // Whether the voxel world shows instance `index` (of the last update's
@@ -289,8 +300,9 @@ private:
         // Cancelled: dropped before a thread took it (it left the window, or the scene is going).
         static constexpr u32 k_gathering = 0, k_queued = 1, k_running = 2, k_built = 3, k_cancelled = 4;
         // Waiting: handed to the workers with nothing found yet; one of them finds what is over
-        // it, copies it and builds it (VoxelScene::work). For main: a worker met something only
-        // the main thread does (water over it, a mesh never looked up): started there instead.
+        // it, copies it and builds it (VoxelScene::work). For main: a worker met a mesh never
+        // looked up, which only the main thread does (it goes back to the workers after), or the
+        // workers are not preparing (set_preparing_on_workers): begun there.
         static constexpr u32 k_waiting = 5, k_for_main = 6;
         Box box;               // its bounds, world
         bool ruled = false;    // emptied because no instance over it has a triangle near
@@ -308,9 +320,14 @@ private:
         std::vector<std::shared_ptr<const Cut>> cuts;
         std::vector<WaterTriangle> water;
         std::unique_ptr<const voxel::Brick> result; // (built) null: nothing in it
+        // (For main) the meshes a worker met that were never looked up, and how many times it
+        // went back to the workers once they were.
+        std::vector<MeshId> unknown;
+        u32 sent_back = 0;
         std::vector<u32> found; // (gathering) the instances over it, and the next to copy
         u32 next = 0;
         u32 count = 0;          // items, once gathered (items itself is the builder's then)
+        u32 water_count = 0;    // water triangles, once gathered
         u64 queued_at = 0;      // the update it was handed to the workers in
         std::atomic<u32> state{k_gathering};
         bool again = false; // (main thread only) something over it changed meanwhile
@@ -372,8 +389,13 @@ private:
     void grid_rebuild();
     void find(const Box& box); // into m_found, each instance once
     // The same into the caller's own (a worker's): `seen` and `stamp` are its, kept between calls.
-    // `most`: given up (false) once more than that are found, or far more looked at.
-    bool find_into(const Box& box, std::vector<u32>& found, std::vector<u32>& seen, u32& stamp, usize most) const;
+    // `most`: given up (false) once more than that are found, or far more looked at; what was
+    // found by then is still right. `resume`: where the walk got to, for the next call to take
+    // it up from (k_from_start before the first; 0: from the start again, those seen passed
+    // over): the calls of one walk find each instance over the box once between them.
+    static constexpr usize k_from_start = ~usize{0};
+    bool find_into(const Box& box, std::vector<u32>& found, std::vector<u32>& seen, u32& stamp, usize most,
+                   usize* resume) const;
 
     // `only`: the cells to compare (the rest are as last time); null: all.
     void see_changes(std::span<const Instance> instances, std::span<const Material> materials,
@@ -404,12 +426,17 @@ private:
     // Bricks are prepared on the workers (start_build only hands them their keys, a batch a job):
     // each finds what is over its brick and copies it out, reading the copies, their grid and the
     // water's boxes under m_scene_lock; then rules out what has no triangle near and builds.
+    struct WaterBody;
     struct FindScratch {
         std::vector<u32> found;
         std::vector<Copy> copies; // those found, as they were while the scene was held
+        std::vector<u32> taken;   // which instance each is
+        std::vector<Copy> sorted; // (take's, to put them in the instances' order)
         std::vector<u32> seen;
         u32 stamp = 0;
         u64 scene = 0; // whose `seen` it holds (a thread may work for one scene after another)
+        std::vector<std::shared_ptr<const WaterBody>> water; // the bodies over the brick
+        std::vector<u32> triangles;                           // (gather_water's)
     };
     struct GatherRun { // runs of one mesh at one detail (a scatter cell's) look it up once
         MeshId last_mesh = ~MeshId{0};
@@ -418,14 +445,18 @@ private:
         bool have = false;
     };
     void submit_batch();
-    bool work(Build& build); // a worker, or the main thread helping: false if another has it
-    // With a share of the scene held: what is over the brick, copied into the scratch. Then, with
-    // none: ruled out, the rest made the build's items. False from either: the main thread's to
-    // begin (begin_here).
-    bool take(const Build& build, FindScratch& scratch) const;
+    // A worker, or the main thread helping (`here`): false if another has it.
+    bool work(Build& build, bool here);
+    // With a share of the scene held (one after another, for a brick over many): what is over the
+    // brick, copied into the scratch. Then, with none: ruled out, the rest made the build's
+    // items; false when a mesh was never looked up (`unknown`): the main thread's to look up.
+    // `one_share`: false from take if one share does not find them all (the main thread's own
+    // way of beginning it then: begin_here).
+    bool take(const Build& build, FindScratch& scratch, bool one_share);
     bool prepare(Build& build, FindScratch& scratch);
     void begin_here(const std::shared_ptr<Build>& build, const MeshLookup& meshes);
-    void gather_water(Build& build);
+    static void gather_water(Build& build, std::span<const std::shared_ptr<const WaterBody>> bodies,
+                             std::vector<u32>& triangles);
     // Copies an instance into the build. `meshes` null (a worker): false when its mesh was never
     // looked up, which only the main thread may do.
     bool gather_item(Build& build, const Copy& copy, GatherRun& run, const MeshLookup* meshes);
@@ -518,14 +549,12 @@ private:
         std::vector<DVec3> corners; // three a triangle, world
         std::vector<WaterPiece> pieces;
         u64 hash = 0; // its corners and colour
-        // Per triangle: the gather that last took it (each once a brick).
-        mutable std::vector<u32> stamps;
     };
     // Shared with a build in flight (it keeps the bodies it gathered from).
     std::vector<std::shared_ptr<const WaterBody>> m_water;
     u64 m_water_hash = 0;
     u64 m_water_version = 0;
-    u32 m_water_stamp = 0;
+    std::vector<u32> m_water_triangles; // (gather_water's, on the main thread)
     bool water_over(const Box& box) const; // any water piece over it
     void queue_changed(u32 index);
     Region& region_for(const Box& box);
@@ -580,14 +609,19 @@ private:
     bool m_touchable_ready = false;
     u64 m_serial = 0; // this scene among all ever made (FindScratch::scene)
     bool m_prepare_on_workers = true;
+    bool m_main_thread_helps = true;
     u64 m_prepared_on_workers = 0;
     u64 m_begun_here = 0;
+    u64 m_sent_back = 0;
+    u32 m_most_in_a_brick = 0;
+    u32 m_most_water_in_a_brick = 0;
+    u64 m_writes = 0; // times the scene was written (Writing): read with a share of m_scene_lock
     u64 m_progress_at = 0; // the update a brick a worker prepared was last finished in
     std::atomic<usize> m_copy_count{0}; // m_copies.size(), for a worker to size its scratch by
     // What the workers read while they prepare bricks (the copies, the grid they are filed in,
-    // the water's boxes) changes only while the main thread holds this whole (Writing); a worker
-    // holds a share of it to find and copy out what is over one brick (microseconds: the main
-    // thread waits for it), and stands back while m_writing.
+    // the water's bodies) changes only while the main thread holds this whole (Writing); a worker
+    // holds a share of it to find and copy out what is over one brick, or a part of one over
+    // many (microseconds: the main thread waits for it), and stands back while m_writing.
     std::shared_mutex m_scene_lock;
     std::atomic<bool> m_writing{false};
     struct Writing {

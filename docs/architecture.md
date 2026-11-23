@@ -6010,18 +6010,43 @@ Done in N2 part 2:
   (`see_changes`), for `set_water` and `set_stand_in_radius`, and the
   workers take no new share while it wants it (`m_writing`), so it waits
   only for the shares held then: each one brick's finding and copying
-  out, which gives up past 2,048 instances found or 32,768 looked at (a
-  wait on other threads all the same: see "Frame budget").
+  out, which lets go past 2,048 instances found or 32,768 looked at (a
+  wait on other threads all the same: see "Frame budget"). A brick over
+  more (a coarse one over a forest: 2,000 to 32,000 instances in the
+  valley at 90 m/s) is taken in as many shares, each let go before the
+  next: the grid's lists are walked in the same order while the scene is
+  not written, so a share skips the entries the ones before it passed
+  (whole lists at a time) and holds the scene only for what is new to
+  it. Written between two shares (`m_writes`), the walk starts over,
+  passing those already seen. An instance filed in several cells is
+  copied once, and all of them are put in the instances' order, so the
+  brick is built the same however it was taken. A change over the brick
+  between two shares builds it again, as any change over a brick under
+  way does.
   The mesh cache's map, cuts and grids are under `m_mesh_mutex` (its
-  entries shared, so one a worker looks at outlives `forget_mesh`). Three
-  kinds of brick stay the main thread's to begin, as before the workers
-  prepared them (a few hundred instances copied between looks at the
-  clock; one over at most 16 instances and water triangles built there
-  too while such builds average under 0.05 ms): one with water over it
-  (its triangles are stamped as they are taken; told as it is started,
-  with no trip to a worker), one over more than 2,048
-  instances (too many to copy out in one go) and one over a mesh never
-  looked up. Preparing on the main thread was what kept the voxel world
+  entries shared, so one a worker looks at outlives `forget_mesh`). Water
+  over a brick is the worker's too (it keeps the bodies over the brick
+  while it holds its share, and takes each triangle once from the pieces
+  it is filed in). Only a mesh never looked up is the main thread's: the
+  worker names every such mesh over the brick, the main thread looks
+  them up (a pass over a mesh's clusters) and the brick goes back to the
+  workers, twice at most before the main thread begins it itself (a
+  mesh forgotten again each time). The main thread also begins, its own
+  way, a brick over more than one share finds that it takes from the
+  workers itself (helping behind a loading screen, or with them
+  starved): a brick's whole search is not its to do in a frame. Until
+  then bricks with water over them and bricks over more than 2,048
+  instances were the main thread's to begin, and the search over a
+  coarse brick's thousands of instances, which is not split, took 8 to
+  13 ms of a frame on the development machine and 10 ms on an RTX 5090
+  PC: the one slow frame left in a flight at 90 m/s (`begun_here`
+  counted them; a flight begins none now, and the brick part of the
+  voxel world's frame took 3.6 ms at worst in flights there, null
+  device, where it reached 13). The main
+  thread still begins every brick with `set_preparing_on_workers(false)`
+  (tests): a few hundred instances copied between looks at the clock,
+  one over at most 16 instances and water triangles built there too
+  while such builds average under 0.05 ms. Preparing on the main thread was what kept the voxel world
   from keeping up at 90 m/s: about 40 bricks a frame of the 440 marked,
   against 350 to 400 with the workers preparing (null device, 4 cores,
   1 ms; what is left is the marking's half of the budget). A
@@ -6051,8 +6076,8 @@ Done in N2 part 2:
   trees: 20,000 instances) takes about 7,700 bricks and some 2.3 s of CPU
   time over about 2,100 frames (the coarsest bricks lie under every
   instance); in release builds its frames stay near the
-  1 ms budget, at worst a few ms (a search over a whole window, or the
-  search over a coarse brick and the water over it, is not split), even with every tree moving each
+  1 ms budget, at worst a few ms (a search over a whole window is not
+  split), even with every tree moving each
   frame, except the first (copying the instances and opening every
   window, about 7 ms; a teleport costs the same).
 - Known costs left: comparing the instances is a pass over all of them each
@@ -6384,8 +6409,10 @@ over the target frame time). Where it stands:
 - Known wait (voxel bricks prepared on workers): once a frame
   `VoxelScene::update` takes the scene's lock whole to apply the frame's
   changes, and waits for the workers holding a share of it. Each share is
-  one brick's finding and copying out (microseconds, capped at 2,048
-  instances found), but a worker the system took off its core while it
+  one brick's finding and copying out, or one share of a brick over many
+  (microseconds, capped at 2,048 instances found and 32,768 looked at
+  for the first time; three waits over 0.3 ms in a flight at 90 m/s on
+  the development machine), but a worker the system took off its core while it
   held one is waited for too. Not seen in the gates; if it shows as
   hitches on a machine with every core busy, the fix is fewer voxel
   workers there, not a longer hold.
