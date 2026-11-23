@@ -51,13 +51,13 @@ struct Bench {
     u64 version = 1;
     DVec3 camera{0.0, 1.0, 0.0};
 
-    explicit Bench(u32 capacity = 1024, u32 more_workers = VoxelScene::k_auto) {
+    explicit Bench(u32 capacity = 1024, u32 more_workers = VoxelScene::k_auto, float voxel_size = 0.25f) {
         rhi::DeviceDesc desc;
         desc.backend = rhi::Backend::null;
         device = rhi::create_device(desc);
         voxel::ClipmapDesc clip;
         clip.levels = 2;
-        clip.voxel_size = 0.25f; // bricks of 2 m and 4 m
+        clip.voxel_size = voxel_size; // (0.25: bricks of 2 m and 4 m)
         clip.bricks_per_axis = 8;
         voxels = std::make_unique<VoxelScene>(*device, clip, capacity, more_workers);
     }
@@ -865,9 +865,10 @@ GIANT_TEST("voxel scene: a mesh too dense for a grid rules nothing out") {
 }
 
 // The workers find what is over each brick, rule out what has no triangle near, copy the rest and
-// build it; the main thread only hands them the bricks, and begins itself those under water or
-// under more instances than a worker may hold the scene for. The world is the same as with every
-// brick prepared on the main thread, through moves and removals made while bricks are under way.
+// build it; the main thread only hands them the bricks and looks up the meshes they have not met
+// (water's bricks and those under more instances than one share of the scene holds are theirs
+// too). The world is the same as with every brick prepared on the main thread, through moves and
+// removals made while bricks are under way.
 GIANT_TEST("voxel scene: bricks prepared on the workers build the same world as on the main thread") {
     std::vector<VoxelProbe> seen[2];
     u32 bricks[2] = {};
@@ -875,6 +876,7 @@ GIANT_TEST("voxel scene: bricks prepared on the workers build the same world as 
         Bench b(4096);
         GIANT_CHECK(b.voxels->init());
         b.voxels->set_preparing_on_workers(workers);
+        b.voxels->set_main_thread_helping(!workers); // (so that which thread took a brick is no race)
         b.held = std::make_shared<const geometry::ClusterMesh>(geometry::build_clusters(geometry::make_plane()));
         Instance slope;
         slope.mesh = 1;
@@ -887,7 +889,7 @@ GIANT_TEST("voxel scene: bricks prepared on the workers build the same world as 
         box.scale = {5.0f, 7.0f, 5.0f};
         box.position = {4.0, 0.0, -5.0};
         b.instances.push_back(box);
-        // A heap of 3000 in one brick (more than a worker copies), and a row of small ones.
+        // A heap of 3000 in one brick (more than a worker copies in one share), and a row of small ones.
         for (int i = 0; i < 3000; ++i) {
             Instance cube;
             cube.mesh = 0;
@@ -902,7 +904,7 @@ GIANT_TEST("voxel scene: bricks prepared on the workers build the same world as 
             cube.position = {static_cast<double>(i % 20) * 0.6 - 6.0, 6.1, static_cast<double>(i / 20) * 0.6 - 6.0};
             b.instances.push_back(cube);
         }
-        // A pond (water's bricks are the main thread's to begin).
+        // A pond.
         std::vector<WaterVertex> v(4);
         v[0].position = {-3.0, 4.6, -3.0};
         v[1].position = {3.0, 4.6, -3.0};
@@ -923,14 +925,16 @@ GIANT_TEST("voxel scene: bricks prepared on the workers build the same world as 
             }
         };
         b.step();
-        for (int i = 0; i < 400 && b.voxels->stats().pending > 0; ++i) b.step();
+        for (int i = 0; i < 100000 && b.voxels->stats().pending > 0; ++i) b.step(workers ? 0.5f : 1000.0f);
         look();
         bricks[workers] = b.voxels->stats().bricks;
-        // Every brick but the pond's and the heap's was a worker's (or, switched off, none was).
+        // Every brick was a worker's, the pond's and the heap's too (or, switched off, none was):
+        // the main thread began none.
         const u64 prepared = b.voxels->prepared_on_workers();
         const u64 begun = b.voxels->begun_on_main_thread();
         GIANT_CHECK(workers ? prepared > 500 : prepared == 0);
-        GIANT_CHECK(workers ? begun >= 2 && begun < prepared / 4 : begun > 500);
+        GIANT_CHECK(workers ? begun == 0 : begun > 500);
+        GIANT_CHECK(b.voxels->most_instances_in_a_brick() == 3001); // (the heap and the slope: none missed or twice)
         u32 packed = 0;
         GIANT_CHECK(b.voxel_at({0.1, 4.6, 0.1}, packed) && voxel::water_voxel(packed));
         GIANT_CHECK(b.voxels->probe(0, {-4.7, 3.3, 5.3}) == VoxelProbe::solid); // the heap
@@ -949,10 +953,83 @@ GIANT_TEST("voxel scene: bricks prepared on the workers build the same world as 
         for (int i = 0; i < 20000 && (i < 2 || b.voxels->stats().pending > 0); ++i) b.step(0.5f);
         look();
         GIANT_CHECK(b.voxel_at({0.1, 5.4, 0.1}, packed) && voxel::water_voxel(packed));
+        // The cubes' mesh forgotten with no word of it, and the slope over them moved: a worker
+        // meets a mesh never looked up, which only the main thread may do. It looks it up and the
+        // brick goes back to the workers, begun here no more than before.
+        const u64 begun_before = b.voxels->begun_on_main_thread();
+        GIANT_CHECK(b.voxels->sent_back_to_workers() == 0);
+        const u32 looked_up = b.lookups[0];
+        b.voxels->forget_mesh(0);
+        b.instances[0].position.y += 0.11;
+        for (int i = 0; i < 20000 && (i < 2 || b.voxels->stats().pending > 0); ++i) b.step(0.5f);
+        GIANT_CHECK(b.voxels->stats().pending == 0 && b.lookups[0] == looked_up + 1);
+        GIANT_CHECK(workers ? b.voxels->sent_back_to_workers() >= 1 && b.voxels->begun_on_main_thread() == 0
+                            : b.voxels->sent_back_to_workers() == 0 && b.voxels->begun_on_main_thread() > begun_before);
+        GIANT_CHECK(b.voxels->probe(0, {-4.7, 3.3, 5.3}) == VoxelProbe::solid); // the heap, still
     }
     GIANT_CHECK(bricks[0] > 50 && bricks[0] == bricks[1]);
     GIANT_CHECK(seen[0].size() == seen[1].size() && seen[0] == seen[1]);
     GIANT_CHECK(std::count(seen[1].begin(), seen[1].end(), VoxelProbe::solid) > 500);
+}
+
+// A worker holds its share of the scene for 2,048 instances found at most, then lets go and takes
+// the walk up where it left it: a brick over a forest's worth is still its to prepare, every
+// instance copied once. In bricks far smaller than the 32 m cells the instances are filed in (all
+// 20,000 in one list), and in bricks of 128 m and 256 m over many cells, with instances too big
+// to file by cell and a pond filed in several pieces among them.
+GIANT_TEST("voxel scene: a brick over far more instances than one share holds is a worker's, whole") {
+    for (const bool coarse : {false, true}) {
+        u32 most[2] = {};
+        u32 bricks[2] = {};
+        for (const bool workers : {false, true}) {
+            Bench b(4096, VoxelScene::k_auto, coarse ? 16.0f : 0.25f);
+            GIANT_CHECK(b.voxels->init());
+            b.voxels->set_preparing_on_workers(workers);
+            b.voxels->set_main_thread_helping(!workers); // (so that which thread took a brick is no race)
+            // In the middle of one brick of each level: within 1.2 m, or 100 m.
+            const double step = coarse ? 3.7 : 0.045;
+            const DVec3 from = coarse ? DVec3{-120.0, 8.0, 12.0} : DVec3{-5.6, 2.4, 4.4};
+            for (int i = 0; i < 20000; ++i) {
+                Instance cube;
+                cube.mesh = 0;
+                cube.scale = coarse ? Vec3{2.0f, 2.0f, 2.0f} : Vec3{0.04f, 0.04f, 0.04f};
+                cube.position = {from.x + (i % 27) * step, from.y + (i / 27 % 27) * step, from.z + (i / 729) * step};
+                b.instances.push_back(cube);
+            }
+            if (coarse) {
+                // Five 300 m wide, across the whole brick (over more than 64 cells: kept in a list
+                // of their own, walked after the cells'), and a pond of two triangles 110 m wide.
+                for (int i = 0; i < 5; ++i) {
+                    Instance wide;
+                    wide.mesh = 0;
+                    wide.scale = {300.0f, 1.0f, 300.0f};
+                    wide.position = {-64.0, 20.0 + i * 15.0, 64.0};
+                    b.instances.push_back(wide);
+                }
+                std::vector<WaterVertex> v(4);
+                v[0].position = {-120.0, 60.0, 10.0};
+                v[1].position = {-10.0, 60.0, 10.0};
+                v[2].position = {-10.0, 60.0, 120.0};
+                v[3].position = {-120.0, 60.0, 120.0};
+                const std::vector<u32> idx{0, 2, 1, 0, 3, 2};
+                std::vector<WaterLook> looks(1);
+                b.voxels->set_water(v, idx, looks);
+            }
+            b.step();
+            for (int i = 0; i < 100000 && b.voxels->stats().pending > 0; ++i) b.step(workers ? 0.5f : 1000.0f);
+            GIANT_CHECK(b.voxels->stats().pending == 0);
+            most[workers] = b.voxels->most_instances_in_a_brick();
+            bricks[workers] = b.voxels->stats().bricks;
+            GIANT_CHECK(workers ? b.voxels->begun_on_main_thread() == 0 : b.voxels->prepared_on_workers() == 0);
+            GIANT_CHECK(b.voxels->probe(0, from + DVec3{0.01, 0.01, 0.01}) == VoxelProbe::solid);
+            GIANT_CHECK(b.voxels->probe(1, from + DVec3{0.01, 0.01, 0.01}) == VoxelProbe::solid);
+            // Each of the pond's triangles once, though it is filed in every 64 m square it reaches.
+            GIANT_CHECK(b.voxels->most_water_triangles_in_a_brick() == (coarse ? 2u : 0u));
+        }
+        const u32 all = coarse ? 20005u : 20000u;
+        GIANT_CHECK(most[0] == all && most[1] == all);
+        GIANT_CHECK(bricks[0] > 0 && bricks[0] == bricks[1]);
+    }
 }
 
 // What can happen to bricks handed to the workers and not yet built: the camera jumps away (those
