@@ -4,7 +4,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from game_gate import begun, heading, loading_failures, package_failures  # noqa: E402
+from game_gate import (FLIGHT_FROM, FLIGHT_OVER, FLIGHT_SPACING, begun, coming, flight_at, flight_text, heading,  # noqa: E402
+                       loading_failures, package_failures, settled)
 
 
 def main():
@@ -19,6 +20,78 @@ def main():
     check(abs(heading([0, 0, 0], (-10, 0)) - 90) < 1e-9, "down -x is yaw 90")
     check(abs(heading([0, 0, 0], (10, 0)) + 90) < 1e-9, "down +x is yaw -90")
     check(abs(abs(heading([5, 0, 5], (5, 20))) - 180) < 1e-9, "down +z is yaw 180")
+
+    # A flight: down -z from where it starts, over the higher of the two heights it is between,
+    # looking on level; never past either end of the heights read.
+    heights = [1.0, 5.0, 2.0, 2.0]
+    position, look_at = flight_at(0.0, heights)
+    check(position == [FLIGHT_FROM[0], 5.0 + FLIGHT_OVER, FLIGHT_FROM[1]], f"a flight starts where it is to: {position}")
+    check(look_at == [position[0], position[1], position[2] - 100.0], "and looks on down -z, level")
+    position, _ = flight_at(FLIGHT_SPACING * 2.5, heights)
+    check(position[1] == 2.0 + FLIGHT_OVER and position[2] == FLIGHT_FROM[1] - FLIGHT_SPACING * 2.5, "it is over the ground where it is")
+    check(flight_at(1e9, heights)[0][2] == FLIGHT_FROM[1] - FLIGHT_SPACING * 3, "it stops at the last height read")
+    check(flight_at(-5.0, heights)[0][2] == FLIGHT_FROM[1], "and never starts before the first")
+    times = {"frames": 9, "average_ms": 8.0, "p99_ms": 9.0, "worst_ms": 10.0, "hitches": 0}
+    behind = {"most": 400, "end": 120, "built": 900, "marked": 1200, "samples": 3, "rebuilds": 2}
+    text = flight_text(90.0, 10.0, times, behind, 1.26, {"scatter": 2})
+    check("at 90 m/s for 10 s" in text and "work pending at most 400 (120 as it stopped)" in text, f"a flight's line: {text}")
+    check("caught up 1.3 s after stopping (last to come: scatter 2)" in text, f"when it caught up, and what came last: {text}")
+    check("built 300 bricks of 400 marked a frame sampled" in text, f"its rates: {text}")
+    check("built every window again 2 times" in text, f"its rebuilds: {text}")
+    check("caught up 0.0 s after stopping;" in flight_text(90.0, 10.0, times, behind, 0.0, {}), "nothing came last if nothing came")
+    check("not caught up (voxel work 7)" in flight_text(90.0, 10.0, times, dict(behind, samples=0), None, {"voxel work": 7}),
+          "one that never caught up says so, and what was still coming")
+
+    def frame(pending=0, light=0, shadows=0):
+        return {"voxels": {"pending": pending}, "gi": {"waiting": light}, "shadows": {"behind": shadows}}
+
+    def world(reading=0, waiting=0, far_reading=0, level=0):
+        return {"reading": reading, "waiting": waiting,
+                "far_ground": {"reading": far_reading, "levels": [{"building": 0}, {"building": level}]}}
+
+    check(coming(frame(), world(), {"building": 0}, 0) == {}, "nothing coming in is calm")
+    check(coming(frame(pending=3), world(), {"building": 0}, 0) == {"voxel work": 3}, "the voxel world's work is coming")
+    check(coming(frame(light=2, shadows=1), world(), {"building": 0}, 0) == {"light": 2, "shadows": 1}, "its light and the shadows")
+    check(coming(frame(), world(reading=1, waiting=2), {"building": 0}, 0) == {"cells read": 1, "cells waiting": 2}, "cells")
+    check(coming(frame(), world(far_reading=1, level=2), {"building": 4}, 5) == {"scatter": 4, "ground": 5, "far ground": 3},
+          "scatter, the ground and the far ground")
+
+    # settled: five calm looks running; the seconds are to the first of them; what came last is told.
+    class Flown:
+        def __init__(self, calm_from, busy_again=()):
+            self.looks = 0
+            self.now = 0.0
+            self.calm_from, self.busy_again = calm_from, busy_again
+
+        def hover(self, frames):
+            self.looks += 1
+            self.now += 1.0
+
+        def clock(self):
+            return self.now
+
+        def busy(self):
+            return self.looks < self.calm_from or self.looks in self.busy_again
+
+        def last_frame(self):
+            return frame(pending=9 if self.busy() else 0)
+
+        def tool(self, name, arguments=None):
+            if name == "get_world":
+                return world()
+            return {"building": 0, "meshes": {"building": 0}}
+
+    editor = Flown(3)
+    check(settled(editor, 100.0, editor.clock) == (3.0, {"voxel work": 9}) and editor.looks == 7,
+          "settled after five calm looks, timed to the first")
+    editor = Flown(1)
+    check(settled(editor, 100.0, editor.clock) == (1.0, {}), "calm from the first look: nothing came")
+    editor = Flown(2, busy_again=(4,))
+    check(settled(editor, 100.0, editor.clock)[0] == 5.0 and editor.looks == 9, "a look that is not calm starts the count again")
+    editor = Flown(1000)
+    check(settled(editor, 5.0, editor.clock) == (None, {"voxel work": 9}) and editor.looks == 6, "never calm: None once the time is up")
+    editor = Flown(4)
+    check(settled(editor, 5.0, editor.clock)[0] == 4.0, "a calm run begun in time is waited through past the time")
 
     # A loading screen: stood once more, gone, its bar full, in time on a real GPU.
     def loading(**changed):

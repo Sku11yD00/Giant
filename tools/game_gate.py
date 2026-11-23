@@ -33,6 +33,22 @@ screen while they get done, 30 s at most) and when each thing the
 screen waited for was last still to come (where its time went) is printed.
 Do not touch the mouse or the keys while it runs: they are the player's.
 
+Before the packaged game is run, the editor's camera (not the game's
+player: the editor's own streaming, at play's share of a frame for the
+voxel world) also flies down the valley towards the town, low over the
+trees, at FLIGHT_SPEEDS (30 and 90 m/s: a car and a jet; by the clock, so
+the speed is the same at any frame rate) for FLIGHT_SECONDS each, from a
+standstill with everything round it in. Printed for each: the frame
+times, how far behind the voxel world fell (its work pending: bricks to
+find or build and changes to take in, at most and as the flight ended),
+how many bricks it built of those marked in the frames sampled (every
+other frame: those the camera moved in; a brick marked that leaves the
+window before its turn is never built), and how long after stopping
+everything had caught up, with what came last. These are measured, not
+yet judged, but for one thing on a real GPU: it must catch up within
+CATCH_UP_SECONDS of stopping. A flight that cannot be flown is a failure
+of its own and the game is still run.
+
 On CI (the null device) it checks all but the speed.
 """
 import math
@@ -51,6 +67,14 @@ RUN_FRAMES = 1200         # of each run
 RUN_METRES = 20.0         # the least the player is to cover in a run, over the ground (8 m/s: 1200 frames at 480 fps)
 LOADING_SECONDS = 60.0    # the most a loading screen may take on a real GPU
 NAME = "Valley"
+FLIGHT_SPEEDS = (30.0, 90.0)  # metres a second
+FLIGHT_SECONDS = 10.0         # of each flight on a real GPU (the null device: FLIGHT_SECONDS_NULL)
+FLIGHT_SECONDS_NULL = 2.0
+FLIGHT_FROM = (150.0, 900.0)  # (x, z): up the valley, on the river's bank; flown down -z, to end abreast of the town
+FLIGHT_OVER = 12.0            # metres over the ground (over the trees)
+FLIGHT_SPACING = 8.0          # metres between the ground heights read along the way
+CATCH_UP_SECONDS = 60.0       # the most the world may take to catch up once the camera stops (a real GPU)
+SETTLE_SECONDS = 300.0        # the most it may take to come in where a flight starts
 
 
 def never_in_it(name):
@@ -81,6 +105,143 @@ def package_failures(folder, made):
 def heading(position, to):
     """The yaw (degrees: 0 looks down -z, 90 down -x) from `position` towards the point `to` (x, z)."""
     return math.degrees(math.atan2(position[0] - to[0], position[2] - to[1]))
+
+
+def flight_at(metres, heights):
+    """Where a flight is `metres` along its way down -z from FLIGHT_FROM (never past the last of
+    `heights`, the ground every FLIGHT_SPACING metres along it): (position, look_at), FLIGHT_OVER
+    over the higher of the two heights it is between, looking 100 m on at the same height."""
+    metres = min(max(metres, 0.0), FLIGHT_SPACING * (len(heights) - 1))
+    i = min(int(metres / FLIGHT_SPACING), len(heights) - 2)
+    y = max(heights[i], heights[i + 1]) + FLIGHT_OVER
+    x, z = FLIGHT_FROM[0], FLIGHT_FROM[1] - metres
+    return [x, y, z], [x, y, z - 100.0]
+
+
+def flight_text(speed, seconds, times, behind, caught_up, last):
+    """A flight's line. `behind`: {"most", "end", "built", "marked", "samples", "rebuilds"} of the
+    voxel world over the flight (its work pending at most and as it ended; built and marked summed
+    over the frames sampled; how often every window was built again, too much having changed at
+    once); `caught_up`: seconds after stopping, or None if it never did; `last`: what was last
+    still to come (coming's answer)."""
+    samples = max(behind["samples"], 1)
+    came = ", ".join(f"{key} {value}" for key, value in last.items())
+    after = f"not caught up ({came or 'nothing seen coming'})" if caught_up is None else \
+        f"caught up {caught_up:.1f} s after stopping" + (f" (last to come: {came})" if came else "")
+    return (f"flying at {speed:.0f} m/s for {seconds:.0f} s: {describe(times)}; the voxel world's work pending "
+            f"at most {behind['most']} ({behind['end']} as it stopped), {after}; it built "
+            f"{behind['built'] / samples:.0f} bricks of {behind['marked'] / samples:.0f} marked a frame sampled, and "
+            f"built every window again {behind['rebuilds']} times")
+
+
+def coming(frame, world, scatter, ground_building):
+    """What is still coming in, by name (empty: all is calm). `frame`: the last frame's figures
+    (the voxel world's work pending, its light waiting, shadow pages behind); `world`: get_world
+    (cells being read or waiting, the far ground); `scatter`: get_scatter; `ground_building`: the
+    ground meshes being built."""
+    far = world["far_ground"]
+    counts = {"voxel work": frame["voxels"]["pending"], "light": frame["gi"]["waiting"],
+              "shadows": frame["shadows"]["behind"], "cells read": world["reading"],
+              "cells waiting": world["waiting"], "scatter": scatter["building"], "ground": ground_building,
+              "far ground": far["reading"] + sum(level["building"] for level in far["levels"])}
+    return {key: value for key, value in counts.items() if value}
+
+
+def settled(editor, seconds, clock=time.perf_counter):
+    """Waits until nothing has been coming in for five looks running, ten frames apart: just
+    after the camera moved, the world round it has yet to start coming. Returns (the seconds
+    until the first of those looks, or None if no such run of looks had begun after `seconds`;
+    what was last seen still coming)."""
+    tool = editor.tool
+    start = clock()
+    since = None
+    looks = 0
+    last = {}
+    while True:
+        editor.hover(10)
+        now = clock() - start
+        still = coming(editor.last_frame(), tool("get_world"), tool("get_scatter"),
+                       tool("get_terrain")["meshes"]["building"])
+        if still:
+            last = still
+            looks = 0
+            if now > seconds:
+                return None, last
+        else:
+            since = now if looks == 0 else since
+            looks += 1
+            if looks >= 5:
+                return since, last
+
+
+def flown(editor, metres_from, speed, seconds, heights):
+    """One flight: from a standstill `metres_from` along the way, `speed` m/s by the clock for
+    `seconds`. Returns (frame times, the voxel world's `behind`, seconds to catch up or None,
+    what was last still to come)."""
+    tool = editor.tool
+    position, look_at = flight_at(metres_from, heights)
+    tool("set_camera", {"position": position, "look_at": look_at})
+    # Coming in where it starts: given more time a frame than the flight has (as a loading screen
+    # would), then the flight's own share.
+    tool("set_render_settings", {"voxel_ms_per_frame": 8.0})
+    ready, still = settled(editor, SETTLE_SECONDS)
+    tool("set_render_settings", {"voxel_ms_per_frame": 1.0})
+    if ready is None:
+        raise RuntimeError(f"the world never settled before the flight at {speed:.0f} m/s: still coming, {still}")
+    editor.hover(240)  # (the frame times kept hold none of what came before)
+    behind = {"most": 0, "end": 0, "built": 0, "marked": 0, "samples": 0, "rebuilds": 0}
+    rebuilds = editor.last_frame()["voxels"]["rebuilds"]
+    times = []
+    recorded = editor.begin_frames()
+    start = time.perf_counter()
+    stop = 0
+    while True:
+        elapsed = time.perf_counter() - start
+        if elapsed >= seconds:
+            break
+        position, look_at = flight_at(metres_from + speed * elapsed, heights)
+        tool("set_camera", {"position": position, "look_at": look_at})
+        voxels = editor.last_frame()["voxels"]  # (of the frame the camera moved in)
+        behind["most"] = max(behind["most"], voxels["pending"])
+        behind["end"] = voxels["pending"]
+        behind["built"] += voxels["built"]
+        behind["marked"] += voxels["marked"]
+        behind["samples"] += 1
+        behind["rebuilds"] = voxels["rebuilds"] - rebuilds
+        stop += 1
+        if stop % 50 == 0:  # (the editor keeps its last 240 frames: two commands a stop)
+            times, recorded = editor.read_frames(times, recorded, stop)
+    times, recorded = editor.read_frames(times, recorded, stop)
+    editor.end_frames(times)
+    return (times, behind, *settled(editor, CATCH_UP_SECONDS))
+
+
+def flights(editor, real_gpu):
+    """The flights down the valley (the editor's camera, the valley built). Returns the failures."""
+    tool = editor.tool
+    seconds = FLIGHT_SECONDS if real_gpu else FLIGHT_SECONDS_NULL
+    width, height = set_resolution(editor, *RESOLUTION)
+    print(f"game_gate: the flights: the editor's camera at {width} x {height}" +
+          ("" if real_gpu else " (not a real GPU: the timings mean nothing)"))
+    tool("set_render_settings", {**ALL_ON, **WEATHER_ON})
+    way = sum(speed * seconds for speed in FLIGHT_SPEEDS)
+    points = [[FLIGHT_FROM[0], FLIGHT_FROM[1] - FLIGHT_SPACING * i] for i in range(int(way / FLIGHT_SPACING) + 2)]
+    heights = tool("get_terrain", {"points": points})["heights"]
+    if any(height is None for height in heights):
+        raise RuntimeError("the flights' way leaves the ground")
+    failures = []
+    metres = 0.0
+    for speed in FLIGHT_SPEEDS:
+        times, behind, caught_up, last = flown(editor, metres, speed, seconds, heights)
+        metres += speed * seconds
+        print(f"game_gate: {flight_text(speed, seconds, frame_stats(times), behind, caught_up, last)}")
+        slow = slow_frames(times, editor.slow, editor.typicals, editor.slow_over_ms)
+        if slow and real_gpu:
+            print(f"game_gate: flying at {speed:.0f} m/s: {slow}")
+        if caught_up is None and real_gpu:  # (by the clock: on the null device it says nothing)
+            failures.append(f"flying at {speed:.0f} m/s: the world had not caught up {CATCH_UP_SECONDS:.0f} s "
+                            f"after the camera stopped: still coming, {last}")
+    return failures
 
 
 # What a loading screen counts as still to come (get_menu's loading), for where its time went.
@@ -166,7 +327,7 @@ def main() -> int:
         # The editor, working in a folder of its own: the valley, saved as a world, packaged as a game.
         work = os.path.join(folder, "work")
         os.makedirs(work)
-        editor = Editor(os.path.abspath(sys.argv[1]), sys.argv[2:], "game_gate", timeout=800, cwd=work)
+        editor = Editor(os.path.abspath(sys.argv[1]), sys.argv[2:], "game_gate", timeout=1500, cwd=work)
         tool = editor.tool
         info = tool("get_engine_info")
         print(f"game_gate: {info['adapter']} ({info['backend']})")
@@ -178,6 +339,10 @@ def main() -> int:
         print(f"game_gate: saved {saved['cells']} cells; packaged {made['files']} files, "
               f"{made['bytes'] / 1e6:.0f} MB, as {made['program']}" +
               "".join(f"\ngame_gate: note: {note}" for note in made.get("notes", [])))
+        try:  # (measurements: one that cannot be made is a failure, and the game is still run)
+            failures += flights(editor, editor.real_gpu())
+        except Exception as error:
+            failures.append(f"the flights: {error!r}")
         editor.close()
         editor = None
         failures += package_failures(out, made)

@@ -524,7 +524,7 @@ performance gates come with it: in that folder, run
 (a crowd walking the valley's town, some struck down by a blast and shots and getting up again, and faces seen close) and `python living_gate.py giant_editor.exe`
 (5,000 people living their day in the valley's town and villages, flown through as they wake, a shot in the street, a game saved and loaded; about ten minutes) and `python crowd_gate.py giant_editor.exe`
 (3,000 people in a market square by the town, drawn as figures far off and as characters near, flown to, through and round; about five minutes) and `python game_gate.py giant_editor.exe`
-(the valley packaged as a game, and that game run on its own: a new game begun behind its loading screen, the player running down the valley, the game saved and taken up again; about three minutes) (Python 3; keep the folder's `.py` files together: the gates use one another). A gate with hitches prints which part of the frame each one spent its time on; set `GIANT_GATE_FRAMES` to a file name to keep the details. C# scripts need the .NET 10 runtime
+(the valley packaged as a game, and that game run on its own: a new game begun behind its loading screen, the player running down the valley, the game saved and taken up again, and before that the editor's camera flown down the valley at 30 and 90 m/s to measure how the voxel world keeps up; about four minutes) (Python 3; keep the folder's `.py` files together: the gates use one another). A gate with hitches prints which part of the frame each one spent its time on; set `GIANT_GATE_FRAMES` to a file name to keep the details. C# scripts need the .NET 10 runtime
 (https://dotnet.microsoft.com/download/dotnet/10.0); the rest works without it.
 
 The earlier Godot-based work is archived on the branches

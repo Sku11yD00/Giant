@@ -5824,7 +5824,7 @@ and load, settings), which also route the real mouse and keys to screens.
   It passes when the package is whole with nothing of the chat or a key
   in it, each run holds 60 fps without micro stutter (the gates' own
   limits), each loading stood once and ended with its bar full in under
-  a minute with nothing it counts still to come, the player ran 50 m or
+  a minute with nothing it counts still to come, the player ran 20 m or
   more and ended on the ground, the game taken up again is where it was
   saved, and streaming never failed. (A world names no player start
   yet, so a new game begins under the view the program opens with, here
@@ -5832,9 +5832,24 @@ and load, settings), which also route the real mouse and keys to screens.
   under the terrain on the ground over it, not left to fall.) It prints how long each loading
   took and what was behind when play began (the voxel world, its light
   and the shadows are waited for by the loading screen for at most
-  5 s). On CI
+  30 s). On CI
   (null device, optimised builds: ctest `editor_game_gate`) all but the
-  speed; its own arithmetic by `tools/test_game_gate.py`.
+  speed; its own arithmetic by `tools/test_game_gate.py`. Before the
+  packaged game is run, the editor's camera (not the game's player: the
+  editor's own streaming, the voxel world at play's 1 ms a frame) also
+  flies down the valley towards the town, 12 m over the ground, at 30
+  and 90 m/s (by the clock, so the same speed at any frame rate; 10 s
+  each, 2 s on the null device), each from a standstill with nothing
+  coming in (cells, ground, far ground, scatter, the voxel world, its
+  light, the shadows; waited for at 8 ms a frame). For each it prints the
+  frame times, the most work the voxel world had pending (bricks to find
+  or build, changes) and what it had as the camera stopped, how many
+  bricks it built of those marked in the frames sampled (every other
+  frame, those the camera moved in), whole rebuilds, and how long after
+  stopping everything had caught up with what came last: measured, not
+  judged yet, except that on a real GPU it must catch up within 60 s. A
+  flight that cannot be flown is a failure of its own, and the game is
+  still run.
 - **A game as a folder (N7 part 3).** `package_game` writes the open
   world, as saved, as a game into a new folder (`editor/src/game_package.h`;
   never over anything: the folder must not be there, or be empty): the
