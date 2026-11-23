@@ -75,6 +75,15 @@ struct VoxelStats {
     u32 building = 0;
     u32 changes = 0;
     u32 marked = 0;
+    // Where cpu_ms went this frame, for finding what takes a frame over its budget: the windows
+    // following the camera (slabs entered, the bricks they push out forgotten), taking in the scene's
+    // changes (the workers stand back meanwhile), finding bricks (marking), and bricks (those
+    // built placed and uploaded, more started, some built here).
+    float shift_ms = 0.0f;
+    float changes_ms = 0.0f;
+    float find_ms = 0.0f;
+    float bricks_ms = 0.0f;
+    u32 begun_here = 0; // bricks the main thread began itself this frame (a worker could not prepare them)
 };
 
 // What the voxel world holds at a point, on one level.
@@ -156,6 +165,8 @@ public:
     // Bricks emptied without a build because no instance over them has a triangle near, ever
     // (tests), and that check switched off (tests: every such brick is built, and comes out empty).
     u64 ruled_out() const { return m_ruled_out; }
+    // The most keys any queue of bricks waiting to be built holds, stale ones and all (tests).
+    usize longest_queue() const;
     void set_ruling_out(bool on) { m_ruling_out.store(on, std::memory_order_relaxed); }
     // Bricks prepared on the main thread as before (tests: the world built is the same).
     void set_preparing_on_workers(bool on) { m_prepare_on_workers = on; }

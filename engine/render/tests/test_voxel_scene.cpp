@@ -603,6 +603,150 @@ GIANT_TEST("voxel scene: a loading screen's extra workers build the same world")
     GIANT_CHECK(bricks[0] > 20 && bricks[0] == bricks[1]);
 }
 
+namespace {
+// A street of boxes down +x, a few hundred metres of it.
+void add_street(Bench& b) {
+    for (int i = 0; i < 480; ++i) {
+        Instance box;
+        box.mesh = 0;
+        box.scale = {1.0f, 1.0f + static_cast<float>(i % 3), 1.0f};
+        box.position = {static_cast<double>(i / 4) * 2.5 - 20.0, 0.5, static_cast<double>(i % 4) * 3.0 - 4.5};
+        b.instances.push_back(box);
+    }
+}
+// What both levels hold on a grid round the camera, and the bricks in the pool.
+std::vector<VoxelProbe> looked_at(Bench& b, u32& bricks) {
+    std::vector<VoxelProbe> seen;
+    for (u32 level = 0; level < 2; ++level) {
+        for (double z = -7.9; z < 8.0; z += 0.8) {
+            for (double y = -3.9; y < 6.0; y += 0.8) {
+                for (double x = -7.9; x < 8.0; x += 0.8) {
+                    seen.push_back(b.voxels->probe(level, b.camera + DVec3{x, y, z}));
+                }
+            }
+        }
+    }
+    bricks = b.voxels->stats().bricks;
+    return seen;
+}
+// The most bricks that wait at once when the street is built from nothing round `camera`, a
+// brick begun a frame: all that a window there can want.
+u32 most_waiting_from_nothing(const DVec3& camera) {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    b.voxels->set_preparing_on_workers(false);
+    add_street(b);
+    b.camera = camera;
+    u32 most = 0;
+    for (int frame = 0; frame < 8; ++frame) {
+        b.step(0.0f);
+        most = std::max(most, b.voxels->stats().waiting);
+    }
+    return most;
+}
+void settle(Bench& b) {
+    b.step();
+    for (int i = 0; i < 400 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+}
+} // namespace
+
+// At speed the windows move off bricks still waiting to be built. Those are forgotten as their
+// slots are taken (nothing walks the queues), so what waits is never more than the windows hold,
+// and the world where the camera stops is the one built there from nothing.
+GIANT_TEST("voxel scene: bricks still waiting when their window moves on are forgotten, and the world is whole where it stops") {
+    Bench flown(4096);
+    GIANT_CHECK(flown.voxels->init());
+    flown.voxels->set_preparing_on_workers(false); // (one brick begun a frame: far behind, its queues popped slowly)
+    add_street(flown);
+    // (The street is the same all along: what a window can want is much the same anywhere.)
+    const u32 window = most_waiting_from_nothing(flown.camera + DVec3{120.0, 0.0, 0.0});
+    GIANT_CHECK(window > 20);
+    u32 most = 0;
+    for (int stop = 0; stop < 60; ++stop) {
+        flown.camera.x += 4.0; // two of the fine level's bricks a frame
+        flown.step(0.0f);
+        most = std::max(most, flown.voxels->stats().waiting);
+    }
+    // Never more waiting than a window can want (and a slab's worth for where it stood):
+    // the bricks of the windows it has left are not counted on.
+    GIANT_CHECK(most > 20 && most <= window + window / 4);
+    flown.voxels->set_preparing_on_workers(true);
+    settle(flown);
+    Bench fresh(4096);
+    GIANT_CHECK(fresh.voxels->init());
+    add_street(fresh);
+    fresh.camera = flown.camera;
+    settle(fresh);
+    u32 bricks[2] = {};
+    const std::vector<VoxelProbe> a = looked_at(flown, bricks[0]);
+    const std::vector<VoxelProbe> b = looked_at(fresh, bricks[1]);
+    GIANT_CHECK(a == b);
+    GIANT_CHECK(bricks[0] > 20 && bricks[0] == bricks[1]);
+    GIANT_CHECK(std::count(a.begin(), a.end(), VoxelProbe::solid) > 20);
+    GIANT_CHECK(std::count(a.begin(), a.end(), VoxelProbe::building) == 0);
+}
+
+// A brick that leaves the window and comes back while its key still waits in a queue is built
+// (once: the key left behind finds nothing to do), and going back and forth for long does not
+// grow the queues: keys of bricks gone, and repeated ones, are taken out.
+GIANT_TEST("voxel scene: going there and back with bricks waiting builds each once and keeps the queues short") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    b.voxels->set_preparing_on_workers(false); // (one brick begun a frame: the queues are popped slowly)
+    add_street(b);
+    const DVec3 home = b.camera;
+    const DVec3 away = home + DVec3{40.0, 0.0, 0.0}; // (past both windows)
+    const u32 window = std::max(most_waiting_from_nothing(home), most_waiting_from_nothing(away));
+    const usize slots = b.voxels->clipmap().slots_per_level();
+    u32 most = 0;
+    usize longest = 0;
+    for (int trip = 0; trip < 150; ++trip) {
+        b.camera = trip % 2 == 0 ? away : home;
+        b.step(0.0f);
+        const VoxelStats s = b.voxels->stats();
+        most = std::max(most, s.waiting);
+        // (Twice the bricks waiting and a level's worth, and what one frame can mark besides.)
+        GIANT_CHECK(b.voxels->longest_queue() <= 2 * usize{s.waiting} + slots + 2 * slots);
+        longest = std::max(longest, b.voxels->longest_queue());
+    }
+    // Only the window it is in is waited for, never the one it left as well.
+    GIANT_CHECK(most > 20 && most <= window);
+    GIANT_CHECK(longest > 0);
+    b.voxels->set_preparing_on_workers(true);
+    settle(b);
+    Bench fresh(4096);
+    GIANT_CHECK(fresh.voxels->init());
+    add_street(fresh);
+    fresh.camera = b.camera;
+    settle(fresh);
+    u32 bricks[2] = {};
+    const std::vector<VoxelProbe> there = looked_at(b, bricks[0]);
+    GIANT_CHECK(there == looked_at(fresh, bricks[1]));
+    GIANT_CHECK(bricks[0] > 20 && bricks[0] == bricks[1]);
+    GIANT_CHECK(std::count(there.begin(), there.end(), VoxelProbe::building) == 0);
+    // Idle (the voxel world switched off): the frame's figures are none.
+    b.voxels->idle();
+    const VoxelStats idle = b.voxels->stats();
+    GIANT_CHECK(idle.cpu_ms == 0.0f && idle.shift_ms == 0.0f && idle.changes_ms == 0.0f && idle.find_ms == 0.0f &&
+                idle.bricks_ms == 0.0f && idle.begun_here == 0 && idle.marked == 0);
+}
+
+// Where a frame's time went adds up to the time it took.
+GIANT_TEST("voxel scene: the parts of a frame's time add up to it") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    add_street(b);
+    for (int frame = 0; frame < 30; ++frame) {
+        b.camera.x += 2.0;
+        b.step(frame % 2 == 0 ? 0.5f : 1000.0f);
+        const VoxelStats s = b.voxels->stats();
+        const float parts = s.shift_ms + s.changes_ms + s.find_ms + s.bricks_ms;
+        GIANT_CHECK(s.shift_ms >= 0.0f && s.changes_ms >= 0.0f && s.find_ms >= 0.0f && s.bricks_ms >= 0.0f);
+        GIANT_CHECK(parts <= s.cpu_ms + 0.001f && parts >= s.cpu_ms - 0.05f - 0.01f * s.cpu_ms);
+    }
+}
+
 // Most bricks under an instance's bounds hold none of its triangles (the air over a slope and the
 // earth under it): they are emptied from the mesh's grid without a build, and the world built is
 // the same as with every one of them built.

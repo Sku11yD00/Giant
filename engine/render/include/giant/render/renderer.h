@@ -929,6 +929,14 @@ struct RenderStats {
     u32 voxel_building = 0;       // of voxel_pending: bricks under way (handed to the workers, being built, or built and not yet in the pool)
     u32 voxel_changes = 0;        // of voxel_pending: changes not yet turned into bricks
     u32 voxel_marked = 0;         // bricks marked to be built this frame
+    // Where voxel_cpu_ms went: the windows following the camera, taking in the scene's changes,
+    // finding bricks, and bricks (placing, uploading, starting, building); and the bricks the
+    // main thread began itself this frame.
+    float voxel_shift_ms = 0.0f;
+    float voxel_changes_ms = 0.0f;
+    float voxel_find_ms = 0.0f;
+    float voxel_bricks_ms = 0.0f;
+    u32 voxel_begun_here = 0;
     // The far field (this frame, on the CPU).
     bool far_field = false; // on this frame
     u32 far_culled = 0;     // instances left to the voxel world

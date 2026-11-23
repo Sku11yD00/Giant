@@ -3483,10 +3483,12 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         const geometry::Sphere& bounds = m.skin != nullptr ? m.skin->posed_bounds : m.data->bounds;
         set_bounds(e.bounds, bounds.center, bounds.radius);
         if (used[id]) {
+            // (No barriers for its buffers: they are only read, and a buffer left in common is
+            // promoted to a read state by its first use, for free, decaying when the frame's
+            // list is done. Recorded one by one, three a used mesh, they were this thread's
+            // largest fixed cost: 2.5 to 2.9 ms a frame with a valley's tiles drawn. A posed
+            // skin's clusters, written this frame, were put back to shader_read by pose_skins.)
             data.tree_levels = std::max(data.tree_levels, m.tree_levels);
-            for (const rhi::BufferHandle b : {m.clusters, m.groups, m.nodes}) {
-                cmd.barrier(b, rhi::ResourceState::shader_read);
-            }
         }
     }
     data.meshes = cmd.upload(bytes_of(table));
@@ -4955,6 +4957,11 @@ void Renderer::copy_streaming_stats() {
     m_stats.voxel_building = v.building;
     m_stats.voxel_changes = v.changes;
     m_stats.voxel_marked = v.marked;
+    m_stats.voxel_shift_ms = v.shift_ms;
+    m_stats.voxel_changes_ms = v.changes_ms;
+    m_stats.voxel_find_ms = v.find_ms;
+    m_stats.voxel_bricks_ms = v.bricks_ms;
+    m_stats.voxel_begun_here = v.begun_here;
     m_stats.far_field = m_far_field;
     m_stats.far_culled = m_far_culled;
     const ShadowStats& sh = m_shadows->stats();

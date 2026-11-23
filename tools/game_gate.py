@@ -43,7 +43,8 @@ times, how far behind the voxel world fell (its work pending: bricks to
 find or build and changes to take in, at most and as the flight ended),
 how many bricks it built of those marked in the frames sampled (every
 other frame: those the camera moved in; a brick marked that leaves the
-window before its turn is never built), and how long after stopping
+window before its turn is never built), the most of a frame it took the
+main thread and on what, and how long after stopping
 everything had caught up, with what came last. These are measured, not
 yet judged, but for one thing on a real GPU: it must catch up within
 CATCH_UP_SECONDS of stopping. A flight that cannot be flown is a failure
@@ -119,19 +120,25 @@ def flight_at(metres, heights):
 
 
 def flight_text(speed, seconds, times, behind, caught_up, last):
-    """A flight's line. `behind`: {"most", "end", "built", "marked", "samples", "rebuilds"} of the
+    """A flight's line. `behind`: {"most", "end", "built", "marked", "samples", "rebuilds", "slowest"} of the
     voxel world over the flight (its work pending at most and as it ended; built and marked summed
     over the frames sampled; how often every window was built again, too much having changed at
-    once); `caught_up`: seconds after stopping, or None if it never did; `last`: what was last
+    once; the frame sampled in which it took the main thread longest, as last_frame's voxels, or
+    None); `caught_up`: seconds after stopping, or None if it never did; `last`: what was last
     still to come (coming's answer)."""
     samples = max(behind["samples"], 1)
     came = ", ".join(f"{key} {value}" for key, value in last.items())
     after = f"not caught up ({came or 'nothing seen coming'})" if caught_up is None else \
         f"caught up {caught_up:.1f} s after stopping" + (f" (last to come: {came})" if came else "")
+    slowest = behind.get("slowest")
+    took = "" if not slowest else (
+        f"; at its slowest it took the main thread {slowest['cpu_ms']:.1f} ms of a frame (the windows following the "
+        f"camera {slowest['shift_ms']:.1f}, the scene's changes {slowest['changes_ms']:.1f}, finding bricks "
+        f"{slowest['find_ms']:.1f}, bricks {slowest['bricks_ms']:.1f} with {slowest['begun_here']} begun there)")
     return (f"flying at {speed:.0f} m/s for {seconds:.0f} s: {describe(times)}; the voxel world's work pending "
             f"at most {behind['most']} ({behind['end']} as it stopped), {after}; it built "
             f"{behind['built'] / samples:.0f} bricks of {behind['marked'] / samples:.0f} marked a frame sampled, and "
-            f"built every window again {behind['rebuilds']} times")
+            f"built every window again {behind['rebuilds']} times{took}")
 
 
 def coming(frame, world, scatter, ground_building):
@@ -189,7 +196,7 @@ def flown(editor, metres_from, speed, seconds, heights):
     if ready is None:
         raise RuntimeError(f"the world never settled before the flight at {speed:.0f} m/s: still coming, {still}")
     editor.hover(240)  # (the frame times kept hold none of what came before)
-    behind = {"most": 0, "end": 0, "built": 0, "marked": 0, "samples": 0, "rebuilds": 0}
+    behind = {"most": 0, "end": 0, "built": 0, "marked": 0, "samples": 0, "rebuilds": 0, "slowest": None}
     rebuilds = editor.last_frame()["voxels"]["rebuilds"]
     times = []
     recorded = editor.begin_frames()
@@ -208,6 +215,8 @@ def flown(editor, metres_from, speed, seconds, heights):
         behind["marked"] += voxels["marked"]
         behind["samples"] += 1
         behind["rebuilds"] = voxels["rebuilds"] - rebuilds
+        if behind["slowest"] is None or voxels["cpu_ms"] > behind["slowest"]["cpu_ms"]:
+            behind["slowest"] = voxels
         stop += 1
         if stop % 50 == 0:  # (the editor keeps its last 240 frames: two commands a stop)
             times, recorded = editor.read_frames(times, recorded, stop)

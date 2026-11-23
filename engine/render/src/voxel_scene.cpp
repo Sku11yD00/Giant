@@ -1368,6 +1368,13 @@ void VoxelScene::enter(const voxel::BrickBox& box) {
                     m_dirty_lo[level] = std::min(m_dirty_lo[level], slot);
                     m_dirty_hi[level] = std::max(m_dirty_hi[level], slot + 1);
                 }
+                // The brick that had this slot is out of the window now (its slot is another's):
+                // forgotten here, so that nothing walks the queues of bricks waiting to be built,
+                // which hold tens of thousands at speed. They keep the key until it is popped.
+                const voxel::BrickCoord left = m_slot_bricks[base + slot];
+                if (!m_pending.empty() && left != voxel::BrickCoord{x, y, z} && !m_clipmap.contains(level, left)) {
+                    m_pending.erase(Key{level, left});
+                }
                 m_slot_bricks[base + slot] = {x, y, z};
             }
         }
@@ -2226,6 +2233,9 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     m_stats.built = 0;
     m_stats.uploaded = 0;
     m_stats.marked = 0;
+    m_stats.shift_ms = m_stats.changes_ms = m_stats.find_ms = m_stats.bricks_ms = 0.0f;
+    m_stats.begun_here = 0;
+    const u64 begun_before = m_begun_here;
     m_placed.clear();
     m_rebuilt.clear();
     if (!m_pool.valid()) {
@@ -2292,6 +2302,14 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         bool stepped = false, failed = false, timed_out = false;
         finish_ready(true, stepped, failed, timed_out);
     }
+    // (Where the time goes, for the stats: each part is what passed since the part before.)
+    double part_from = 0.0;
+    const auto part = [&](float& ms) {
+        const double now = elapsed();
+        ms += static_cast<float>(now - part_from);
+        part_from = now;
+    };
+    part(m_stats.bricks_ms);
 
     // Coarse levels' slabs first (recenter lists them finest first).
     const std::vector<voxel::BrickBox> entered = m_clipmap.recenter(camera);
@@ -2301,34 +2319,32 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     for (usize i = entered.size(); i-- > 0;) {
         enter(entered[i]);
     }
-    // Bricks left behind still waiting to be built: dropped (finer levels'
-    // queues may not be reached for a while).
-    for (usize i = 0; i < entered.size(); ++i) {
-        const u32 level = entered[i].level;
-        if (i > 0 && entered[i - 1].level == level) {
-            continue; // once per level
-        }
+    // The keys of bricks left behind are dropped as they are popped (start_build), and `enter`
+    // has forgotten them already. A queue grown past twice the bricks waiting (and a level's
+    // worth: 32,768 by default) is mostly keys of bricks gone, or of ones that left, came back
+    // and were queued again: those are taken out, so that a long flight cannot grow a queue
+    // without end. What is kept is at most the bricks waiting, so the walk is paid for by the
+    // keys it removes (never every frame).
+    const usize most_queued = usize{2} * m_pending.size() + m_clipmap.slots_per_level();
+    const auto without_stale = [this](std::deque<Key>& queue) {
         std::deque<Key> kept;
-        for (const Key& key : m_order[level]) {
-            if (m_clipmap.contains(level, key.brick)) {
+        std::unordered_set<Key, KeyHash> seen;
+        for (const Key& key : queue) {
+            if (m_pending.count(key) != 0 && seen.insert(key).second) {
                 kept.push_back(key);
-            } else {
-                m_pending.erase(key);
             }
         }
-        m_order[level] = std::move(kept);
-    }
-    if (!entered.empty()) {
-        std::deque<Key> kept;
-        for (const Key& key : m_again) {
-            if (m_clipmap.contains(key.level, key.brick)) {
-                kept.push_back(key);
-            } else {
-                m_pending.erase(key);
-            }
+        queue = std::move(kept);
+    };
+    for (std::deque<Key>& queue : m_order) {
+        if (queue.size() > most_queued) {
+            without_stale(queue);
         }
-        m_again = std::move(kept);
     }
+    if (m_again.size() > most_queued) {
+        without_stale(m_again);
+    }
+    part(m_stats.shift_ms);
     {
         const Writing writing(*this); // (the workers stand back while the copies change)
         const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells);
@@ -2407,6 +2423,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         }
     }
 
+    part(m_stats.changes_ms);
     // Finding bricks takes up to half of what is left of the budget while
     // bricks wait to be built (at least one step a frame), then building
     // the rest.
@@ -2421,6 +2438,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
         m_jobs.pop_front();
         job_done(done);
     }
+    part(m_stats.find_ms);
     // Bricks: those built copied to the pool, and more started (coarsest waiting first) while
     // fewer than the most are under way. With time to spare, the main thread builds some itself
     // and waits on the workers' rather than leave it unused.
@@ -2547,6 +2565,8 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     m_stats.changes = static_cast<u32>(m_jobs.size() + m_regions.size() + m_changed_count + (m_rebuild_again ? 1 : 0));
     m_stats.missing = static_cast<u32>(m_retry.size());
     m_stats.overflow = m_stats.missing > 0;
+    m_stats.begun_here = static_cast<u32>(m_begun_here - begun_before);
+    part(m_stats.bricks_ms);
     m_stats.cpu_ms = static_cast<float>(elapsed());
 }
 
@@ -2563,7 +2583,18 @@ void VoxelScene::idle() {
     m_rebuilt.clear();
     m_stats.built = 0;
     m_stats.uploaded = 0;
+    m_stats.marked = 0;
     m_stats.cpu_ms = 0.0f;
+    m_stats.shift_ms = m_stats.changes_ms = m_stats.find_ms = m_stats.bricks_ms = 0.0f;
+    m_stats.begun_here = 0;
+}
+
+usize VoxelScene::longest_queue() const {
+    usize longest = m_again.size();
+    for (const std::deque<Key>& queue : m_order) {
+        longest = std::max(longest, queue.size());
+    }
+    return longest;
 }
 
 // --- Queries --------------------------------------------------------------

@@ -17,6 +17,8 @@
 #include "giant/world/terrain.h"
 
 #include <deque>
+#include <functional>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -50,7 +52,8 @@ TileSurface tile_surface(const TileHeights& heights);
 struct TerrainMeshStats {
     u32 tiles = 0;     // with a mesh drawn
     u32 building = 0;  // waiting for or being built (newer heights than drawn)
-    u32 in_flight = 0; // being built on the workers now
+    u32 in_flight = 0; // started and not yet taken: being built on the workers, or built (`arrived`)
+    u32 arrived = 0;   // of `in_flight`: built, waiting for a frame's uploads to take them
     u32 waiting = 0;   // of `building`: built and handed to the renderer, waiting for room in its geometry pool
     u64 built = 0;     // ever
     u64 triangles = 0; // in the drawn meshes, at full detail
@@ -70,7 +73,8 @@ public:
     // settles first), starts builds (at most builds_per_frame,
     // builds_in_flight at once), frees the meshes of tiles gone (at most
     // drops_per_frame), uploads finished meshes (at most
-    // uploads_per_frame) and swaps each in once the renderer can draw it.
+    // uploads_per_frame, and for at most upload_ms_per_frame after the
+    // first) and swaps each in once the renderer can draw it.
     void update(world::Terrain& terrain);
     // The tile's mesh drawn now (k_no_mesh: none yet, or no renderer).
     render::MeshId mesh(world::CellCoord cell) const;
@@ -94,6 +98,24 @@ public:
     u32 uploads_per_frame = k_per_frame;
     u32 builds_in_flight = k_per_frame;
     u32 drops_per_frame = 64; // meshes of tiles gone, freed a frame
+    // Built meshes waiting for a frame's uploads hold no build's place (the workers build on)
+    // until this many wait.
+    static constexpr u32 k_most_arrived = 32;
+    // The most time (ms) a frame's uploads may take, whatever uploads_per_frame allows: handing
+    // a mesh to the renderer makes its tables and buffers on this thread (0.3 to 0.5 ms a tile), and
+    // eight tiles arriving together were a frame's slowest phase at speed. One is always taken.
+    // Behind a loading screen: no limit (k_loading_upload_ms).
+    static constexpr float k_upload_ms = 0.5f;
+    static constexpr float k_loading_upload_ms = std::numeric_limits<float>::infinity();
+    float upload_ms_per_frame = k_upload_ms;
+    // Play's budgets, or a loading screen's (a frame there may take what it takes): how many
+    // builds and uploads a frame and builds at once (`most`), and the uploads' time.
+    void set_budgets(bool loading, u32 most) {
+        builds_per_frame = uploads_per_frame = builds_in_flight = most;
+        upload_ms_per_frame = loading ? k_loading_upload_ms : k_upload_ms;
+    }
+    // The clock the uploads are timed by, in ms (tests give their own; empty: the steady clock).
+    std::function<double()> clock;
     // Threads that build beside the two that always do, while above zero (a
     // game's loading screen: MoreWorkers::for_loading).
     u32 more_workers = 0;

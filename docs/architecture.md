@@ -147,7 +147,14 @@ follow without touching the renderer.
   anti-aliasing; the editor adds its UI.
 - **States.** Each resource's state is tracked; `barrier()` moves it to what
   the next use needs, and render passes move their own targets. Buffers fall
-  back to `common` after each frame, as D3D12 decays them.
+  back to `common` after each frame, as D3D12 decays them. A buffer that is
+  only ever read after it is made (a mesh's clusters, groups and nodes) needs
+  no barrier at all: D3D12 promotes a buffer in `common` to a read state on
+  its first use, for free, and it decays again when the submission ends. The
+  renderer used to record one for each of every drawn mesh's three buffers,
+  thousands a frame, which was its largest fixed cost on the main thread (2.5
+  to 2.9 ms a frame measured with a valley's terrain tiles drawn); it records
+  none now. A buffer that is also written in a frame keeps its barriers.
 - **Conventions.** Reverse-Z depth (1 near, 0 at infinity, GREATER passes),
   counter-clockwise front faces, back faces culled. Colour targets are sRGB
   (`rgba8_srgb`); UI draws through a UNORM view so its gamma-space colours
@@ -963,7 +970,12 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   with the tile's edge vertices locked (`meshopt_SimplifyVertex_Lock`),
   so every level of detail keeps the edge and tiles drawn at different
   detail meet without cracks. Finished meshes are uploaded a few a frame
-  (`uploads_per_frame`) and replace the old one only once
+  (`uploads_per_frame`, and for at most `upload_ms_per_frame` after the
+  first: handing one to the renderer makes its tables and buffers on this
+  thread, 0.3 to 0.5 ms a tile, and eight arriving together were the
+  slowest phase of a frame at travel speed; one is always taken, so they
+  always come in. Up to `k_most_arrived` (32) built meshes wait their turn
+  without holding a build's place, so the workers build on meanwhile) and replace the old one only once
   `Renderer::mesh_ready` says they can draw, so a tile never blinks out.
   A tile changed while it builds is built again with the newest heights.
   The renderer hands a removed mesh's id (and its streaming group
@@ -5966,7 +5978,19 @@ Done in N2 part 2:
   building, bricks never built first (coarse levels first), then those
   built already whose contents changed, oldest first whatever their level
   (else a 2 km brick that scatter streaming in keeps changing goes back
-  before everything nearer, again and again). Bricks are prepared and
+  before everything nearer, again and again). A brick whose window moved
+  off it is forgotten where its slot is taken (`enter`, a slab's own
+  cells) and dropped from its queue as it is popped, so nothing walks a
+  queue each time the windows shift: at travel speed they hold tens of
+  thousands, and the walk itself took up to 6 ms of a frame on the
+  development machine. A queue grown past twice the bricks waiting (and
+  a level's worth) has its stale and repeated keys taken out, so a long
+  flight cannot grow one without end and the walk is paid for by the
+  keys it removes. `voxels.cpu_ms` and where it went (`shift_ms`
+  the windows following the camera, `changes_ms` taking the scene's
+  changes in, `find_ms` finding bricks, `bricks_ms` placing, uploading,
+  starting and building them, with `begun_here` begun by the main
+  thread) are reported for finding what takes a frame over its budget. Bricks are prepared and
   built on worker threads (a quarter of the cores, two to four), up to
   512 under way at once: the main thread only hands the workers the
   bricks, 16 a job, and copies each finished brick into the pool (one

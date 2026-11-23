@@ -38,6 +38,11 @@ def main():
     check("caught up 1.3 s after stopping (last to come: scatter 2)" in text, f"when it caught up, and what came last: {text}")
     check("built 300 bricks of 400 marked a frame sampled" in text, f"its rates: {text}")
     check("built every window again 2 times" in text, f"its rebuilds: {text}")
+    slowest = {"cpu_ms": 3.46, "shift_ms": 0.1, "changes_ms": 2.04, "find_ms": 0.12, "bricks_ms": 1.2, "begun_here": 1}
+    text = flight_text(90.0, 10.0, times, dict(behind, slowest=slowest), 1.26, {})
+    check("at its slowest it took the main thread 3.5 ms of a frame" in text and "the scene's changes 2.0" in text and
+          "bricks 1.2 with 1 begun there" in text, f"its slowest frame, and on what: {text}")
+    check("at its slowest" not in flight_text(90.0, 10.0, times, dict(behind, slowest=None), 1.26, {}), "none sampled: not said")
     check("caught up 0.0 s after stopping;" in flight_text(90.0, 10.0, times, behind, 0.0, {}), "nothing came last if nothing came")
     check("not caught up (voxel work 7)" in flight_text(90.0, 10.0, times, dict(behind, samples=0), None, {"voxel work": 7}),
           "one that never caught up says so, and what was still coming")
