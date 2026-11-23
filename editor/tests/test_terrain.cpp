@@ -220,7 +220,7 @@ GIANT_TEST("terrain meshes: built off the main thread, a change rebuilds its nei
     m.builds_per_frame = 8;
     m.builds_in_flight = 3;
     m.update(fresh);
-    GIANT_CHECK(m.stats().in_flight <= 3);
+    GIANT_CHECK(m.stats().in_flight - m.stats().arrived <= 3); // (on the workers; those built wait apart)
     m.builds_in_flight = 8;
     m.uploads_per_frame = 1;
     for (int frame = 0; frame < 20000 && m.stats().building > 0; ++frame) {
@@ -230,6 +230,39 @@ GIANT_TEST("terrain meshes: built off the main thread, a change rebuilds its nei
         std::this_thread::sleep_for(std::chrono::microseconds(500)); // a frame's worth of time for the workers
     }
     GIANT_CHECK(m.stats().building == 0 && m.stats().built == built + 8);
+
+    // Uploads are budgeted by time too: with eight arrived and a clock that says each look at it
+    // is 0.2 ms later, a frame with 0.5 ms takes three (one always, then while under its time).
+    for (auto& [c, h] : fresh.tiles()) fresh.modify(c)->at(9) = 3.0f;
+    m.uploads_per_frame = 0; // (none taken while all eight are built)
+    m.builds_in_flight = 3;  // (three at once: those built and waiting for an upload hold no build's place)
+    for (int frame = 0; frame < 20000 && m.stats().arrived < 8; ++frame) {
+        m.update(fresh);
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+    GIANT_CHECK(m.stats().arrived == 8 && m.stats().in_flight == 8);
+    m.builds_in_flight = 8;
+    double clock_ms = 0.0;
+    m.clock = [&clock_ms] { return clock_ms += 0.2; };
+    m.uploads_per_frame = 8;
+    m.upload_ms_per_frame = 0.5f;
+    u64 before = m.stats().built;
+    m.update(fresh);
+    GIANT_CHECK(m.stats().built - before == 3);
+    m.upload_ms_per_frame = 0.0f; // no time at all: still one a frame, so they always come
+    before = m.stats().built;
+    m.update(fresh);
+    GIANT_CHECK(m.stats().built - before == 1);
+    m.upload_ms_per_frame = TerrainMeshes::k_loading_upload_ms; // behind a loading screen: the rest at once
+    before = m.stats().built;
+    m.update(fresh);
+    GIANT_CHECK(m.stats().built - before == 4);
+    GIANT_CHECK(m.stats().building == 0 && m.stats().built == built + 16);
+    // finish() waits for no clock, and leaves the budget as it was.
+    for (auto& [c, h] : fresh.tiles()) fresh.modify(c)->at(9) = 4.0f;
+    m.upload_ms_per_frame = 0.0f;
+    m.finish(fresh);
+    GIANT_CHECK(m.stats().built == built + 24 && m.upload_ms_per_frame == 0.0f);
 }
 
 GIANT_TEST("terrain meshes: new tiles settle before building; changed ones do not wait; drops are budgeted") {

@@ -1,6 +1,7 @@
 #include "terrain_meshes.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -272,7 +273,13 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         for (Result& r : done) m_arrived.push_back(std::move(r));
     }
     u32 taken = 0;
-    while (!m_arrived.empty() && taken < uploads_per_frame) {
+    const auto now_ms = [this] {
+        return clock ? clock()
+                     : std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    const double uploads_began = now_ms();
+    while (!m_arrived.empty() && taken < uploads_per_frame &&
+           (taken == 0 || now_ms() - uploads_began < static_cast<double>(upload_ms_per_frame))) {
         Result r = std::move(m_arrived.front());
         m_arrived.pop_front();
         --m_in_flight;
@@ -328,7 +335,10 @@ void TerrainMeshes::update(world::Terrain& terrain) {
     // even while builds are full; a scan looks at a bounded part of the queue.
     const usize scan = m_finishing ? m_queue.size() : std::min<usize>(m_queue.size(), 4096);
     for (usize looked = 0; looked < scan; ++looked) {
-        const bool can_build = started < builds_per_frame && looks < max_looks && m_in_flight < builds_in_flight;
+        // (Those built and waiting for an upload are on no worker: they hold no build's place.)
+        const u32 arrived = static_cast<u32>(m_arrived.size());
+        const bool can_build = started < builds_per_frame && looks < max_looks && arrived < k_most_arrived &&
+                               m_in_flight - std::min(arrived, m_in_flight) < builds_in_flight;
         if (!can_build && dropped >= drops_per_frame) break;
         const world::CellCoord cell = m_queue.front();
         m_queue.pop_front();
@@ -371,7 +381,9 @@ void TerrainMeshes::update(world::Terrain& terrain) {
 
 void TerrainMeshes::finish(world::Terrain& terrain) {
     const u32 budgets[4] = {builds_per_frame, uploads_per_frame, builds_in_flight, drops_per_frame};
+    const float upload_ms = upload_ms_per_frame;
     builds_per_frame = uploads_per_frame = builds_in_flight = drops_per_frame = std::numeric_limits<u32>::max();
+    upload_ms_per_frame = k_loading_upload_ms;
     m_finishing = true;
     world::TerrainChanges taken; // every update's, as last_changes
     for (;;) {
@@ -394,6 +406,7 @@ void TerrainMeshes::finish(world::Terrain& terrain) {
     uploads_per_frame = budgets[1];
     builds_in_flight = budgets[2];
     drops_per_frame = budgets[3];
+    upload_ms_per_frame = upload_ms;
 }
 
 TerrainMeshStats TerrainMeshes::stats() const {
@@ -408,6 +421,7 @@ TerrainMeshStats TerrainMeshes::stats() const {
     s.building += static_cast<u32>(m_queue.size());
     s.built = m_built;
     s.in_flight = m_in_flight;
+    s.arrived = static_cast<u32>(m_arrived.size());
     return s;
 }
 

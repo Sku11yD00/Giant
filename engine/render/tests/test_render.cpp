@@ -647,6 +647,36 @@ GIANT_TEST("render: painted terrain tiles are kept by tile, checked, and uploade
     GIANT_CHECK(!s.device->device_lost());
 }
 
+// A mesh's buffers are only read: no barrier is recorded for them (D3D12 promotes a buffer in
+// common by its first use), so a frame's barriers do not grow with the meshes it draws. Three a
+// mesh were the renderer's largest fixed cost on the main thread with a valley's tiles drawn.
+GIANT_TEST("render: a frame records no more barriers for a hundred meshes than for one") {
+    u32 barriers[2] = {};
+    for (const u32 meshes : {1u, 100u}) {
+        NullScene s;
+        GIANT_CHECK(s.renderer != nullptr);
+        if (s.renderer == nullptr) return;
+        std::vector<Instance> instances;
+        for (u32 i = 0; i < meshes; ++i) {
+            Instance in;
+            in.mesh = s.renderer->add_mesh(geometry::build_clusters(geometry::make_cube()));
+            GIANT_CHECK(in.mesh != k_no_mesh);
+            in.position = {static_cast<double>(i % 10) * 2.0 - 9.0, 0.5, -6.0 - static_cast<double>(i / 10) * 2.0};
+            instances.push_back(in);
+        }
+        FrameInput frame;
+        frame.instances = instances;
+        frame.view.position = {0.0, 3.0, 4.0};
+        frame.settings.voxel_world = false; // (the voxel world's own work comes and goes with what it builds)
+        frame.settings.shadows = false;
+        for (int settled = 0; settled < 30; ++settled) s.draw(frame); // (the meshes streamed in)
+        const RenderStats st = s.draw(frame);
+        GIANT_CHECK(st.draws > 0);
+        barriers[meshes > 1] = s.device->last_frame_stats().barriers;
+    }
+    GIANT_CHECK(barriers[0] > 0 && barriers[0] == barriers[1]);
+}
+
 GIANT_TEST("render: reflections trace voxel cones with gi, and the screen in a pass after shading") {
     NullScene s;
     GIANT_CHECK(s.renderer != nullptr);
