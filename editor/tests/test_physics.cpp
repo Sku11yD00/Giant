@@ -185,9 +185,46 @@ GIANT_TEST("play commands: the player stands under the camera, walks where it lo
     double top = 0.0;
     for (int i = 0; i < 40; ++i) top = std::max(top, triple(f.run("step_player", {{"seconds", 1.0 / 60.0}}).value["position"]).y);
     GIANT_CHECK(top > 1.4 && top < 1.75);
+    // Fast travel: put on what is under the point given, wherever it was and however it moved
+    // (in the air here, mid-jump), standing still, looking the way told; the camera goes with it.
+    GIANT_CHECK(f.run("set_player_input", {{"forward", 1}, {"jump", true}}).ok);
+    GIANT_CHECK(f.run("step_player", {{"seconds", 0.2}}).ok);
+    r = f.run("travel_player", {{"position", {-60.0, 25.0, 70.0}}, {"yaw", 180}});
+    p = triple(r.value["position"]);
+    GIANT_CHECK(r.ok && std::fabs(p.x + 60.0) < 0.01 && std::fabs(p.z - 70.0) < 0.01 && std::fabs(p.y) < 0.05);
+    GIANT_CHECK(r.value["yaw"] == 180.0 && length(triple(r.value["velocity"])) < 1e-6);
+    GIANT_CHECK(std::fabs(f.state.camera.position.x + 60.0) < 0.01 && std::fabs(f.state.camera.position.y - 1.65) < 0.06);
+    GIANT_CHECK(f.run("set_player_input", {{"forward", 0}}).ok);
+    r = f.run("step_player", {{"seconds", 0.5}});
+    p = triple(r.value["position"]);
+    GIANT_CHECK(r.value["on_ground"] == true && r.value["standing_on"] == plane && std::fabs(p.x + 60.0) < 0.05);
+    // To where the world is still coming in (far off, behind a loading screen or round a view
+    // that jumped): held at the point, however long, and put down once it is in.
+    f.play.world_coming = true;
+    r = f.run("travel_player", {{"position", {-40.0, 25.0, 70.0}}});
+    GIANT_CHECK(r.ok && f.play.travelling());
+    r = f.run("step_player", {{"seconds", 8.0}});
+    GIANT_CHECK(r.value["waiting_for_ground"] == true && f.play.travelling() && std::fabs(triple(r.value["position"]).x + 40.0) < 0.01);
+    f.play.world_coming = false;
+    r = f.run("step_player", {{"seconds", 0.5}});
+    p = triple(r.value["position"]);
+    GIANT_CHECK(r.value["waiting_for_ground"] == false && !f.play.travelling() && r.value["on_ground"] == true &&
+                std::fabs(p.x + 40.0) < 0.05 && std::fabs(p.y) < 0.05);
+    // (Or at once, by whoever knows it is in: a loading screen.)
+    f.play.world_coming = true;
+    GIANT_CHECK(f.run("travel_player", {{"position", {-60.0, 25.0, 70.0}}}).ok && f.play.travelling());
+    f.play.land(f.state.scene, f.state.camera);
+    GIANT_CHECK(!f.play.travelling() && !f.play.waiting_for_ground() && std::fabs(f.state.camera.position.y - 1.65) < 0.06);
+    f.play.world_coming = false;
+    r = f.run("step_player", {{"seconds", 0.5}});
+    GIANT_CHECK(r.value["on_ground"] == true && std::fabs(triple(r.value["position"]).x + 60.0) < 0.05);
+    // (Not a place: refused, the player where it was.)
+    GIANT_CHECK(!f.run("travel_player", {{"position", {1e9, 0.0, 0.0}}}).ok);
+    GIANT_CHECK(std::fabs(triple(f.run("get_player").value["position"]).x + 60.0) < 0.05);
     // Stopping: the camera back, simulating as it was (off), the scene untouched.
     r = f.run("play", {{"on", false}});
     GIANT_CHECK(r.ok && r.value["playing"] == false && !f.physics.simulating());
+    GIANT_CHECK(!f.run("travel_player", {{"position", {0.0, 5.0, 0.0}}}).ok); // not playing
     GIANT_CHECK(f.state.camera.position == DVec3(6.0, 3.0, 0.0) && f.state.camera.pitch_degrees == before.pitch_degrees);
     GIANT_CHECK(f.at(crate) == DVec3(0.0, 0.5, -20.0) && f.physics.world().characters() == 0);
     GIANT_CHECK(f.run("get_player").value["playing"] == false);

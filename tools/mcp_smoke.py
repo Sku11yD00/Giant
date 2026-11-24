@@ -1314,7 +1314,7 @@ def main() -> int:
         for expected in ("get_engine_info", "set_clear_color", "undo", "get_log", "quit_editor", "get_animation",
                          "get_swing", "find_path", "get_nav", "walk_to", "get_walker", "play_sound",
                          "record_audio", "get_audio", "save_game", "load_game", "list_saves", "get_save",
-                         "set_autosave", "get_game_ui", "set_game_ui", "show_toast", "ui_load_screen",
+                         "set_autosave", "travel_player", "get_game_ui", "set_game_ui", "show_toast", "ui_load_screen",
                          "ui_remove_screen", "ui_set_values", "ui_click", "ui_key", "get_ui_events",
                          "get_ui_screen", "ui_set_marker", "ui_remove_marker", "get_ui_markers", "ui_fade", "get_menu", "open_menu",
                          "set_game_settings", "bake_pose", "get_baked_poses", "clear_baked_poses", "set_figure_settings"):

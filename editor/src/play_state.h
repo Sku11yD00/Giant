@@ -68,6 +68,22 @@ public:
     // `at`: as a game save had it (its feet, speed, wall and carrier; the
     // camera and simulating to go back to), once what it stands on is in.
     bool start(world::Scene& scene, EditorCamera& camera, u64 scene_generation, const PlayerStart* at = nullptr);
+    // While playing: the player put on what is under `view`, where its eyes would be (as start()
+    // would, bodies still being made there waited for the same way), standing still, let go of
+    // what carried it or it climbed; where it looks stays. Fast travel: the camera goes with it.
+    // Where the world is not in yet (far off, its ground not read) there is nothing under the
+    // point to find: while `world_coming` the player is held there, and put down once it is not
+    // (or by land), on the ground over the point should that be over it. False when not playing or
+    // `view` is no place.
+    bool travel(const world::Scene& scene, EditorCamera& camera, const DVec3& view);
+    // Set each frame before before_step: the world round the view is still coming in (a loading
+    // screen stands, a view that jumped: view_jump.h).
+    bool world_coming = false;
+    // Travelled and not put down for good yet (held while the world comes).
+    bool travelling() const { return m_travelled; }
+    // A player that travelled, put down now (the world round it is in: a loading screen's own
+    // count), the camera with it. Nothing otherwise.
+    void land(const world::Scene& scene, EditorCamera& camera);
     // What stopping goes back to (a game save keeps them).
     const EditorCamera& returns_to() const { return m_saved_camera; }
     // A game save's start not put down yet (still placing), else none.
@@ -161,6 +177,7 @@ private:
     double m_eye = 0.0; // the camera's height shown (eased up steps)
     bool m_waiting = false;
     bool m_placing = false;   // started, waiting for the bodies before standing
+    bool m_travelled = false; // travel()'s placing, to be held while the world comes
     double m_placing_for = 0.0; // seconds of it
     DVec3 m_place_eye{};        // where its eyes are to start (what placing waits under)
     std::optional<PlayerStart> m_start; // a game save's, until put down

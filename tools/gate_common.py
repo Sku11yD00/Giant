@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 
 FRAME_BUDGET_MS = 1000.0 / 60.0
 # No micro stutter: the 99th percentile frame stays near the budget, and
@@ -326,6 +327,11 @@ class Editor:
         # came before (a scene build is one long frame).
         self.tool("set_camera", {"position": path[0][0], "look_at": path[0][1]})
         self.hover(240)
+        # (A camera put far from where it was brings the world in with a loading screen's shares
+        # of each frame, `arriving`: the flight is timed at play's, so that is waited out.)
+        waited = time.monotonic()
+        while self.tool("get_engine_info").get("arriving") and time.monotonic() - waited < 30:
+            self.hover(10)
         # The slow frames' phases (self.slow, with the stop sampled after them: frames over the 99th
         # percentile's limit kept in full on a real GPU, uneven pacing explained too; else only
         # those near a hitch), each sample's typical frame (self.typicals: frames, phase medians,

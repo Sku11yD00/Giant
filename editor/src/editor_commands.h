@@ -315,6 +315,9 @@ struct EditorState {
     // Null: none.
     GameUi* game_ui = nullptr;
     GameMenus* menus = nullptr; // the game's menus over play (pause, saves, settings)
+    // The world is coming in round a view that jumped, with a loading screen's shares of each
+    // frame (view_jump.h); updated by the main loop.
+    bool arriving = false;
     // Characters' hit shapes (bone capsules) for bullets; set by main (and
     // tests). Null: characters are not hit.
     HitTargets* hits = nullptr;

@@ -145,6 +145,10 @@ public:
         u32 shown = 0;       // how many times the screen has stood since the program began
     };
     const Loading& loading() const { return m_arriving; }
+    // The player travelled far in play (PlayState::travel). A game: the loading screen stands
+    // while the world round the new place comes in, the player held still behind it, and play
+    // goes on once it is in. (Not a game: nothing; the view's jump brings the world in faster.)
+    void player_travelled();
     static constexpr u32 k_quiet_frames = 10;
     static constexpr double k_most_loading_seconds = 120.0;
     // The voxel world's CPU budget a frame while the screen stands (RenderSettings::voxel_ms_per_frame, 1 in play).
@@ -194,6 +198,7 @@ private:
     u32 m_arriving_before = 0;
     u64 m_arriving_done = 0;
     u32 m_arriving_quiet = 0;
+    u32 m_arriving_world_quiet = 0; // frames running with nothing but the GPU's own coming
     u64 m_arriving_streamed = 0; // WorldStreaming::updates when last looked at
     // The view the loading screen found, kept while it holds the view where the player's eyes will
     // be (m_arriving_eye, as last set): play starts from the view found, and it is put back if

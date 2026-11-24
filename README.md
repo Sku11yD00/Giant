@@ -227,7 +227,8 @@ Milestone **N4, first playable slice** (in progress; gate: a growing giantess wr
   mouse looks, W A S D walk, Shift runs, Space jumps, Esc pauses (its menu's Quit stops). It walks
   up steps, stops at walls, slides off slopes too steep, rides what it
   stands on and pushes crates; stopping gives the camera back. Over MCP,
-  `set_player_input`, `step_player` and `get_player` drive and read it.
+  `set_player_input`, `step_player` and `get_player` drive and read it;
+  `travel_player` is fast travel (in a game, behind the loading screen).
 - Part 4: breakable buildings. A kit marked breakable (`set_kit_breakable`)
   breaks where it is hit hard enough: the piece struck comes loose, and so
   does everything that stood only on it, so a wall knocked out drops the
@@ -476,6 +477,11 @@ Open-world systems:
 - N7 part 5: the game gate (`tools/game_gate.py`): the valley packaged
   as a game, that game begun behind its loading screen, run through,
   saved and taken up again, timed from the first frame of play.
+- Fast travel: `travel_player` puts the player far off, past what is
+  loaded too, and in a game the loading screen stands until the world
+  there is in; a camera that
+  jumps over 64 m in the editor brings the world round it in with a
+  loading screen's shares of each frame, not play's.
 - The loading screen also waits for scatter, the far ground and the
   far-off people's poses, and (for at most 5 s, once the rest is in)
   for the GPU's own: the voxel world, sun shadows and geometry.
