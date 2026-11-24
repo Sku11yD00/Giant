@@ -32,12 +32,13 @@ def main():
     check(flight_at(1e9, heights)[0][2] == FLIGHT_FROM[1] - FLIGHT_SPACING * 3, "it stops at the last height read")
     check(flight_at(-5.0, heights)[0][2] == FLIGHT_FROM[1], "and never starts before the first")
     times = {"frames": 9, "average_ms": 8.0, "p99_ms": 9.0, "worst_ms": 10.0, "hitches": 0}
-    behind = {"most": 400, "end": 120, "built": 900, "marked": 1200, "samples": 3, "rebuilds": 2}
+    behind = {"most": 400, "end": 120, "built": 900, "marked": 1200, "samples": 3, "rebuilds": 2, "owed": 5120}
     text = flight_text(90.0, 10.0, times, behind, 1.26, {"scatter": 2})
     check("at 90 m/s for 10 s" in text and "work pending at most 400 (120 as it stopped)" in text, f"a flight's line: {text}")
     check("caught up 1.3 s after stopping (last to come: scatter 2)" in text, f"when it caught up, and what came last: {text}")
     check("built 300 bricks of 400 marked a frame sampled" in text, f"its rates: {text}")
     check("built every window again 2 times" in text, f"its rebuilds: {text}")
+    check("waited their turn to be taken in, 5120 at most" in text, f"the changed instances that waited: {text}")
     slowest = {"cpu_ms": 3.46, "shift_ms": 0.1, "changes_ms": 2.04, "find_ms": 0.12, "bricks_ms": 1.2, "begun_here": 1}
     text = flight_text(90.0, 10.0, times, dict(behind, slowest=slowest), 1.26, {})
     check("at its slowest it took the main thread 3.5 ms of a frame" in text and "the scene's changes 2.0" in text and

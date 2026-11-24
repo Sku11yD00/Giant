@@ -901,7 +901,7 @@ struct RenderStats {
     u32 decals = 0;        // in view this frame (on the CPU: never late)
     bool decal_overflow = false; // too many decals on screen: some were not drawn
     u32 cells = 0;         // in FrameInput::cells (0 without them)
-    u32 cells_changed = 0; // of them, looked at for changes this frame (all of them when the layout changed)
+    u32 cells_changed = 0; // of them, listed as changed this frame (all of them when the layout changed)
     // Streaming (this frame, on the CPU: never late).
     u64 pool_bytes = 0;      // GPU memory for cluster geometry
     u64 pool_used_bytes = 0;
@@ -929,6 +929,8 @@ struct RenderStats {
     u32 voxel_building = 0;       // of voxel_pending: bricks under way (handed to the workers, being built, or built and not yet in the pool)
     u32 voxel_changes = 0;        // of voxel_pending: changes not yet turned into bricks
     u32 voxel_marked = 0;         // bricks marked to be built this frame
+    u32 voxel_owed = 0;           // of voxel_changes: instances that may have changed, waiting to be compared
+    u32 voxel_looks = 0;          // instances compared this frame
     // Where voxel_cpu_ms went: the windows following the camera, taking in the scene's changes,
     // finding bricks, and bricks (placing, uploading, starting, building); and the bricks the
     // main thread began itself this frame.

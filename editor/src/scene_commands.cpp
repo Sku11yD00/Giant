@@ -870,6 +870,7 @@ Json render_settings_json(const EditorState& state) {
                 {"built", s.voxel_built}, {"missing", s.voxel_missing}, {"overflow", s.voxel_overflow},
                 {"cpu_ms", s.voxel_cpu_ms}, {"rebuilds", s.voxel_rebuilds}, {"waiting", s.voxel_waiting},
                 {"building", s.voxel_building}, {"changes", s.voxel_changes}, {"marked", s.voxel_marked},
+                {"owed", s.voxel_owed}, {"looks", s.voxel_looks},
                 {"shift_ms", s.voxel_shift_ms}, {"changes_ms", s.voxel_changes_ms}, {"find_ms", s.voxel_find_ms},
                 {"bricks_ms", s.voxel_bricks_ms}, {"begun_here", s.voxel_begun_here}}},
               {"far_field", {{"on", s.far_field}, {"culled", s.far_culled}}},

@@ -4957,6 +4957,8 @@ void Renderer::copy_streaming_stats() {
     m_stats.voxel_building = v.building;
     m_stats.voxel_changes = v.changes;
     m_stats.voxel_marked = v.marked;
+    m_stats.voxel_owed = v.owed;
+    m_stats.voxel_looks = v.looks;
     m_stats.voxel_shift_ms = v.shift_ms;
     m_stats.voxel_changes_ms = v.changes_ms;
     m_stats.voxel_find_ms = v.find_ms;

@@ -1641,3 +1641,235 @@ GIANT_TEST("voxel scene: a lake of thousands of slivers is built a few at a time
         GIANT_CHECK(b.voxel_at({-4.0, 0.6, 3.0}, packed) && voxel::water_voxel(packed));
     }
 }
+
+GIANT_TEST("index set: ranges in and out, counted once, found in order") {
+    IndexSet set;
+    GIANT_CHECK(set.empty() && set.next(0) == IndexSet::k_none && !set.has(5));
+    set.add_range(60, 70); // across two words
+    set.add_range(64, 200); // overlapping: each index once
+    set.add(3);
+    set.add(3);
+    set.add_range(9, 9); // none
+    GIANT_CHECK(set.count() == 141);
+    GIANT_CHECK(set.has(3) && set.has(60) && set.has(199) && !set.has(200) && !set.has(59) && !set.has(100000));
+    GIANT_CHECK(set.next(0) == 3 && set.next(4) == 60 && set.next(199) == 199 && set.next(200) == IndexSet::k_none);
+    set.remove(60);
+    set.remove(60);
+    set.remove(100000);
+    GIANT_CHECK(set.count() == 140 && set.next(4) == 61);
+    set.keep_below(130); // mid-word
+    GIANT_CHECK(set.count() == 70 && set.has(129) && !set.has(130) && set.next(130) == IndexSet::k_none);
+    set.keep_below(64); // on a word's edge
+    GIANT_CHECK(set.count() == 4 && set.has(63) && !set.has(64));
+    set.add_range(0, 64); // a whole word
+    GIANT_CHECK(set.count() == 64);
+    set.clear();
+    GIANT_CHECK(set.empty() && set.next(0) == IndexSet::k_none);
+}
+
+namespace {
+
+// `count` small cubes in rows from x = -6, 0.13 m apart, 90 a row.
+void add_cubes(std::vector<Instance>& instances, u32 count, double y, MeshId mesh = 0) {
+    const u32 from = static_cast<u32>(instances.size());
+    for (u32 i = 0; i < count; ++i) {
+        Instance cube;
+        cube.mesh = mesh;
+        cube.scale = {0.05f, 0.05f, 0.05f};
+        const u32 k = from + i;
+        cube.position = {static_cast<double>(k % 90) * 0.13 - 6.0, y, static_cast<double>((k / 90) % 90) * 0.13 - 6.0};
+        instances.push_back(cube);
+    }
+}
+
+CellRange cell_of(u32 first, u32 count, u64 version) {
+    CellRange c;
+    c.first = first;
+    c.count = count;
+    c.version = version;
+    return c;
+}
+
+} // namespace
+
+// A cell arriving with thousands of instances is not taken in whole in the
+// frame it comes: what may have changed is owed a look, and each frame takes
+// its share (1,024 looks at least, or 64 that did differ, then while its
+// quarter of the budget lasts).
+GIANT_TEST("voxel scene: a cell's thousands of instances are taken in a share a frame") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    add_cubes(b.instances, 100, 0.6);
+    b.cells = {cell_of(0, 100, 1)};
+    b.step();
+    for (int i = 0; i < 200 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0 && b.voxels->stats().owed == 0);
+    const u32 rebuilds = b.voxels->stats().rebuilds;
+    // Nothing changed: nothing looked at.
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().looks == 0);
+
+    add_cubes(b.instances, 5000, 0.6);
+    b.cells.push_back(cell_of(100, 5000, 1));
+    b.step(0.0f); // (no time at all: the least a frame takes)
+    GIANT_CHECK(b.voxels->stats().looks == 64); // every one new
+    GIANT_CHECK(b.voxels->stats().owed == 5000 - 64);
+    GIANT_CHECK(b.voxels->stats().pending >= b.voxels->stats().owed); // a loading screen waits for them
+    // One still waiting moves meanwhile (its cell is another version): taken
+    // in where it is by the time it is looked at.
+    b.instances[5099].position = {5.0, 3.0, 5.0};
+    b.cells[1].version = 2;
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().looks == 64); // on from where the last frame stopped
+    GIANT_CHECK(b.voxels->stats().owed == 5000 - 64); // (the 64 taken in are owed a look again: their cell changed)
+    int frames = 0;
+    for (; frames < 200 && b.voxels->stats().owed > 0; ++frames) b.step(0.0f);
+    GIANT_CHECK(frames == 77); // 4872 more new ones, 64 a frame (the last frame's 8, and the 64 as they were)
+    // The cell is another version with nothing in it changed: looked at, 1,024 a frame, none taken in.
+    b.cells[1].version = 3;
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().looks == 1024 && b.voxels->stats().owed == 5000 - 1024);
+    b.step(1000.0f); // with time: far more than the least (all the rest, 16 looks at least past it)
+    GIANT_CHECK(b.voxels->stats().looks >= 1040 || b.voxels->stats().owed == 0);
+    for (int i = 0; i < 100 && b.voxels->stats().owed > 0; ++i) b.step(1000.0f);
+    GIANT_CHECK(b.voxels->stats().owed == 0);
+    for (int i = 0; i < 2000 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(b.voxels->stats().rebuilds == rebuilds); // by region: never every window again
+    GIANT_CHECK(b.voxels->probe(0, {5.0, 3.0, 5.0}) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, b.instances[100].position) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, b.instances[5098].position) == VoxelProbe::solid);
+    // Every one moves in a frame with the time to take them all in: one rebuild of every window.
+    for (Instance& in : b.instances) in.position.y += 1.0;
+    b.cells[0].version = 9;
+    b.cells[1].version = 9;
+    b.step(1000.0f);
+    for (int i = 0; i < 100 && b.voxels->stats().owed > 0; ++i) b.step(1000.0f); // (a slow machine: in a few)
+    GIANT_CHECK(b.voxels->stats().owed == 0);
+    GIANT_CHECK(b.voxels->stats().rebuilds > rebuilds);
+    for (int i = 0; i < 2000 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->probe(0, {5.0, 4.0, 5.0}) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, {5.0, 3.0, 5.0}) == VoxelProbe::empty);
+}
+
+// The looks go round from where the last frame's stopped, and the list may
+// shrink and grow between: the looks start over then, and new instances are
+// taken in whatever they compare as, so none is passed over, even one that
+// is all defaults (as a copy of nothing is, were the copies to grow past it).
+GIANT_TEST("voxel scene: an instance the copies grew past is still taken in") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    add_cubes(b.instances, 1200, 0.6);
+    b.cells = {cell_of(0, 1200, 1)};
+    b.materials = {Material{{0.0f, 0.0f, 0.0f}}}; // black: a default instance compares as a copy of nothing does
+    b.step();
+    for (int i = 0; i < 500 && b.voxels->stats().pending > 0; ++i) b.step();
+    // Looked at part of the way (nothing differs), so the next looks start at 1024.
+    b.cells[0].version = 2;
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().looks == 1024 && b.voxels->stats().owed == 176);
+    // The list shrinks to 500, then grows to 1500 with default instances (unit cubes of mesh 0 at the origin).
+    b.instances.resize(500);
+    b.cells = {cell_of(0, 500, 3)};
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().owed == 0);
+    for (int i = 0; i < 1000; ++i) {
+        Instance cube;
+        cube.mesh = 0;
+        b.instances.push_back(cube);
+    }
+    b.instances[700].position = {3.0, 4.0, 3.0};
+    b.instances[1400].position = {-3.0, 4.0, -3.0};
+    b.cells.push_back(cell_of(500, 1000, 1));
+    for (int i = 0; i < 100 && b.voxels->stats().owed > 0; ++i) b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().owed == 0);
+    for (int i = 0; i < 2000 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    // A unit cube's faces: at the origin (the defaults), and the two placed.
+    GIANT_CHECK(b.voxels->probe(0, {0.5, 0.2, 0.2}) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, {3.5, 4.2, 3.2}) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, {-2.5, 4.2, -2.8}) == VoxelProbe::solid);
+}
+
+// A material row that looks different (its texture came) changes no cell:
+// the instances using it are owed a look all the same, a share a frame.
+GIANT_TEST("voxel scene: a material's new look reaches its instances a share a frame") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    add_cubes(b.instances, 300, 0.6);
+    for (u32 i = 0; i < 300; ++i) b.instances[i].material = i < 200 ? 1u : 0u;
+    b.cells = {cell_of(0, 300, 1)};
+    Material white{{1.0f, 1.0f, 1.0f}};
+    b.materials = {white, white};
+    b.step();
+    for (int i = 0; i < 500 && b.voxels->stats().pending > 0; ++i) b.step();
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().looks == 0);
+    b.materials[1].base_color = {0.1f, 0.8f, 0.1f};
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().looks == 64 && b.voxels->stats().owed == 200 - 64); // only its users
+    for (int i = 0; i < 2000 && b.voxels->stats().pending > 0; ++i) b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    u32 packed = 0;
+    GIANT_CHECK(b.voxel_at(b.instances[0].position, packed));
+    GIANT_CHECK(voxel::unpack_color(packed).y > 0.6f && voxel::unpack_color(packed).x < 0.3f); // green
+    GIANT_CHECK(b.voxel_at(b.instances[299].position, packed));
+    GIANT_CHECK(voxel::unpack_color(packed).x > 0.8f); // white still
+}
+
+// The looks go round from where the last frame's stopped: a cell early in
+// the list changing every frame cannot keep a later one waiting for ever.
+GIANT_TEST("voxel scene: a cell changing every frame does not starve the ones after it") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    add_cubes(b.instances, 1000, 0.6);
+    b.instances.push_back(Instance{});
+    b.instances.back().mesh = 0;
+    b.instances.back().scale = {0.05f, 0.05f, 0.05f};
+    b.instances.back().position = {4.0, 3.0, 4.0};
+    b.cells = {cell_of(0, 1000, 1), cell_of(1000, 1, 1)};
+    b.step();
+    for (int i = 0; i < 500 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->probe(0, {4.0, 3.0, 4.0}) == VoxelProbe::solid);
+    // The first cell is another version every frame from now on, and the last one's instance moves once.
+    b.instances[1000].position = {-4.0, 3.0, -4.0};
+    b.cells[1].version = 2;
+    // (1,001 owed at most and 1,024 looks a frame: with the first cell alone looked at first each frame,
+    // from index 0, the last one's turn would never come at 256 looks a frame; here it is the frame's.)
+    bool there = false;
+    for (int f = 0; f < 3000 && !there; ++f) {
+        b.cells[0].version = static_cast<u64>(10 + f);
+        b.instances[static_cast<usize>(f % 1000)].position.y += 0.001;
+        b.step(0.0f);
+        there = b.voxels->probe(0, {-4.0, 3.0, -4.0}) == VoxelProbe::solid;
+    }
+    GIANT_CHECK(there); // while the first cell still changes
+    for (int i = 0; i < 2000 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->probe(0, {4.0, 3.0, 4.0}) == VoxelProbe::empty);
+}
+
+// A mesh that comes after its instances changes none of them: every one
+// using it is taken in all the same, a share a frame.
+GIANT_TEST("voxel scene: a mesh that comes late is taken in for its instances a share a frame") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    add_cubes(b.instances, 1000, 0.6, 1); // mesh 1: not there yet
+    b.cells = {cell_of(0, 1000, 1)};
+    b.step();
+    for (int i = 0; i < 500 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(b.voxels->probe(0, b.instances[999].position) == VoxelProbe::empty);
+    b.held = std::make_shared<const geometry::ClusterMesh>(geometry::build_clusters(geometry::make_cube()));
+    ++b.version;
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().looks == 64 && b.voxels->stats().owed == 1000 - 64);
+    // The list shrinks by a run while some wait: nothing is lost (every one is copied again).
+    b.instances.erase(b.instances.begin() + 10, b.instances.begin() + 20);
+    b.cells = {cell_of(0, 990, 2)};
+    b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().owed == 0);
+    for (int i = 0; i < 2000 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(b.voxels->probe(0, b.instances[0].position) == VoxelProbe::solid);
+    GIANT_CHECK(b.voxels->probe(0, b.instances[989].position) == VoxelProbe::solid);
+}

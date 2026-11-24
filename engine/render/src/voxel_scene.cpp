@@ -26,10 +26,15 @@ constexpr u64 k_large_cells = 64;
 constexpr u32 k_max_uploads = 1024;
 // More queued jobs than this and changes wait (they stay cheap to hold).
 constexpr usize k_max_jobs = 64;
-// More changes waiting than this, or more in one frame than k_bulk (or an
-// eighth of the instances), and every window is rebuilt instead.
+// More changes waiting than this, or more taken in in one frame than k_bulk
+// (or an eighth of the instances), and every window is rebuilt instead.
 constexpr usize k_max_backlog = 4096;
 constexpr usize k_bulk = 256;
+// Instances that may have changed looked at each frame at least, or this
+// many of them that did differ (then more while there is time): about a
+// tenth of a millisecond either way.
+constexpr u32 k_owed_looks = 1024;
+constexpr usize k_owed_changes = 64;
 // Waiting changes are gathered in squares of this many metres; a box wider
 // than two of them waits on its own.
 constexpr double k_region = 64.0;
@@ -534,6 +539,7 @@ void VoxelScene::set_copy(u32 index, const Instance& in, std::span<const Materia
     Copy& c = m_copies[index];
     c.instance = in;
     m_copy_mesh[index] = in.mesh;
+    m_copy_material[index] = in.material;
     c.color = color_of(in, materials);
     c.coverage = coverage_of(in, materials);
     c.canopy = canopy_of(in, materials);
@@ -1076,6 +1082,7 @@ void VoxelScene::change(u32 index, const Instance& in, std::span<const Material>
     } else {
         m_copies.resize(usize{index} + 1);
         m_copy_mesh.resize(m_copies.size(), k_no_mesh);
+        m_copy_material.resize(m_copies.size(), 0);
     }
     touch_building(m_copies[index].box); // where it was (empty if new)
     set_copy(index, in, materials, meshes);
@@ -1088,6 +1095,7 @@ void VoxelScene::copy_all(std::span<const Instance> instances, std::span<const M
                           const MeshLookup& meshes) {
     m_copies.resize(instances.size());
     m_copy_mesh.resize(instances.size(), k_no_mesh);
+    m_copy_material.resize(instances.size(), 0);
     for (u32 i = 0; i < instances.size(); ++i) {
         set_copy(i, instances[i], materials, meshes);
     }
@@ -1107,6 +1115,7 @@ void VoxelScene::remove_range(u32 first, u32 count) {
     }
     m_copies.erase(m_copies.begin() + first, m_copies.begin() + first + count);
     m_copy_mesh.erase(m_copy_mesh.begin() + first, m_copy_mesh.begin() + first + count);
+    m_copy_material.erase(m_copy_material.begin() + first, m_copy_material.begin() + first + count);
     grid_rebuild();
     // Indices past the run shift down.
     m_changed.assign(m_copies.size(), 0);
@@ -1180,10 +1189,10 @@ void VoxelScene::remove_range(u32 first, u32 count) {
 }
 
 void VoxelScene::see_changes(std::span<const Instance> instances, std::span<const Material> materials,
-                             const std::vector<CellRange>* only, u64 meshes_version, const MeshLookup& meshes) {
+                             const std::vector<CellRange>* only, u64 meshes_version, const MeshLookup& meshes,
+                             const std::function<bool()>& out_of_time) {
     // Meshes added or removed: the cached ones that are gone (or came back)
     // and the instances using them.
-    std::vector<u32> forced;
     const bool looks_changed = material_changes(materials);
     if (meshes_version != m_meshes_version) {
         m_meshes_version = meshes_version;
@@ -1218,7 +1227,8 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
             for (u32 i = 0; i < m_copy_mesh.size(); ++i) {
                 const MeshId id = m_copy_mesh[i];
                 if (id <= top && is_stale[id] != 0) {
-                    forced.push_back(i);
+                    m_owed.add(i);
+                    m_owed_whatever.add(i); // (its mesh is another now, though nothing of the instance differs)
                 }
             }
         }
@@ -1226,51 +1236,20 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
 
     const u32 n = static_cast<u32>(instances.size());
     const u32 m = static_cast<u32>(m_copies.size());
-    if (only != nullptr && n >= m) {
-        // Only the cells listed can differ (instances past the copies are
-        // new, and in them), and instances whose material row looks
-        // different now (its texture arrived: the cell did not change).
-        // The other paths compare every instance, which sees those too.
-        std::vector<u32> changed = std::move(forced);
-        if (looks_changed) {
-            for (u32 i = 0; i < m; ++i) {
-                const u32 material = m_copies[i].instance.material;
-                if (material < m_material_changed.size() && m_material_changed[material] != 0) {
-                    changed.push_back(i);
-                }
-            }
-        }
-        for (const CellRange& c : *only) {
-            for (u32 i = c.first; i < c.first + c.count && i < n; ++i) {
-                if (i >= m || differs(instances[i], materials, m_copies[i])) {
-                    changed.push_back(i);
-                }
-            }
-        }
-        std::sort(changed.begin(), changed.end());
-        changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
-        if (changed.size() > std::max<usize>(k_bulk, n / 8)) {
-            copy_all(instances, materials, meshes);
-            request_rebuild();
-            return;
-        }
-        for (const u32 i : changed) {
-            change(i, instances[i], materials, meshes);
-        }
-        if (m_regions.size() > k_max_backlog) {
-            request_rebuild();
-        }
-        return;
-    }
     if (n < m) {
         // One run removed from the middle (or the end) shifts the rest down:
-        // see whether that is all that happened.
+        // see whether that is all that happened. (At once: every index
+        // moves. The editor's cells keep their places, so its list shrinks
+        // only when it is laid out afresh.)
+        const Writing writing(*this);
         u32 first = 0;
         while (first < n && !differs(instances[first], materials, m_copies[first])) {
             ++first;
         }
         const u32 k = m - n;
-        bool tail = forced.empty();
+        // (Every instance kept is compared here, so those only owed a look
+        // have had it; one to take in whatever it compares as has not.)
+        bool tail = m_owed_whatever.empty();
         for (u32 j = first; j < n && tail; ++j) {
             tail = !differs(instances[j], materials, m_copies[j + k]);
         }
@@ -1280,29 +1259,108 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
             copy_all(instances, materials, meshes);
             request_rebuild();
         }
+        m_owed.clear();
+        m_owed_whatever.clear();
+        m_owed_from = 0;
         return;
     }
-    std::vector<u32> changed = std::move(forced);
-    for (u32 i = 0; i < m; ++i) {
-        if (differs(instances[i], materials, m_copies[i])) {
-            changed.push_back(i);
+    if (only == nullptr) {
+        // No cells to say what is as it was: every instance is compared,
+        // now (each update would owe every one again).
+        std::vector<u32> changed;
+        for (u32 i = 0; i < n; ++i) {
+            if (i >= m || m_owed_whatever.has(i) || differs(instances[i], materials, m_copies[i])) {
+                changed.push_back(i);
+            }
+        }
+        m_owed.clear();
+        m_owed_whatever.clear();
+        m_owed_from = 0;
+        if (changed.empty()) {
+            return;
+        }
+        const Writing writing(*this);
+        if (changed.size() > std::max<usize>(k_bulk, n / 8)) {
+            copy_all(instances, materials, meshes);
+            request_rebuild();
+            return;
+        }
+        for (const u32 i : changed) {
+            change(i, instances[i], materials, meshes);
+        }
+        if (m_regions.size() > k_max_backlog) {
+            request_rebuild(); // changing faster than they are worked through
+        }
+        return;
+    }
+    // What may differ is owed a look: the cells listed, and instances whose
+    // material row looks different now (its texture arrived: the cell did
+    // not change). Instances past the copies are new, and in the cells
+    // listed: taken in whatever they compare as (were the copies ever to
+    // grow past one before its turn, a copy of nothing would be in its
+    // place, and an instance of all defaults compares equal to that).
+    for (const CellRange& c : *only) {
+        m_owed.add_range(std::min(c.first, n), static_cast<u32>(std::min<u64>(u64{c.first} + c.count, n)));
+    }
+    if (looks_changed) {
+        for (u32 i = 0; i < m; ++i) {
+            const u32 material = m_copy_material[i];
+            if (material < m_material_changed.size() && m_material_changed[material] != 0) {
+                m_owed.add(i);
+            }
         }
     }
-    for (u32 i = m; i < n; ++i) {
-        changed.push_back(i);
-    }
-    std::sort(changed.begin(), changed.end());
-    changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
-    if (changed.size() > std::max<usize>(k_bulk, n / 8)) {
-        copy_all(instances, materials, meshes);
-        request_rebuild();
+    m_owed.add_range(m, n);
+    m_owed_whatever.add_range(m, n);
+    m_owed.keep_below(n); // (none are: the list is never shorter than it was here)
+    m_owed_whatever.keep_below(n);
+    if (m_owed.empty()) {
         return;
     }
-    for (const u32 i : changed) {
-        change(i, instances[i], materials, meshes);
+    // The looks, a frame's share of them: k_owed_looks at least (or
+    // k_owed_changes that did differ, which cost far more each), then until
+    // the time is up. The rest wait, compared with the instances as they are
+    // by then (a cell changing again meanwhile is just owed still). The
+    // workers stand back only once something does differ, and only then.
+    std::optional<Writing> writing;
+    u32 looks = 0;
+    usize changed = 0;
+    u32 at = m_owed.next(m_owed_from);
+    bool wrapped = false;
+    while (true) {
+        if (at == IndexSet::k_none) {
+            if (wrapped || m_owed.empty()) {
+                break;
+            }
+            wrapped = true; // (from where the last frame stopped, so that none wait for ever)
+            at = m_owed.next(0);
+            continue;
+        }
+        m_owed.remove(at);
+        const bool whatever = m_owed_whatever.has(at);
+        m_owed_whatever.remove(at);
+        if (whatever || differs(instances[at], materials, m_copies[at])) {
+            if (!writing.has_value()) {
+                writing.emplace(*this);
+            }
+            change(at, instances[at], materials, meshes);
+            ++changed;
+        }
+        ++looks;
+        ++m_stats.looks;
+        if ((looks >= k_owed_looks || changed >= k_owed_changes) && looks % 16 == 0 && out_of_time()) {
+            break;
+        }
+        at = m_owed.next(at + 1);
     }
-    if (m_regions.size() > k_max_backlog) {
-        request_rebuild(); // changing faster than they are worked through
+    m_owed_from = at == IndexSet::k_none ? 0 : at + 1;
+    // So many taken in in one frame (a frame with the time for it: behind a
+    // loading screen, as a world comes in) are one rebuild of every window,
+    // not their squares one by one; so are more squares waiting than are
+    // worked through. (Nothing of request_rebuild's is the workers': it
+    // needs none of them held back.)
+    if (changed > std::max<usize>(k_bulk, n / 8) || m_regions.size() > k_max_backlog) {
+        request_rebuild();
     }
 }
 
@@ -2313,6 +2371,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     m_stats.built = 0;
     m_stats.uploaded = 0;
     m_stats.marked = 0;
+    m_stats.looks = 0;
     m_stats.shift_ms = m_stats.changes_ms = m_stats.find_ms = m_stats.bricks_ms = 0.0f;
     m_stats.begun_here = 0;
     const u64 begun_before = m_begun_here;
@@ -2428,9 +2487,11 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     }
     part(m_stats.shift_ms);
     {
-        const Writing writing(*this); // (the workers stand back while the copies change)
+        // A quarter of the budget at most for looking at what changed (see_changes).
+        const double until = elapsed() + budget * 0.25;
         const bool only = changed_cells(cells, instances.size(), m_seen_cells, m_changed_cells);
-        see_changes(instances, materials, only ? &m_changed_cells : nullptr, meshes_version, meshes);
+        see_changes(instances, materials, only ? &m_changed_cells : nullptr, meshes_version, meshes,
+                    [&] { return elapsed() >= until; });
     }
     // Waiting changes become jobs while the queue is short.
     while (m_jobs.size() < k_max_jobs && !m_region_order.empty()) {
@@ -2663,10 +2724,12 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
 
     m_stats.bricks = m_used;
     m_stats.pending = static_cast<u32>(m_pending.size() + m_jobs.size() + m_regions.size() + m_changed_count +
-                                       (m_rebuild_again ? 1 : 0) + m_builds.size());
+                                       m_owed.count() + (m_rebuild_again ? 1 : 0) + m_builds.size());
     m_stats.waiting = static_cast<u32>(m_pending.size());
     m_stats.building = static_cast<u32>(m_builds.size());
-    m_stats.changes = static_cast<u32>(m_jobs.size() + m_regions.size() + m_changed_count + (m_rebuild_again ? 1 : 0));
+    m_stats.changes = static_cast<u32>(m_jobs.size() + m_regions.size() + m_changed_count + m_owed.count() +
+                                       (m_rebuild_again ? 1 : 0));
+    m_stats.owed = static_cast<u32>(m_owed.count());
     m_stats.missing = static_cast<u32>(m_retry.size());
     m_stats.overflow = m_stats.missing > 0;
     m_stats.begun_here = static_cast<u32>(m_begun_here - begun_before);
@@ -2688,6 +2751,7 @@ void VoxelScene::idle() {
     m_stats.built = 0;
     m_stats.uploaded = 0;
     m_stats.marked = 0;
+    m_stats.looks = 0;
     m_stats.cpu_ms = 0.0f;
     m_stats.shift_ms = m_stats.changes_ms = m_stats.find_ms = m_stats.bricks_ms = 0.0f;
     m_stats.begun_here = 0;
@@ -2749,7 +2813,7 @@ VoxelProbe VoxelScene::probe(u32 level, const DVec3& position) const {
 }
 
 bool VoxelScene::holds(u32 index) const {
-    if (!m_clipmap.placed() || index >= m_copies.size() || m_rebuild_again ||
+    if (!m_clipmap.placed() || index >= m_copies.size() || m_rebuild_again || m_owed.has(index) ||
         (index < m_changed.size() && m_changed[index] != 0)) {
         return false;
     }
