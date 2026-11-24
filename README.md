@@ -477,6 +477,9 @@ Open-world systems:
 - N7 part 5: the game gate (`tools/game_gate.py`): the valley packaged
   as a game, that game begun behind its loading screen, run through,
   saved and taken up again, timed from the first frame of play.
+- A world's player start: `set_player_start` says where a new game
+  begins and which way the player looks (saved in the world's text); the
+  game's main menu stands over the view from there.
 - Fast travel: `travel_player` puts the player far off, past what is
   loaded too, and in a game the loading screen stands until the world
   there is in; a camera that

@@ -579,6 +579,16 @@ void GameMenus::show_loading() {
     open(Menu::loading);
 }
 
+void GameMenus::view_from_start() {
+    const std::optional<world::PlayerStart>& start = m_state.scene.player_start;
+    if (!start) return;
+    // (Where the eyes will be, as far as what is under the point is in already: the loading screen
+    // finds the rest.)
+    m_state.camera.position = m_state.play != nullptr ? m_state.play->eye_at_start(m_state.scene, start->position) : start->position;
+    m_state.camera.yaw_degrees = start->yaw_degrees;
+    m_state.camera.pitch_degrees = 0.0f;
+}
+
 void GameMenus::player_travelled() {
     PlayState* play = m_state.play;
     if (play == nullptr || !play->playing() || !m_state.game_mode || m_state.game_ui == nullptr) return;
@@ -667,7 +677,7 @@ void GameMenus::arrive() {
         m_state.play->land(m_state.scene, m_state.camera);
         m_arriving_quiet = 0;
     }
-    // The view goes to where the player's eyes will be (a new game's is wherever the world's view was
+    // The view goes to where the player's eyes will be (a new game's is the world's player start, or with none wherever the world's view was
     // left, play's a body's height over the ground under it): what the GPU still has to make round
     // the view (the voxel world's window, the shadows) is then made for play's first frame, not
     // for a view play never has.
@@ -767,6 +777,7 @@ void GameMenus::press(const std::string& screen, const std::string& id) {
                 m_state.saves->close(m_state); // the world as it is authored: nothing of a game played before
             }
             if (m_start != nullptr) m_state.camera = *m_start;
+            view_from_start(); // (the world's start as it is now)
             begin_play();
         } else if (id == "load") open(Menu::saves, false);
         else if (id == "settings") open(Menu::settings);
@@ -846,7 +857,12 @@ bool GameMenus::update(const std::vector<platform::InputEvent>& events, float pi
     // may begin the loaded game's.)
     if (m_was_playing != playing && m_menu != Menu::none && !(m_menu == Menu::loading && m_loading)) close();
     m_was_playing = playing;
-    if (m_state.game_mode && m_start == nullptr) m_start = std::make_unique<EditorCamera>(m_state.camera);
+    // (The main menu stands over the view from the world's start, so that what a new game needs
+    // is already coming in, and in, behind it.)
+    if (m_state.game_mode && m_start == nullptr) {
+        m_start = std::make_unique<EditorCamera>(m_state.camera);
+        view_from_start();
+    }
     if (playing) m_state.camera.vertical_fov_degrees = m_settings.fov_degrees;
     // Only drawn menus pause the game and take the input (the game UI hidden: Esc stops play).
     const bool can_show = ui != nullptr && ui->showing(m_state);

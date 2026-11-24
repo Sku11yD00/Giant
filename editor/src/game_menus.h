@@ -24,8 +24,9 @@
 // Run as a game (EditorState::game_mode), the menus lead: outside play the
 // main menu stands (Continue: the newest save of this world that can be
 // loaded; New game: the game as the world is authored, play starting at
-// the view the program opened with, since a world names no player start
-// yet; Load; Settings; Quit: the program ends) and takes the input, the
+// the world's player start (world::PlayerStart, set_player_start; as the
+// program opens the menu stands over the view from it), or with none at the view the program
+// opened with; Load; Settings; Quit: the program ends) and takes the input, the
 // pause menu's Quit goes back to it, and a game loaded from a menu is
 // played once it is in (one that could not be loaded leads back to the
 // main menu, which says why). Nothing leads to the editor. A game is not
@@ -206,6 +207,8 @@ private:
     std::optional<DVec3> m_arriving_view;
     DVec3 m_arriving_eye;
     void restore_view();
+    // The view put where the world's player start is, looking along it (none: left as it is).
+    void view_from_start();
     double m_arriving_seconds = 0.0, m_arriving_bodies = 0.0, m_arriving_gpu = 0.0, m_arriving_gpu_in_all = 0.0;
     std::chrono::steady_clock::time_point m_arriving_frame;
     void show_loading();  // the screen stands from now
@@ -231,7 +234,7 @@ private:
     u64 m_failures_before = 0; // GameSaves::Status::failures when it began
     std::string m_notice;
     std::string m_newest;   // the slot Continue loads (the newest of this world that can be read); empty: none
-    std::unique_ptr<EditorCamera> m_start; // a game: the view it opened with (a new game starts there)
+    std::unique_ptr<EditorCamera> m_start; // a game: the view it opened with (a new game starts there, in a world that names no player start)
 
     struct Read {
         u64 id = 0;

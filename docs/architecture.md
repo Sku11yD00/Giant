@@ -873,7 +873,7 @@ cell's work, not the world's:
   place in the frame everywhere. Per frame that is a bit per instance
   instead of 64 bytes.
 - **Worlds stream by cell (N3 part 3, `editor/src/world_streaming.h`).** A
-  world is a folder: `world.json` (`world::WorldIndex`: lighting, kits,
+  world is a folder: `world.json` (`world::WorldIndex`: lighting, kits, the player start,
   the meshes its cells use, which cells have a file, the next id) and
   `cells/<x>_<z>.cell.json`, one per cell with entities or a terrain tile
   (`world::save_cell`: sorted by id, so an unchanged cell saves the same
@@ -5496,7 +5496,7 @@ Part 2c: the player. While playing and put down, a section `player` holds
 its `feet`, `velocity`, `climbing` (the wall's normal, or null; not while
 pulling itself up a ledge), `carried_by` (an entity, or null), and what
 stopping goes back to (`returns_to`, the camera, and `was_simulating`).
-Loading starts play with `PlayState::start(..., PlayerStart*)`: held as
+Loading starts play with `PlayState::start(..., SavedPlayer*)`: held as
 play starting is until what it stands on is in (at its feet, not the
 camera), then put there (`set_character_position`), moving as it was
 (`sim::PhysicsWorld::set_character_velocity`), on its wall again
@@ -5681,8 +5681,8 @@ and load, settings), which also route the real mouse and keys to screens.
   world and of this folder's name, looked for among all the slots when
   the menu opens, on the job; shown when there is one), New game (the
   game closed, `GameSaves::close`, so the world is as authored, and play
-  started from the view the program opened with: a world names no player
-  start yet), Load, Settings, Quit (`quit_requested`). The pause menu's
+  started at the world's player start, or with none from the view the
+  program opened with), Load, Settings, Quit (`quit_requested`). The pause menu's
   Quit reads "Quit to menu" and leads there, as does play stopped any
   other way; Back and Esc from the saves and the settings lead to the
   main menu (to the pause menu in play), and Esc does nothing on it. A
@@ -5695,7 +5695,7 @@ and load, settings), which also route the real mouse and keys to screens.
   the menus). Nobody can be asked a question in a game (the editor's
   question windows are its panels'), so script files and mods' scripts are
   treated as with no window at all: not loaded unless allowed on the
-  command line. Not yet: a player start in the world; the game's own
+  command line. Not yet: the game's own
   screens show behind the main menu, and scripts run there too. Tested by
   `editor/tests/test_game_menus.cpp` and end to end by
   `tools/game_smoke.py` (ctest `editor_game`).
@@ -5786,7 +5786,7 @@ and load, settings), which also route the real mouse and keys to screens.
   the frames each loading screen stood beside its seconds. Before
   that wait, once the bodies are in, the view is moved to where the
   player's eyes will be (`PlayState::eye_at_start`: a new game's view is
-  wherever the world's was left, its player stands on the ground under
+  the world's player start, or wherever the world's was left; its player stands on the ground under
   it), so what the GPU makes round the view (the voxel world's window
   above all) is made for play's first frame: otherwise the window moves
   as play begins and a slab of bricks at each level is built again
@@ -5838,10 +5838,9 @@ and load, settings), which also route the real mouse and keys to screens.
   limits), each loading stood once and ended with its bar full in under
   a minute with nothing it counts still to come, the player ran 20 m or
   more and ended on the ground, the game taken up again is where it was
-  saved, and streaming never failed. (A world names no player start
-  yet, so a new game begins under the view the program opens with, here
-  the river's bed; `PlayState::start` stands a player whose view is
-  under the terrain on the ground over it, not left to fall.) It prints how long each loading
+  saved, and streaming never failed. The valley names a player start
+  (on the river's bank, looking towards the town), and the new game is
+  to begin on the ground there. It prints how long each loading
   took and what was behind when play began (the voxel world, its light
   and the shadows are waited for by the loading screen for at most
   30 s). On CI
@@ -5871,6 +5870,24 @@ and load, settings), which also route the real mouse and keys to screens.
   (the ground there is not read yet): the loading screen is judged as
   the other two, the player is to stand on the ground there, and 600
   frames of play after it are printed.
+- **A world's player start.** A scene or world may name where a game
+  played in it begins (`world::PlayerStart`, `Scene::player_start`: a
+  position, where the player's eyes would be, and a yaw; in the text as
+  `"player_start": {"position": [x, y, z], "yaw": degrees}`, only when
+  set, in a scene's file and a world's `world.json`). `set_player_start`
+  sets it (from the view as it is, or by numbers; `clear` takes it
+  away; undoable) and `get_player_start` reads it. As a game opens, the
+  main menu stands over the view from the start (`GameMenus::
+  view_from_start`: where the eyes will be, as far as what is under the
+  point is in), so what a new game needs is coming in behind the
+  menu already, and New game begins there (at the start as it is then:
+  one changed or cleared meanwhile is followed): the player on what is under
+  the point (a point under the ground with no floor under it counts as
+  on the ground, as for any start: `PlayState::place_eye`), looking
+  along the yaw, level. With none, a new game begins under the view the
+  program opened with, as before (the save a game keeps of a player is
+  the editor's `SavedPlayer`, another thing). The editor's own `play` still starts
+  under the camera: it is for trying a place out.
 - **A view that jumps (fast travel).** Flying or walking brings the world
   in a slab at a time, within play's shares of a frame (0.5 ms of ground
   uploads, 1 ms of voxel work, a few scatter cells). A view that jumps

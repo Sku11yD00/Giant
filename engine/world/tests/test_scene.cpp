@@ -1370,3 +1370,40 @@ GIANT_TEST("world: an eye saves and loads, only when set, is checked, and is nev
         GIANT_CHECK(both_error.has_value() && contains(both_error->message, "not both"));
     }
 }
+
+GIANT_TEST("world: a player start saves and loads with a scene and a world, only when set, and is checked") {
+    Scene scene;
+    GIANT_CHECK(!contains(save_scene(scene), "player_start"));
+    scene.player_start = PlayerStart{{1234567.123456789, 31.1, -72000.987654321}, -135.5f}; // (doubles: no float holds these)
+    Scene loaded;
+    GIANT_CHECK(!load_scene(save_scene(scene), loaded).has_value() && loaded.player_start == scene.player_start);
+    // A copy has it; a scene loaded without one has none.
+    const Scene copy = scene;
+    GIANT_CHECK(copy.player_start == scene.player_start);
+    Scene moved = std::move(loaded);
+    GIANT_CHECK(moved.player_start == scene.player_start);
+    GIANT_CHECK(!load_scene(save_scene(Scene{}), moved).has_value() && !moved.player_start);
+    // The world's index, the same.
+    WorldIndex world;
+    GIANT_CHECK(!contains(save_world_index(world), "player_start"));
+    world.player_start = scene.player_start;
+    WorldIndex back;
+    GIANT_CHECK(!load_world_index(save_world_index(world), back).has_value() && back.player_start == world.player_start);
+    // Checked: a position is needed, of numbers, a yaw within a turn, nothing else.
+    for (const char* bad : {R"({})", R"({"position": [0, 1]})", R"({"position": [0, 1, "x"]})", R"({"position": [0, 1e9, 0]})",
+                            R"({"position": [0, 1, 2], "yaw": 400})", R"({"position": [0, 1, 2], "pitch": 3})", R"([1, 2, 3])"}) {
+        Scene refused;
+        const auto error =
+            load_scene(std::string(R"({"format": "giant-scene", "version": 1, "player_start": )") + bad + "}", refused);
+        GIANT_CHECK(error.has_value() && contains(error->message, "player_start") && !refused.player_start);
+    }
+    // (Half a turn either way is within it.)
+    for (const float yaw : {180.0f, -180.0f}) {
+        scene.player_start->yaw_degrees = yaw;
+        Scene turned;
+        GIANT_CHECK(!load_scene(save_scene(scene), turned).has_value() && turned.player_start == scene.player_start);
+    }
+    Scene plain;
+    GIANT_CHECK(!load_scene(R"({"format": "giant-scene", "version": 1, "player_start": {"position": [4, 5, 6]}})", plain).has_value());
+    GIANT_CHECK(plain.player_start && plain.player_start->position == DVec3(4.0, 5.0, 6.0) && plain.player_start->yaw_degrees == 0.0f);
+}

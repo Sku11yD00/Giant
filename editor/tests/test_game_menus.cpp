@@ -327,6 +327,63 @@ GIANT_TEST("game menus: Esc pauses play; buttons by mouse, keys and MCP; saves m
     std::filesystem::remove_all(folder, ec);
 }
 
+GIANT_TEST("game menus: a new game begins at the world's player start, the main menu standing over the view from it") {
+    const std::filesystem::path folder = fresh_folder();
+    {
+        Stage stage(folder, true);
+        GIANT_CHECK(stage.device != nullptr);
+        if (stage.device == nullptr) return;
+        GameMenus& menus = *stage.menus;
+        PlayState& play = stage.play;
+        stage.state.scene.player_start = world::PlayerStart{{12.0, 6.0, -9.0}, 90.0f};
+        stage.state.camera.pitch_degrees = -40.0f;
+        menus.wait();
+        GIANT_CHECK(stage.frame() && menus.menu() == GameMenus::Menu::main);
+        // The menu's view is the start's: what a new game needs comes in behind it.
+        // (Where the eyes will be: over the floor under the point, once the floor's body is in.)
+        GIANT_CHECK(std::fabs(stage.state.camera.position.x - 12.0) < 0.01 && std::fabs(stage.state.camera.position.z + 9.0) < 0.01 &&
+                    stage.state.camera.position.y <= 6.0 && stage.state.camera.yaw_degrees == 90.0f &&
+                    stage.state.camera.pitch_degrees == 0.0f);
+        const auto new_game = [&] {
+            GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
+            for (u32 i = 0; i < GameMenus::k_quiet_frames + 6 && !play.playing(); ++i) stage.frame();
+            stage.frame();
+            GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none);
+            for (int i = 0; i < 30; ++i) stage.frame();
+            return stage.run("get_player").value;
+        };
+        Json player = new_game();
+        // On the floor under the start, looking along it.
+        GIANT_CHECK(std::fabs(player["position"][0].get<double>() - 12.0) < 0.05 && std::fabs(player["position"][2].get<double>() + 9.0) < 0.05 &&
+                    std::fabs(player["position"][1].get<double>()) < 0.05 && player["on_ground"] == true && player["yaw"] == 90.0);
+        // Walked off, back at the main menu, the start moved meanwhile: the next new game begins at the new one.
+        const auto to_the_menu = [&] {
+            GIANT_CHECK(stage.run("open_menu", {{"menu", "pause"}}).ok);
+            stage.frame();
+            GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.pause"}, {"id", "quit"}}).ok);
+            for (int i = 0; i < 4; ++i) stage.frame();
+            menus.wait();
+            stage.frame();
+            GIANT_CHECK(menus.menu() == GameMenus::Menu::main && !play.playing());
+        };
+        GIANT_CHECK(stage.run("set_player_input", {{"forward", 1}}).ok);
+        for (int i = 0; i < 60; ++i) stage.frame();
+        to_the_menu();
+        stage.state.scene.player_start = world::PlayerStart{{-15.0, 4.0, 3.0}, -45.0f};
+        player = new_game();
+        GIANT_CHECK(std::fabs(player["position"][0].get<double>() + 15.0) < 0.05 && std::fabs(player["position"][2].get<double>() - 3.0) < 0.05 &&
+                    player["on_ground"] == true && player["yaw"] == -45.0);
+        // The start taken away: the next new game begins under the view the program opened with.
+        to_the_menu();
+        GIANT_CHECK(stage.run("set_player_start", {{"clear", true}}).ok);
+        player = new_game();
+        GIANT_CHECK(std::fabs(player["position"][0].get<double>()) < 0.05 && std::fabs(player["position"][2].get<double>()) < 0.05 &&
+                    player["on_ground"] == true);
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
+}
+
 GIANT_TEST("game menus: run as a game the main menu leads: new game, quit to menu, continue, load, and out only by Quit") {
     const std::filesystem::path folder = fresh_folder();
     const std::filesystem::path other = fresh_folder();

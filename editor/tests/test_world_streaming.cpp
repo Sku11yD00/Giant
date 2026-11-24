@@ -220,14 +220,21 @@ GIANT_TEST("world streaming: open_world and save_world commands") {
     const std::string folder = w.folder.generic_string();
     GIANT_CHECK(!commands.execute("save_world").ok); // no world, no folder
     GIANT_CHECK(commands.execute("create_entity", {{"name", "x"}, {"position", {5, 0, 5}}}).ok);
+    state.scene.player_start = world::PlayerStart{{1.0, 2.0, 3.0}, 10.0f}; // (a world made with one keeps it)
     const auto made = commands.execute("save_world", {{"folder", folder}});
-    GIANT_CHECK(made.ok && made.value["cells_written"] == 1);
+    GIANT_CHECK(made.ok && made.value["cells_written"] == 1 && !w.streaming.unsaved_settings(state.scene));
     GIANT_CHECK(!commands.execute("save_world", {{"folder", folder + "_other"}}).ok);
     GIANT_CHECK(commands.execute("save_world").ok);
-    GIANT_CHECK(commands.execute("new_scene").ok);
+    // (A player start is the world's: unsaved it is a change, saved it comes back with the world.)
+    GIANT_CHECK(!w.streaming.unsaved_settings(state.scene));
+    state.scene.player_start = world::PlayerStart{{7.0, 3.0, -9.0}, 45.0f};
+    GIANT_CHECK(w.streaming.unsaved_settings(state.scene));
+    GIANT_CHECK(commands.execute("save_world").ok && !w.streaming.unsaved_settings(state.scene));
+    GIANT_CHECK(commands.execute("new_scene").ok && !state.scene.player_start);
     GIANT_CHECK(!commands.execute("save_world").ok); // the scene is not the world's now
     const auto opened = commands.execute("open_world", {{"folder", folder}, {"discard_unsaved", true}});
     GIANT_CHECK(opened.ok && opened.value["cells"] == 1);
+    GIANT_CHECK((state.scene.player_start == world::PlayerStart{{7.0, 3.0, -9.0}, 45.0f}));
     GIANT_CHECK(state.scene.size() == 0);
     const auto info = commands.execute("get_world");
     GIANT_CHECK(info.ok && info.value["open"] == true && info.value["active"] == true && info.value["cells"] == 1);

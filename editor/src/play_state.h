@@ -45,7 +45,7 @@ struct PlayerSettings {
 
 // Where a game save had the player (GameSaves): put back so, not on what
 // is under the camera.
-struct PlayerStart {
+struct SavedPlayer {
     DVec3 feet{};
     Vec3 velocity{};
     std::optional<Vec3> climbing; // on a wall: its normal (flat, out of it)
@@ -67,7 +67,7 @@ public:
     // False when it could not be put there (the physics world refused it).
     // `at`: as a game save had it (its feet, speed, wall and carrier; the
     // camera and simulating to go back to), once what it stands on is in.
-    bool start(world::Scene& scene, EditorCamera& camera, u64 scene_generation, const PlayerStart* at = nullptr);
+    bool start(world::Scene& scene, EditorCamera& camera, u64 scene_generation, const SavedPlayer* at = nullptr);
     // While playing: the player put on what is under `view`, where its eyes would be (as start()
     // would, bodies still being made there waited for the same way), standing still, let go of
     // what carried it or it climbed; where it looks stays. Fast travel: the camera goes with it.
@@ -87,7 +87,7 @@ public:
     // What stopping goes back to (a game save keeps them).
     const EditorCamera& returns_to() const { return m_saved_camera; }
     // A game save's start not put down yet (still placing), else none.
-    const std::optional<PlayerStart>& pending_start() const { return m_start; }
+    const std::optional<SavedPlayer>& pending_start() const { return m_start; }
     // Carried again from `feet` (its carrier just put back where a save had
     // it: held as the save had it against it, not where it was before).
     bool carry_from(const DVec3& feet, world::EntityId entity);
@@ -180,7 +180,7 @@ private:
     bool m_travelled = false; // travel()'s placing, to be held while the world comes
     double m_placing_for = 0.0; // seconds of it
     DVec3 m_place_eye{};        // where its eyes are to start (what placing waits under)
-    std::optional<PlayerStart> m_start; // a game save's, until put down
+    std::optional<SavedPlayer> m_start; // a game save's, until put down
 };
 
 } // namespace giant::editor
