@@ -230,6 +230,47 @@ GIANT_TEST("play commands: the player stands under the camera, walks where it lo
     GIANT_CHECK(f.run("get_player").value["playing"] == false);
 }
 
+GIANT_TEST("play commands: a world's player start is set from the view or by numbers, read, undone and cleared") {
+    Fixture f;
+    ai::CommandResult r = f.run("get_player_start");
+    GIANT_CHECK(r.ok && r.value["set"] == false && !r.value.contains("position"));
+    // From the view as it is.
+    f.state.camera.position = {12.0, 3.0, -7.5};
+    f.state.camera.yaw_degrees = 200.0f;
+    r = f.run("set_player_start");
+    GIANT_CHECK(r.ok && r.value["set"] == true && triple(r.value["position"]) == DVec3(12.0, 3.0, -7.5) && r.value["yaw"] == -160.0);
+    GIANT_CHECK(r.value["ground"].is_null()); // (no terrain here)
+    GIANT_CHECK(f.state.scene.player_start && f.state.scene.player_start->yaw_degrees == -160.0f);
+    // By numbers; what is left out is the view's.
+    r = f.run("set_player_start", {{"position", {100.0, 50.0, 200.0}}, {"yaw", 90}});
+    GIANT_CHECK(r.ok && triple(r.value["position"]) == DVec3(100.0, 50.0, 200.0) && r.value["yaw"] == 90.0);
+    GIANT_CHECK(f.run("get_player_start").value == r.value);
+    // (A yaw is kept within half a turn either way; one past two turns is refused.)
+    GIANT_CHECK(f.run("set_player_start", {{"yaw", 540}}).value["yaw"] == -180.0 && f.run("undo").ok);
+    GIANT_CHECK(!f.run("set_player_start", {{"yaw", 900}}).ok);
+    // Undone and done again; cleared; refused when it is no place, or cleared and set at once.
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.player_start->position == DVec3(12.0, 3.0, -7.5));
+    GIANT_CHECK(f.run("redo").ok && f.state.scene.player_start->position == DVec3(100.0, 50.0, 200.0));
+    GIANT_CHECK(!f.run("set_player_start", {{"position", {1e9, 0.0, 0.0}}}).ok);
+    GIANT_CHECK(!f.run("set_player_start", {{"clear", true}, {"yaw", 3}}).ok);
+    GIANT_CHECK(f.state.scene.player_start->position == DVec3(100.0, 50.0, 200.0));
+    r = f.run("set_player_start", {{"clear", true}});
+    GIANT_CHECK(r.ok && r.value["set"] == false && !f.state.scene.player_start);
+    GIANT_CHECK(f.run("undo").ok && f.state.scene.player_start.has_value());
+    // The ground there, where there is terrain.
+    GIANT_CHECK(f.run("create_terrain", {{"from", {-60, -60}}, {"to", {60, 60}}, {"height", 20}}).ok);
+    r = f.run("set_player_start", {{"position", {3.0, 25.0, 8.0}}});
+    GIANT_CHECK(r.ok && std::fabs(r.value["ground"].get<double>() - 20.0) < 0.01);
+    // While playing, the view is the player's eyes: where it stands is where a game begins.
+    f.state.camera.position = {10.0, 30.0, -4.0};
+    GIANT_CHECK(f.run("play", {{"on", true}}).ok);
+    r = f.run("step_player", {{"seconds", 1.0}});
+    for (int i = 0; i < 8 && r.value["waiting_for_ground"] == true; ++i) r = f.run("step_player", {{"seconds", 1.0}});
+    r = f.run("set_player_start");
+    GIANT_CHECK(r.ok && std::fabs(triple(r.value["position"]).x - 10.0) < 0.05 && std::fabs(triple(r.value["position"]).y - 21.65) < 0.1);
+    GIANT_CHECK(f.run("play", {{"on", false}}).ok);
+}
+
 GIANT_TEST("play commands: begun from a view under the ground, the player stands on the ground over it") {
     Fixture f;
     GIANT_CHECK(f.run("create_terrain", {{"from", {-60, -60}}, {"to", {60, 60}}, {"height", 20}}).ok);

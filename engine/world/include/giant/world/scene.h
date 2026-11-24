@@ -487,6 +487,16 @@ struct Clock {
     bool operator==(const Clock&) const = default;
 };
 
+// Where a game played in this world begins: a new game's player is put on
+// what is under `position` (where its eyes would be, so a point over the
+// place: one under the ground with no floor under it counts as on the
+// ground), looking along `yaw_degrees` (0 down -Z, 90 down -X, as a camera's).
+struct PlayerStart {
+    DVec3 position{};
+    float yaw_degrees = 0.0f; // -180 to 180
+    bool operator==(const PlayerStart&) const = default;
+};
+
 // The weather (weather.h for presets, blending and the light it gives):
 // clouds, wind, fog and haze. A scene with none keeps the flat sky colours
 // of its Lighting; with one, the sky is an atmosphere the sun shines
@@ -812,6 +822,8 @@ public:
     std::optional<Weather> weather;
     // The time of day the scene starts at (not tracked: compare).
     Clock clock;
+    // Where a new game begins (none: wherever the view is; not tracked: compare).
+    std::optional<PlayerStart> player_start;
     // Lakes, rivers and the sea (water.h), by name, in order (not tracked: compare).
     std::vector<Water> water;
     // The people who live here (people.h), their looks and the places they
@@ -931,6 +943,7 @@ struct WorldIndex {
     std::vector<ScatterLayer> scatter;
     std::optional<Weather> weather;
     Clock clock;
+    std::optional<PlayerStart> player_start;
     std::vector<Water> water;
     std::vector<Place> places;
     std::vector<PersonLook> person_looks;

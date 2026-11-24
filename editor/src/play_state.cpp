@@ -45,7 +45,7 @@ DVec3 PlayState::eye_at_start(const world::Scene& scene, const DVec3& view) cons
     return spawn_at(place_eye(scene, view)) + DVec3(0.0, static_cast<double>(m_settings.eye_height), 0.0);
 }
 
-bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_generation, const PlayerStart* at) {
+bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_generation, const SavedPlayer* at) {
     if (playing()) return true;
     m_physics.catch_up(scene); // a frame's share: never a stall
     sim::CharacterDesc desc = m_settings.body;
@@ -114,7 +114,7 @@ void PlayState::put_down() {
         return;
     }
     // As the save had it: where it stood (or hung, or fell), how it moved, what it held or was held by.
-    const PlayerStart s = *m_start;
+    const SavedPlayer s = *m_start;
     m_start.reset();
     world.set_character_position(m_player, s.feet);
     world.set_character_velocity(m_player, s.velocity);

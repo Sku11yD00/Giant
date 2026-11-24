@@ -238,7 +238,7 @@ Scene::Identity& Scene::Identity::operator=(const Identity&) {
 
 Scene::Scene(const Scene& other)
     : lighting(other.lighting), kits(other.kits), terrain(other.terrain), scatter(other.scatter),
-      weather(other.weather), clock(other.clock), water(other.water), places(other.places),
+      weather(other.weather), clock(other.clock), player_start(other.player_start), water(other.water), places(other.places),
       person_looks(other.person_looks), people(other.people), next_person_id(other.next_person_id),
       routines(other.routines), behaviours(other.behaviours), routes(other.routes),
       particle_looks(other.particle_looks), effects(other.effects), m_entities(other.m_entities),
@@ -248,7 +248,7 @@ Scene::Scene(const Scene& other)
 
 Scene::Scene(Scene&& other) noexcept
     : lighting(other.lighting), kits(std::move(other.kits)), terrain(std::move(other.terrain)),
-      scatter(std::move(other.scatter)), weather(other.weather), clock(other.clock),
+      scatter(std::move(other.scatter)), weather(other.weather), clock(other.clock), player_start(other.player_start),
       water(std::move(other.water)), places(std::move(other.places)), person_looks(std::move(other.person_looks)),
       people(std::move(other.people)), next_person_id(other.next_person_id),
       routines(std::move(other.routines)), behaviours(std::move(other.behaviours)), routes(std::move(other.routes)),
@@ -279,6 +279,7 @@ Scene& Scene::operator=(Scene&& other) noexcept {
         scatter = std::move(other.scatter);
         weather = other.weather;
         clock = other.clock;
+        player_start = other.player_start;
         water = std::move(other.water);
         places = std::move(other.places);
         person_looks = std::move(other.person_looks);
@@ -852,6 +853,10 @@ Json effects_json(std::span<const Effect> effects) {
     return list;
 }
 
+Json player_start_json(const PlayerStart& s) {
+    return {{"position", dvec3_json(s.position)}, {"yaw", s.yaw_degrees}};
+}
+
 Json clock_json(const Clock& c) {
     return {
         {"on", c.on},
@@ -1251,6 +1256,9 @@ std::string save_scene(const Scene& scene) {
     if (!(scene.clock == Clock{})) {
         out["clock"] = clock_json(scene.clock);
     }
+    if (scene.player_start) {
+        out["player_start"] = player_start_json(*scene.player_start);
+    }
     if (!scene.water.empty()) {
         out["water"] = water_json(scene.water);
     }
@@ -1506,6 +1514,16 @@ void read_lighting(const Json& json, Lighting& l, std::string& error) {
     r.number("ambient_intensity", l.ambient_intensity, 0, 100);
     r.number("exposure", l.exposure, 0.01, 100);
     r.finish();
+}
+
+void read_player_start(const Json& json, std::optional<PlayerStart>& out, std::string& error) {
+    Reader r(json, "player_start", error);
+    PlayerStart s;
+    r.get("position", true);
+    r.vec3("position", s.position, -1e8, 1e8);
+    r.number("yaw", s.yaw_degrees, -180, 180);
+    r.finish();
+    if (r.ok()) out = s;
 }
 
 void read_clock(const Json& json, Clock& c, std::string& error) {
@@ -3044,6 +3062,9 @@ std::optional<LoadError> load_scene(std::string_view text, Scene& out) {
     if (const Json* clock = root.get("clock", false); clock != nullptr && root.ok()) {
         read_clock(*clock, scene.clock, error);
     }
+    if (const Json* start = root.get("player_start", false); start != nullptr && root.ok()) {
+        read_player_start(*start, scene.player_start, error);
+    }
     read_kits(root, scene.kits, error);
     read_scatter(root, scene.kits, scene.scatter, error);
     read_water(root, scene.water, error);
@@ -3177,6 +3198,9 @@ std::string save_world_index(const WorldIndex& world) {
     if (!(world.clock == Clock{})) {
         out["clock"] = clock_json(world.clock);
     }
+    if (world.player_start) {
+        out["player_start"] = player_start_json(*world.player_start);
+    }
     if (!world.water.empty()) {
         out["water"] = water_json(world.water);
     }
@@ -3245,6 +3269,9 @@ std::optional<LoadError> load_world_index(std::string_view text, WorldIndex& out
     }
     if (const Json* clock = root.get("clock", false); clock != nullptr && root.ok()) {
         read_clock(*clock, world.clock, error);
+    }
+    if (const Json* start = root.get("player_start", false); start != nullptr && root.ok()) {
+        read_player_start(*start, world.player_start, error);
     }
     read_kits(root, world.kits, error);
     read_scatter(root, world.kits, world.scatter, error);

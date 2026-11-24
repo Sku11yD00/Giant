@@ -222,6 +222,7 @@ std::optional<std::string> WorldStreaming::open(const std::filesystem::path& fol
     base.scatter = index.scatter;
     base.weather = index.weather;
     base.clock = index.clock;
+    base.player_start = index.player_start;
     base.water = index.water;
     base.places = index.places;
     base.person_looks = index.person_looks;
@@ -709,6 +710,7 @@ WorldStreaming::Saved WorldStreaming::create(const std::filesystem::path& folder
     m_index.scatter = scene.scatter;
     m_index.weather = scene.weather;
     m_index.clock = scene.clock;
+    m_index.player_start = scene.player_start;
     m_index.water = scene.water;
     m_index.places = scene.places;
     m_index.person_looks = scene.person_looks;
@@ -1051,6 +1053,7 @@ WorldStreaming::Saved WorldStreaming::write(const world::Scene& scene, std::vect
     m_index.scatter = scene.scatter;
     m_index.weather = scene.weather;
     m_index.clock = scene.clock;
+    m_index.player_start = scene.player_start;
     m_index.water = scene.water;
     m_index.places = std::move(owned.places);
     m_index.person_looks = std::move(owned.person_looks);
@@ -1262,7 +1265,7 @@ bool WorldStreaming::unsaved_settings(const world::Scene& scene) const {
     }
     return !(scene.lighting == m_index.lighting) ||
            !(scene.scatter == m_index.scatter) || !(scene.weather == m_index.weather) ||
-           !(scene.clock == m_index.clock) || !(scene.water == m_index.water) || !same_people_things ||
+           !(scene.clock == m_index.clock) || !(scene.player_start == m_index.player_start) || !(scene.water == m_index.water) || !same_people_things ||
            scene.next_person_id != m_index.next_person_id ||
            !(scene.routes == m_index.routes) ||
            !(scene.particle_looks == m_index.particle_looks) || !(scene.effects == m_index.effects);

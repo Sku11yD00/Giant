@@ -10,7 +10,9 @@ by scatter rules), saves it as a world and packages it as a game
 (`package_game`) into a folder of its own. That folder's program is then
 run as anyone handed it would run it, from another folder: the main menu
 stands, New game is pressed, the loading screen stands while the world
-round the player comes in, and the player runs down the valley towards
+round the player comes in, the player begins at the world's player start
+(GAME_START, set with `set_player_start` before the world is saved) and
+runs down the valley towards
 the town for RUN_FRAMES frames (20 seconds at 60 fps), cells, ground and scatter
 streaming in round it. The game is saved, left for the main menu, and
 taken up again with Continue (the loading screen again), and the player
@@ -88,6 +90,7 @@ FLIGHT_OVER = 12.0            # metres over the ground (over the trees)
 FLIGHT_SPACING = 8.0          # metres between the ground heights read along the way
 CATCH_UP_SECONDS = 60.0       # the most the world may take to catch up once the camera stops (a real GPU)
 SETTLE_SECONDS = 300.0        # the most it may take to come in where a flight starts
+GAME_START = (150.0, 700.0)   # (x, z): the world's player start, on the river's bank up the valley
 JUMP_METRES = 1200.0          # how far on down -z the editor's camera jumps after the flights (they end at z -300 or before)
 TRAVEL_Z = 1750.0             # the game's player fast travels to z this or minus this, whichever is farther:
                               # past what is loaded round it (1536 m), where the ground is not read yet
@@ -400,6 +403,12 @@ def main() -> int:
         print(f"game_gate: {info['adapter']} ({info['backend']})")
         build_valley(tool)
         tool("set_weather", {"preset": "fair", "wetness": 0, "snow_cover": 0})
+        # Where the game begins: a point over the bank, looking towards the town.
+        start_ground = tool("get_terrain", {"points": [list(GAME_START)]})["heights"][0]
+        if start_ground is None:
+            raise RuntimeError("the valley has no ground at the game's start")
+        start_yaw = heading([GAME_START[0], 0.0, GAME_START[1]], TOWN)
+        tool("set_player_start", {"position": [GAME_START[0], start_ground + 2.0, GAME_START[1]], "yaw": start_yaw})
         saved = tool("save_world", {"folder": "valley"})
         out = os.path.join(folder, "handed over")
         made = tool("package_game", {"folder": out, "name": NAME})
@@ -438,6 +447,8 @@ def main() -> int:
         def press(button):
             return lambda: tool("ui_click", {"screen": "menu.main", "id": button})["event"] is not None
 
+        began_yaw = None  # where the player looked as the last run began
+
         def played(name, button, shown, towards):
             """One run: the game begun by `button`, the player running towards the point `towards`
             (x, z) and on past it. Returns (where it began, where it ended)."""
@@ -446,6 +457,8 @@ def main() -> int:
             recorded, seconds, menu = begun(game, press(button), recorded)
             world = dict(tool("get_world"), ground_building=tool("get_terrain")["meshes"]["building"])
             behind = behind_text(game.last_frame())
+            nonlocal began_yaw
+            began_yaw = tool("get_player")["yaw"]
             at = tool("get_player")["position"]
             tool("set_player_input", {"forward": 1, "sprint": True, "climb": False, "yaw": heading(at, towards), "pitch": 0})
             flown = run(game, recorded, RUN_FRAMES)
@@ -486,6 +499,11 @@ def main() -> int:
             if time.monotonic() - start > 60:
                 raise RuntimeError("the main menu never stood")
         began_at, left_at = played("a new game", "new", 1, TOWN)
+        if math.hypot(began_at[0] - GAME_START[0], began_at[2] - GAME_START[1]) > 1.0 or abs(began_at[1] - start_ground) > 1.0:
+            failures.append(f"a new game began at {began_at}, not on the ground ({start_ground}) at the world's player "
+                            f"start {GAME_START}")
+        if abs(began_yaw - start_yaw) > 0.01:
+            failures.append(f"a new game began looking along {began_yaw}, not the world's player start's {start_yaw}")
         # Saved, left for the main menu, taken up again.
         tool("save_game", {"slot": "gate", "wait": True})
         tool("open_menu", {"menu": "pause"})
@@ -495,7 +513,7 @@ def main() -> int:
         while tool("get_menu")["menu"] != "main":
             if time.monotonic() - start > 60:
                 raise RuntimeError("the pause menu's Quit did not lead to the main menu")
-        # (Back the way it came: on towards the town it would soon stand before a house.)
+        # (Back the way it came.)
         back_at, _ = played("the game taken up again", "continue", 2, (began_at[0], began_at[2]))
         if math.dist(left_at, back_at) > 1.0:
             failures.append(f"the game taken up again is at {back_at}, not where it was saved ({left_at})")

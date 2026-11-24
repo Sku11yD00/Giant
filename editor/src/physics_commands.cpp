@@ -225,6 +225,17 @@ Json ballistics_json(const EditorState& state, usize hits) {
             {"surfaces", surfaces_json(b.settings())}};
 }
 
+Json player_start_json(const EditorState& state) {
+    const std::optional<world::PlayerStart>& start = state.scene.player_start;
+    Json out{{"set", start.has_value()}};
+    if (!start) return out;
+    out["position"] = vec(start->position);
+    out["yaw"] = start->yaw_degrees;
+    const std::optional<double> ground = state.scene.terrain.height_at(start->position.x, start->position.z);
+    out["ground"] = ground ? Json(*ground) : Json(nullptr);
+    return out;
+}
+
 Json player_json(const EditorState& state) {
     const PlayState& play = *state.play;
     Json out{{"playing", play.playing()}};
@@ -815,6 +826,60 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              }
              return CommandResult::success(player_json(state));
          }});
+
+    add(registry,
+        {"set_player_start",
+         "Sets where a game played in this world begins: a new game's player is put on what is under "
+         "`position` ([x, y, z]: where its eyes would be, so a point over the place; one under the ground "
+         "with no floor under it counts as on the ground), looking along `yaw` (degrees, as the camera's: 0 "
+         "down -z, 90 down -x). Left out, they are the view's now (while playing, the player's eyes), so "
+         "stand where a game should begin and call it. `clear` true takes the start away: a new game then "
+         "begins under the view the program opened with. Saved with the scene or world. As a game "
+         "opens, its main menu stands over the view from the start. Undoable. Returns get_player_start's report.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"properties",
+               {{"position",
+                 {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 3}, {"maxItems", 3}}},
+                {"yaw", {{"type", "number"}, {"minimum", -720}, {"maximum", 720}}},
+                {"clear", {{"type", "boolean"}}}}}},
+         false,
+         [&state](const Json& args, CommandContext& context) {
+             std::optional<world::PlayerStart> to;
+             if (!args.value("clear", false)) {
+                 world::PlayerStart s;
+                 s.position = state.camera.position;
+                 if (args.contains("position")) {
+                     const Json& p = args["position"];
+                     s.position = {p[0].get<double>(), p[1].get<double>(), p[2].get<double>()};
+                 }
+                 // (Within what a scene's text may hold.)
+                 if (!std::isfinite(s.position.x) || !std::isfinite(s.position.y) || !std::isfinite(s.position.z) ||
+                     std::abs(s.position.x) > 1e7 || std::abs(s.position.y) > 1e7 || std::abs(s.position.z) > 1e7) {
+                     return CommandResult::failure("position is no place (numbers within 10,000 km)");
+                 }
+                 const float yaw = args.value("yaw", state.camera.yaw_degrees);
+                 if (!std::isfinite(yaw)) return CommandResult::failure("yaw is no number");
+                 s.yaw_degrees = std::remainder(yaw, 360.0f);
+                 to = s;
+             } else if (args.contains("position") || args.contains("yaw")) {
+                 return CommandResult::failure("clear takes the start away: give it alone, or a position and yaw without it");
+             }
+             const std::optional<world::PlayerStart> before = state.scene.player_start;
+             const auto put = [&state](const std::optional<world::PlayerStart>& start) { state.scene.player_start = start; };
+             put(to);
+             context.record(scene_change(state, [put, before] { put(before); }, [put, to] { put(to); }));
+             return CommandResult::success(player_start_json(state));
+         }});
+
+    add(registry,
+        {"get_player_start",
+         "Where a game played in this world begins (set_player_start): `set`, and when set `position` and "
+         "`yaw`, and `ground`: the height of the terrain there (null: none known, as where a world's cells "
+         "are not loaded).",
+         Json{{"type", "object"}, {"additionalProperties", false}, {"properties", Json::object()}},
+         true,
+         [&state](const Json&, CommandContext&) { return CommandResult::success(player_start_json(state)); }});
 
     add(registry,
         {"set_player_input",

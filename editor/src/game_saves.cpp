@@ -180,7 +180,7 @@ struct GameSaves::Sections {
     bool has_weather = false; // the section was there
     std::optional<world::Weather> weather;
     world::Ground ground;
-    std::optional<PlayerStart> player;
+    std::optional<SavedPlayer> player;
     std::optional<std::pair<double, i32>> time; // the clock's hours and day
     bool has_bodies = false;
     bool simulating = false;
@@ -273,7 +273,7 @@ std::string GameSaves::save_to(EditorState& state, const std::string& slot, bool
     // The player as it is (put down: else a load puts it under the camera again, as play starting does).
     if (playing && state.play->placing() && state.play->pending_start()) {
         // Still being put down where a load had it: kept as that load had it.
-        const PlayerStart& at = *state.play->pending_start();
+        const SavedPlayer& at = *state.play->pending_start();
         Json p = {{"feet", vec_json(at.feet)},
                   {"velocity", Json::array({at.velocity.x, at.velocity.y, at.velocity.z})},
                   {"climbing", at.climbing ? Json::array({at.climbing->x, at.climbing->y, at.climbing->z}) : Json(nullptr)},
@@ -673,7 +673,7 @@ std::string GameSaves::begin_load(EditorState& state, const std::string& slot, b
                     return fail(file + ": a bad clock");
                 p->sections.time = std::pair<double, i32>{hours, static_cast<i32>(day)}; // (24: set_time wraps it)
             } else if (name == "player") {
-                PlayerStart s;
+                SavedPlayer s;
                 const Json none(nullptr);
                 const Json& climbing = j.contains("climbing") ? j["climbing"] : none;
                 const Json& by = j.contains("carried_by") ? j["carried_by"] : none;
