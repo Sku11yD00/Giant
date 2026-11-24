@@ -572,10 +572,19 @@ void GameMenus::show_loading() {
     m_arriving_before = 0;
     m_arriving_done = 0;
     m_arriving_quiet = 0;
+    m_arriving_world_quiet = 0;
     m_arriving_seconds = m_arriving_bodies = m_arriving_gpu = m_arriving_gpu_in_all = 0.0;
     m_arriving_frame = std::chrono::steady_clock::now();
     m_arriving_streamed = 0;
     open(Menu::loading);
+}
+
+void GameMenus::player_travelled() {
+    PlayState* play = m_state.play;
+    if (play == nullptr || !play->playing() || !m_state.game_mode || m_state.game_ui == nullptr) return;
+    if (m_menu != Menu::none) return; // (travel_player refuses under a menu; a screen standing stands on)
+    play->release_keys(); // (no key stays held behind the screen; what set_player_input asked for goes on)
+    show_loading();
 }
 
 bool GameMenus::begin_play() {
@@ -639,11 +648,24 @@ void GameMenus::arrive() {
                         m_arriving.poses + (m_arriving.game ? 1u : 0u);
     // The bodies, once the rest is in, and for no longer than play itself would wait for them.
     // (A player already put down by a loaded game waits for its own, held still.)
-    m_arriving.bodies = !playing && m_state.play != nullptr && m_state.play->world_waits(m_state.scene, m_state.camera.position);
+    // (So does one that travelled: held where it was put.)
+    const bool travelled = playing && m_state.play->travelling();
+    m_arriving.bodies = (!playing || travelled) && m_state.play != nullptr &&
+                        m_state.play->world_waits(m_state.scene, m_state.camera.position);
     bool bodies = false;
     if (counted == 0 && m_arriving.bodies) {
         m_arriving_bodies += frame;
         bodies = m_arriving_bodies <= PlayState::k_most_placing_seconds;
+    }
+    // A player that travelled is put down once the world round the point is in (nothing coming
+    // for the quiet frames, as the screen's own end: in its first frames nothing is known to come
+    // yet, and the ground there may not be read), the view with it: what the GPU still has to
+    // make is made round where it stands, as below for one about to start, and waited for afresh.
+    if (counted != 0 || bodies) m_arriving_world_quiet = 0;
+    else if (looked) ++m_arriving_world_quiet;
+    if (travelled && m_arriving_world_quiet >= k_quiet_frames) {
+        m_state.play->land(m_state.scene, m_state.camera);
+        m_arriving_quiet = 0;
     }
     // The view goes to where the player's eyes will be (a new game's is wherever the world's view was
     // left, play's a body's height over the ground under it): what the GPU still has to make round

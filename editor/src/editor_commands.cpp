@@ -100,7 +100,8 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
          "validation layer runs, frames completed, the last frame's draw counts, frame times over the last 240 frames (average, median, 99th percentile, worst, hitches: frames 1.5x the median and 2 ms over it, and the times themselves, oldest first; wall clock, so vsync and "
          "time spent running commands count), the GPU's own time for the newest finished frame "
          "and each of its passes (gpu: frame_ms and passes, from GPU timestamps; 0 ms on the "
-         "null backend) and the window size in pixels. With phases_since, frame_times.phases: where the main "
+         "null backend) the window size in pixels, and `arriving`: the view jumped over 64 m in a frame (never in a game being played) and the world round "
+         "it is coming in with a loading screen's shares of each frame (for 20 s at most). With phases_since, frame_times.phases: where the main "
          "thread's time went in the frames since then (each phase's median, and the phases of those over "
          "phases_over_ms), for finding what makes a frame slow; with each slow frame, the GPU device's counts "
          "(device: resources created, new memory allocations, resources released, begin_frame's wait for the GPU "
@@ -133,6 +134,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
                   {"meets_minimum_spec", adapter.meets_minimum_spec()},
                   {"validation_enabled", state.device->validation_enabled()},
                   {"frames_completed", state.device->frames_completed()},
+                  {"arriving", state.arriving},
                   {"last_frame", {{"scene_draws", state.scene_stats.draws},
                                   {"scene_instances", state.scene_stats.instances},
                                   {"scene_clusters", state.scene_stats.clusters},

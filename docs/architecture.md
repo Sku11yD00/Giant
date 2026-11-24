@@ -5861,7 +5861,54 @@ and load, settings), which also route the real mouse and keys to screens.
   stopping everything had caught up with what came last: measured, not
   judged yet, except that on a real GPU it must catch up within 60 s. A
   flight that cannot be flown is a failure of its own, and the game is
-  still run.
+  still run. After the flights the camera jumps 1.2 km
+  (`set_camera`) to where nothing is in: the gate prints how long the
+  world round it took and what came last, and fails if the editor did
+  not say it was arriving, or still says so once it is in (on a real
+  GPU, also if it is not in within 60 s). And the game taken up again
+  ends with a fast travel (`travel_player`) to the far end of the
+  valley, past what is loaded round the player, to a point in the air
+  (the ground there is not read yet): the loading screen is judged as
+  the other two, the player is to stand on the ground there, and 600
+  frames of play after it are printed.
+- **A view that jumps (fast travel).** Flying or walking brings the world
+  in a slab at a time, within play's shares of a frame (0.5 ms of ground
+  uploads, 1 ms of voxel work, a few scatter cells). A view that jumps
+  leaves all of it to come at once: measured on the valley (null device),
+  a 1.8 km jump took 53 s to fill in, 41 s of it the ground. So a view
+  that moves more than 64 m between two frames, and faster than 400 m/s
+  (so that a flight in a frame that took long is none), is a jump
+  (`ViewJump`, `editor/src/view_jump.h`: `set_camera`, a far person
+  followed, a player moved or given the camera back): it turns on the
+  loading screen's shares for the ground, the far ground, scatter, the
+  voxel world and the cells read, until none of those has anything
+  coming for 10 frames running (what the loading screen counts, less
+  what may never come: tiles waiting for room in the geometry pool, the
+  voxel world's count when it is off; textures and light are not waited
+  for), for 20 s of frames at most (a frame counting 0.1 s at most). The
+  same jump is then in after 16 to 19 s, the ground after 2.
+  `get_engine_info` says `arriving` meanwhile, and `Editor.fly`
+  (`gate_common.py`) waits it out, so the gates' flights are timed at
+  play's shares. The frames are heavier while it lasts (a loading
+  screen's are): the editor's choice for a view nobody is playing in.
+  Flying the editor's camera faster than 400 m/s keeps it on. It is off
+  in a game being played, where heavier frames are hitches (a game
+  loaded by `load_game` without its menu, a carrier that moves the
+  player far: the world comes at play's shares, as before). A game's
+  fast travel is `travel_player` (`PlayState::travel`): the player put
+  on what is under a point, still, off wall and carrier. The place may
+  be past what is loaded, its ground not read: while the world is coming
+  (`PlayState::world_coming`, set each frame from the loading screen and
+  `ViewJump`) the player is held at the point, and put down once it is
+  in, on the ground over the point should that be over it. In a game
+  the command raises the loading screen (`GameMenus::player_travelled`),
+  which stands as before a new game until the world round the new place
+  is in, waits for the bodies there, puts the player down
+  (`PlayState::land`) so that the GPU's part is made round where it
+  stands, and play goes on. Keys held are let go; what
+  `set_player_input` asked for goes on. It is refused under a menu or a
+  loading screen. A loading screen standing ends a jump's own burst (it
+  gives the same shares).
 - **A game as a folder (N7 part 3).** `package_game` writes the open
   world, as saved, as a game into a new folder (`editor/src/game_package.h`;
   never over anything: the folder must not be there, or be empty): the

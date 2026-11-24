@@ -60,6 +60,7 @@
 #include "terrain_meshes.h"
 #include "world_streaming.h"
 #include "game_menus.h"
+#include "view_jump.h"
 #include "game_package.h"
 #include "game_saves.h"
 #include "game_ui.h"
@@ -738,6 +739,7 @@ int run(const Options& options) {
     frame_lights.reserve(render::k_max_lights + editor::EffectsState::k_max_effect_lights);
     float render_seconds = 1.0f / 60.0f; // since the last frame (auto exposure eases over it)
     float particle_seconds = 0.0f;       // the game's since the last frame (particles move by it)
+    editor::ViewJump view_jump;          // the world coming in round a view that jumped
     editor::WaterMeshes water_meshes;    // the scene's lakes, rivers and sea, drawn
     double water_seconds = 0.0;          // the waves' clock (the game's time)
     world::SwellTrack swell_track;       // the sea's swell following the wind
@@ -776,10 +778,10 @@ int run(const Options& options) {
         figures.hold = people.hold;
         figures.update(state.scene, state.camera.position);
         mark(editor::FramePhase::people);
+        // The world coming in as fast as the machine can, not a few of each a frame: behind a
+        // game's loading screen (nothing is played), and round a view that jumped (view_jump.h).
+        const bool loading = (state.menus != nullptr && state.menus->loading().on) || view_jump.on();
         {
-            // Behind a game's loading screen nothing is played: the ground's tiles are meshed and
-            // put up as fast as the machine can, not a few a frame.
-            const bool loading = state.menus != nullptr && state.menus->loading().on;
             const u32 most = loading ? editor::TerrainMeshes::k_loading_per_frame : editor::TerrainMeshes::k_per_frame;
             terrain_meshes.set_budgets(loading, most);
             // (The far ground's keep their own counts; behind the loading screen, which waits
@@ -798,8 +800,7 @@ int run(const Options& options) {
         mark(editor::FramePhase::far_ground);
         scatter.camera = state.camera.position;
         {
-            // Behind a game's loading screen the plants are placed as fast as the machine can.
-            const bool loading = state.menus != nullptr && state.menus->loading().on;
+            // (So are the plants.)
             scatter.cells_in_flight = loading ? editor::ScatterPlacer::k_loading_cells_in_flight : editor::ScatterPlacer::k_cells_in_flight;
             scatter.more_workers = loading ? editor::MoreWorkers::for_loading() : 0u;
             scatter.instances_per_frame =
@@ -848,9 +849,9 @@ int run(const Options& options) {
                                         weather.time());
         editor::clock_sky(input.sky, time_of_day.shown());
         input.settings = state.render_settings;
-        // Behind a game's loading screen nothing is played: the voxel world (the far land and its
-        // light) is built with far more of each frame, so play does not begin with it still filling in.
-        if (state.menus != nullptr && state.menus->loading().on)
+        // (And the voxel world, the far land and its light: built with far more of each frame, so
+        // play does not begin with it still filling in.)
+        if (loading)
             input.settings.voxel_ms_per_frame = std::max(input.settings.voxel_ms_per_frame, editor::GameMenus::k_loading_voxel_ms);
         input.instances = scene_frame.instances;
         input.cells = scene_frame.cells;
@@ -1091,6 +1092,28 @@ int run(const Options& options) {
         // (A game loaded behind the loading screen that was saved in play plays from here: held still
         // from this, its first frame, as it is by a menu over play.)
         if (menus.paused()) game_delta = 0.0f;
+        // A view that jumped (view_jump.h): the world round it comes in with a loading screen's
+        // shares until it is in. Not in a game being played, where heavier frames are hitches (its
+        // fast travel raises the loading screen itself). What is counted as coming is what the
+        // loading screen counts (GameMenus::arrive), less what may never come (tiles waiting for
+        // room in the geometry pool, the voxel world's count when it is turned off).
+        {
+            const bool screen = menus.loading().on;
+            view_jump.see(state.camera.position, static_cast<double>(delta), screen || (state.game_mode && play.playing()));
+            if (view_jump.on()) {
+                const editor::TerrainMeshStats ground = terrain_meshes.stats();
+                u64 coming = u64{ground.building - ground.waiting} + scatter.stats().building;
+                const editor::FarGroundStats chunks = far_ground.stats();
+                coming += chunks.reading + chunks.wanted;
+                for (usize l = 0; l < chunks.building.size(); ++l) coming += chunks.building[l] - chunks.waiting[l];
+                if (state.render_settings.voxel_world) coming += state.scene_stats.voxel_pending;
+                if (world_streaming.active(state.scene_generation)) coming += world_streaming.coming();
+                view_jump.wait(coming);
+            }
+            state.arriving = view_jump.on();
+            // (A player that travelled is held where it was put until the world there is in.)
+            play.world_coming = screen || view_jump.on();
+        }
         // The player's wanted motion (or play stopped: Esc, a new scene).
         const bool playing = play.before_step(state.scene, state.camera, state.scene_generation, game_delta);
         window->set_relative_mouse(playing && !menus.paused()); // mouse look (a menu: the pointer is free)
@@ -1205,11 +1228,12 @@ int run(const Options& options) {
         // After the frame's cells were built from the scene: loads and
         // unloads world cells (what joins the scene draws next frame).
         {
-            // (Behind a game's loading screen, cells read are put in the scene whole frames' worth at once.)
+            // (Behind a game's loading screen and round a view that jumped, cells read are put in the scene
+            // whole frames' worth at once.)
             const u32 a_frame = world_streaming.settings.entities_per_frame;
             const u32 at_once = world_streaming.settings.reads_in_flight;
             const u32 readers = world_streaming.settings.more_readers;
-            if (state.menus != nullptr && state.menus->loading().on) {
+            if ((state.menus != nullptr && state.menus->loading().on) || view_jump.on()) {
                 world_streaming.settings.entities_per_frame = std::max(a_frame, editor::k_loading_entities_per_frame);
                 world_streaming.settings.reads_in_flight = std::max(at_once, editor::k_loading_reads_in_flight);
                 world_streaming.settings.more_readers = std::max(readers, editor::MoreWorkers::for_loading());

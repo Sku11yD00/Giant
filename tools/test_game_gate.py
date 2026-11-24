@@ -4,8 +4,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from game_gate import (FLIGHT_FROM, FLIGHT_OVER, FLIGHT_SPACING, begun, coming, flight_at, flight_text, heading,  # noqa: E402
-                       loading_failures, package_failures, settled)
+from game_gate import (FLIGHT_FROM, FLIGHT_OVER, FLIGHT_SPACING, TRAVEL_X, TRAVEL_Z, begun, coming, flight_at,  # noqa: E402
+                       flight_text, heading, jump_text, loading_failures, package_failures, settled, travel_to)
 
 
 def main():
@@ -46,6 +46,16 @@ def main():
     check("caught up 0.0 s after stopping;" in flight_text(90.0, 10.0, times, behind, 0.0, {}), "nothing came last if nothing came")
     check("not caught up (voxel work 7)" in flight_text(90.0, 10.0, times, dict(behind, samples=0), None, {"voxel work": 7}),
           "one that never caught up says so, and what was still coming")
+
+    # The camera's jump: how long the world round it took, what came last, whether the editor said so.
+    text = jump_text(1400.4, 6.26, {"voxel work": 3}, True)
+    check(text == "the camera jumped 1400 m: all round it was in after 6.3 s (last to come: voxel work 3)", f"a jump's line: {text}")
+    check(jump_text(1400.0, 0.0, {}, True).endswith("in after 0.0 s"), "nothing came last if nothing came")
+    check("not in after 60 s (scatter 2)" in jump_text(1400.0, None, {"scatter": 2}, True), "one that never came in says so")
+    check(jump_text(1400.0, 1.0, {}, False).endswith("never said the world was arriving"), "and an editor that never said so")
+    # The player's fast travel: to the valley's end farther from it, off the river.
+    check(travel_to([10.0, 5.0, 400.0]) == (TRAVEL_X, -TRAVEL_Z), "from up the valley, to its lower end")
+    check(travel_to([10.0, 5.0, -400.0]) == (TRAVEL_X, TRAVEL_Z), "from down the valley, to its upper end")
 
     def frame(pending=0, light=0, shadows=0):
         return {"voxels": {"pending": pending}, "gi": {"waiting": light}, "shadows": {"behind": shadows}}

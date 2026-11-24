@@ -20,7 +20,10 @@ constexpr double k_eye_ease = 14.0;
 PlayState::PlayState(PhysicsState& physics, const PlayerSettings& settings) : m_physics(physics), m_settings(settings) {}
 
 DVec3 PlayState::spawn_at(const DVec3& eye) const {
-    const auto hit = m_physics.world().raycast(eye, {0.0f, -1.0f, 0.0f}, 1000.0);
+    // (Not on itself: a player put down again, having travelled, may stand under the point already.)
+    sim::PhysicsWorld::RayFilter filter;
+    filter.accept = [own = m_physics.world().character_body(m_player)](sim::BodyId body, u64) { return body != own; };
+    const auto hit = m_physics.world().raycast(eye, {0.0f, -1.0f, 0.0f}, 1000.0, filter);
     return hit ? hit->point + DVec3(0.0, 0.02, 0.0) : eye - DVec3(0.0, static_cast<double>(m_settings.eye_height), 0.0);
 }
 
@@ -63,6 +66,7 @@ bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_gener
     m_keys = {};
     m_shift = m_space = m_stop = m_escape = m_from_keys = m_up_from_keys = false;
     m_waiting = false;
+    m_travelled = false;
     m_placing = placing_waits(scene, m_place_eye);
     m_placing_for = 0.0;
     m_physics.world().hold_character(m_player, m_placing);
@@ -72,6 +76,33 @@ bool PlayState::start(world::Scene& scene, EditorCamera& camera, u64 scene_gener
     m_eye = desc.position.y + m_settings.eye_height;
     after_step(camera, 0.0);
     return true;
+}
+
+bool PlayState::travel(const world::Scene& scene, EditorCamera& camera, const DVec3& view) {
+    if (!playing() || !std::isfinite(view.x) || !std::isfinite(view.y) || !std::isfinite(view.z)) return false;
+    sim::PhysicsWorld& world = m_physics.world();
+    m_start.reset(); // (a save's place not yet taken: this one instead)
+    m_place_eye = place_eye(scene, view);
+    const DVec3 at = spawn_at(m_place_eye);
+    world.set_character_position(m_player, at); // (still, off any wall or carrier)
+    m_waiting = false;
+    m_travelled = true; // (whether the world there is coming is known by the next step)
+    m_placing = placing_waits(scene, m_place_eye);
+    m_placing_for = 0.0;
+    world.hold_character(m_player, m_placing);
+    m_eye = at.y + m_settings.eye_height;
+    after_step(camera, 0.0);
+    return true;
+}
+
+void PlayState::land(const world::Scene& scene, EditorCamera& camera) {
+    if (!playing() || !m_travelled) return;
+    m_travelled = false;
+    m_placing = false;
+    m_physics.world().hold_character(m_player, false);
+    m_place_eye = place_eye(scene, m_place_eye); // (the ground has come since: over a point under it)
+    put_down();
+    after_step(camera, 0.0);
 }
 
 void PlayState::put_down() {
@@ -222,6 +253,18 @@ bool PlayState::before_step(const world::Scene& scene, EditorCamera& camera, u64
     }
     apply_input();
     sim::PhysicsWorld& world = m_physics.world();
+    if (m_travelled) {
+        // Travelled to where the world is still coming: held until it is in (whoever says it is
+        // coming has its own longest wait), then put down as one just started.
+        if (world_coming) {
+            m_placing = true;
+            m_placing_for = 0.0;
+            world.hold_character(m_player, true);
+            return true;
+        }
+        m_travelled = false;
+        if (m_placing) m_place_eye = place_eye(scene, m_place_eye); // (the ground has come since)
+    }
     if (m_placing) {
         // Just started: held until what it could stand on is in, then put on it.
         m_placing_for += std::max(seconds, 0.0);

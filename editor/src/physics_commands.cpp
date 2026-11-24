@@ -3,6 +3,7 @@
 // physics world what is where.
 #include "editor_commands.h"
 #include "audio_state.h"
+#include "game_menus.h"
 #include "game_saves.h"
 #include "physics_state.h"
 #include "hit_targets.h"
@@ -852,6 +853,47 @@ void register_physics_commands(ai::CommandRegistry& registry, EditorState& state
              state.play->look(args.value("yaw", state.play->yaw()), args.value("pitch", state.play->pitch()));
              if (args.value("jump", false)) state.play->jump();
              state.play->after_step(state.camera, 0.0); // the camera looks the new way at once
+             return CommandResult::success(player_json(state));
+         }});
+
+    add(registry,
+        {"travel_player",
+         "While playing, fast travel: puts the player on what is under `position` ([x, y, z]: where its eyes "
+         "would be, so give a point over the place; one under the ground with no floor under it is taken "
+         "as on the ground, and with nothing under it at all the eyes are there), standing still, off any "
+         "wall or carrier, looking the way it did or along `yaw`. The place may be far off, its ground not "
+         "read yet (get_terrain has no height there): the player is held at the point (waiting_for_ground) "
+         "until the world round it is in, then put down. Run as a game, the loading screen stands meanwhile "
+         "(the ground, the plants, the voxel world and its light, as before a new game) and play goes on once "
+         "it is in: get_menu's `loading` says how far along; refused while a menu or that screen is up. Else "
+         "a travel of over 64 m brings the world in with the same shares of each frame until it is in "
+         "(get_engine_info's `arriving`), no screen over it. Input set by set_player_input goes on. "
+         "Returns get_player's report.",
+         Json{{"type", "object"},
+              {"additionalProperties", false},
+              {"required", {"position"}},
+              {"properties",
+               {{"position",
+                 {{"type", "array"}, {"items", {{"type", "number"}}}, {"minItems", 3}, {"maxItems", 3}}},
+                {"yaw", {{"type", "number"}, {"minimum", -720}, {"maximum", 720}}}}}},
+         false,
+         [&state](const Json& args, CommandContext&) {
+             if (state.physics == nullptr || state.play == nullptr) return no_play();
+             if (!state.play->playing()) return not_playing();
+             if (state.menus != nullptr && state.menus->menu() != GameMenus::Menu::none) {
+                 return CommandResult::failure("a menu or the loading screen is up: travel once play goes on");
+             }
+             const Json& p = args["position"];
+             const DVec3 to{p[0].get<double>(), p[1].get<double>(), p[2].get<double>()};
+             if (!std::isfinite(to.x) || !std::isfinite(to.y) || !std::isfinite(to.z) || std::abs(to.x) > 1e7 ||
+                 std::abs(to.y) > 1e7 || std::abs(to.z) > 1e7) {
+                 return CommandResult::failure("position is no place (numbers within 10,000 km)");
+             }
+             state.play->look(args.value("yaw", state.play->yaw()), state.play->pitch());
+             if (!state.play->travel(state.scene, state.camera, to)) {
+                 return CommandResult::failure("the player could not be put there");
+             }
+             if (state.menus != nullptr) state.menus->player_travelled();
              return CommandResult::success(player_json(state));
          }});
 

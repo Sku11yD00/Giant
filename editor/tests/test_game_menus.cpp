@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -591,6 +592,52 @@ GIANT_TEST("game menus: the loading screen stands while the world round the play
         told = stage.run("get_menu").value;
         GIANT_CHECK(told["menu"] == "none" && told["loading"]["on"] == false && told["loading"]["shown"] == 1);
 
+        // Fast travel in play: the loading screen stands again while the world round the new place
+        // comes in (here the voxel world, as the last frame said), the player there already and
+        // still playing behind it; once it is in, play goes on.
+        GIANT_CHECK(!stage.run("travel_player", {{"position", {0.0, std::numeric_limits<double>::infinity(), 0.0}}}).ok);
+        GIANT_CHECK(!menus.loading().on);
+        stage.state.scene_stats.voxel_pending = 5;
+        stage.state.scene_stats.voxel_built = 1;
+        play.world_coming = true; // (as the program says each frame while the screen stands)
+        const ai::CommandResult went = stage.run("travel_player", {{"position", {world::k_cell_size + 8.0, 30.0, 40.0}}, {"yaw", 90}});
+        GIANT_CHECK(went.ok && went.value["playing"] == true);
+        GIANT_CHECK(std::fabs(went.value["position"][0].get<double>() - (world::k_cell_size + 8.0)) < 0.01 &&
+                    std::fabs(went.value["position"][2].get<double>() - 40.0) < 0.01 && went.value["yaw"] == 90.0);
+        stage.frame();
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().on && menus.loading().shown == 2 && play.playing());
+        // (Not put down in the screen's first frames, when nothing is known to come yet: held at the point.)
+        GIANT_CHECK(play.travelling() && play.waiting_for_ground());
+        stage.frame();
+        GIANT_CHECK(play.travelling() && std::fabs(stage.state.camera.position.y - 30.0) < 0.01);
+        // (Behind the screen no second travel: it stands on, shown once.)
+        GIANT_CHECK(!stage.run("travel_player", {{"position", {0.0, 30.0, 0.0}}}).ok && menus.loading().shown == 2);
+        for (u32 i = 0; i < GameMenus::k_quiet_frames * 4; ++i) {
+            stream();
+            stage.frame();
+        }
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().voxels == 5 && play.playing());
+        // (The rest in: put down behind the screen, which waits on for the GPU's part round where it stands.)
+        GIANT_CHECK(!play.travelling());
+        GIANT_CHECK(std::fabs(stage.state.camera.position.x - (world::k_cell_size + 8.0)) < 0.01); // (the view is the player's)
+        stage.state.scene_stats.voxel_pending = 0;
+        stage.state.scene_stats.voxel_built = 0;
+        for (u32 i = 0; i < GameMenus::k_quiet_frames * 2; ++i) {
+            stream();
+            stage.frame();
+        }
+        stage.frame();
+        play.world_coming = false;
+        GIANT_CHECK(play.playing() && menus.menu() == GameMenus::Menu::none && !menus.loading().on);
+        GIANT_CHECK(std::fabs(stage.state.camera.position.x - (world::k_cell_size + 8.0)) < 0.01);
+        GIANT_CHECK(!play.travelling() && !play.waiting_for_ground()); // (put down)
+        // Under a menu no travel: the menu stays, the player where it was, no screen shown.
+        GIANT_CHECK(stage.run("open_menu", {{"menu", "pause"}}).ok);
+        GIANT_CHECK(!stage.run("travel_player", {{"position", {0.0, 30.0, 0.0}}}).ok);
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::pause && menus.loading().shown == 2);
+        GIANT_CHECK(std::fabs(stage.state.camera.position.x - (world::k_cell_size + 8.0)) < 0.01);
+        GIANT_CHECK(stage.run("open_menu", {{"menu", "none"}}).ok && menus.menu() == GameMenus::Menu::none);
+
         // The GPU still at it once the rest is in (voxel bricks to build, as the last frame said): the
         // screen stands for it, and says so; once done, play begins.
         const auto streamed_in = [&] {
@@ -694,7 +741,7 @@ GIANT_TEST("game menus: the loading screen stands while the world round the play
         stage.frame();
         stream();
         for (u32 i = 0; i < GameMenus::k_quiet_frames * 2; ++i) stage.frame();
-        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().cells == 2 && menus.loading().shown == 5);
+        GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && menus.loading().cells == 2 && menus.loading().shown == 6);
         menus.loading_waited(GameMenus::k_most_loading_seconds - 5.0);
         stage.frame();
         GIANT_CHECK(menus.menu() == GameMenus::Menu::loading && !play.playing());
@@ -707,7 +754,7 @@ GIANT_TEST("game menus: the loading screen stands while the world round the play
         reopened(false);
         GIANT_CHECK(stage.run("ui_click", {{"screen", "menu.main"}, {"id", "new"}}).ok);
         stage.frame();
-        GIANT_CHECK(menus.loading().on && menus.loading().shown == 6);
+        GIANT_CHECK(menus.loading().on && menus.loading().shown == 7);
         GIANT_CHECK(stage.run("open_menu", {{"menu", "settings"}}).ok);
         for (u32 i = 0; i < GameMenus::k_quiet_frames * 2; ++i) {
             stage.streaming.finish_reads();

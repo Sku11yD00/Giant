@@ -50,6 +50,18 @@ yet judged, but for one thing on a real GPU: it must catch up within
 CATCH_UP_SECONDS of stopping. A flight that cannot be flown is a failure
 of its own and the game is still run.
 
+Then two jumps, each to a place over a kilometre from the last, where
+nothing of the world is in. The editor's camera is put JUMP_METRES on
+down the valley (`set_camera`): a view that jumps brings the world round it in with a
+loading screen's shares of each frame (get_engine_info's `arriving`), and
+how long that took is printed with what came last. And in the game, taken
+up again and run, the player fast travels (`travel_player`) to the far
+end of the valley, past what is loaded round it (to a point in the air:
+the ground there is not read yet): the loading screen stands a third time
+while the world round the new place comes in, and is judged as the other
+two; the player is to be there, put down on the ground, and the frames from the first of play on
+after it are printed (measured, not yet judged).
+
 On CI (the null device) it checks all but the speed.
 """
 import math
@@ -76,6 +88,13 @@ FLIGHT_OVER = 12.0            # metres over the ground (over the trees)
 FLIGHT_SPACING = 8.0          # metres between the ground heights read along the way
 CATCH_UP_SECONDS = 60.0       # the most the world may take to catch up once the camera stops (a real GPU)
 SETTLE_SECONDS = 300.0        # the most it may take to come in where a flight starts
+JUMP_METRES = 1200.0          # how far on down -z the editor's camera jumps after the flights (they end at z -300 or before)
+TRAVEL_Z = 1750.0             # the game's player fast travels to z this or minus this, whichever is farther:
+                              # past what is loaded round it (1536 m), where the ground is not read yet
+TRAVEL_X = 1500.0             # (and off to the side: cells stay loaded farther than they are read, round
+                              # everywhere the player ran, down the valley's middle)
+TRAVEL_UP = 200.0             # the height of the point given (over any ground of the valley: none is known there)
+TRAVEL_FRAMES = 600           # of play timed after the travel
 
 
 def never_in_it(name):
@@ -139,6 +158,23 @@ def flight_text(speed, seconds, times, behind, caught_up, last):
             f"at most {behind['most']} ({behind['end']} as it stopped), {after}; it built "
             f"{behind['built'] / samples:.0f} bricks of {behind['marked'] / samples:.0f} marked a frame sampled, and "
             f"built every window again {behind['rebuilds']} times{took}")
+
+
+def jump_text(metres, seconds, last, arriving):
+    """The camera jump's line. `seconds`: until all round the new place was in, or None if it never
+    was; `last`: what was last still to come (coming's answer); `arriving`: whether the editor
+    said the world was coming in round a view that jumped."""
+    came = ", ".join(f"{key} {value}" for key, value in last.items())
+    took = f"not in after {CATCH_UP_SECONDS:.0f} s ({came or 'nothing seen coming'})" if seconds is None else \
+        f"all round it was in after {seconds:.1f} s" + (f" (last to come: {came})" if came else "")
+    return (f"the camera jumped {metres:.0f} m: {took}" +
+            ("" if arriving else "; the editor never said the world was arriving"))
+
+
+def travel_to(at):
+    """Where the game's player, at `at` ([x, y, z]), fast travels to: (x, z), the end of the
+    valley farther from it, TRAVEL_X from its middle."""
+    return TRAVEL_X, -TRAVEL_Z if at[2] > 0 else TRAVEL_Z
 
 
 def coming(frame, world, scatter, ground_building):
@@ -250,6 +286,28 @@ def flights(editor, real_gpu):
         if caught_up is None and real_gpu:  # (by the clock: on the null device it says nothing)
             failures.append(f"flying at {speed:.0f} m/s: the world had not caught up {CATCH_UP_SECONDS:.0f} s "
                             f"after the camera stopped: still coming, {last}")
+    # The jump: from where the flights ended to a place nothing is in, at play's share of a frame
+    # for the voxel world (the editor gives more itself while the world arrives).
+    was = flight_at(metres, heights)[0]
+    ground = tool("get_terrain", {"points": [[was[0], was[2] - JUMP_METRES]]})["heights"][0]
+    if ground is None:
+        return failures + ["the camera's jump leaves the ground"]
+    if tool("get_engine_info")["arriving"]:
+        failures.append("the editor says the world is arriving before the camera jumped")
+    to = [was[0], ground + FLIGHT_OVER, was[2] - JUMP_METRES]
+    tool("set_camera", {"position": to, "look_at": [to[0], to[1], to[2] - 100.0]})
+    editor.hover(2)
+    arriving = tool("get_engine_info")["arriving"]
+    in_after, last = settled(editor, CATCH_UP_SECONDS)
+    print(f"game_gate: {jump_text(math.dist(was, to), in_after, last, arriving)}")
+    if not arriving:
+        failures.append("the camera jumped and the editor did not say the world was arriving")
+    if in_after is not None:
+        editor.hover(30)
+        if tool("get_engine_info")["arriving"]:
+            failures.append("the world round the camera's jump is in and the editor still says it is arriving")
+    elif real_gpu:
+        failures.append(f"the world round the camera's jump was not in after {CATCH_UP_SECONDS:.0f} s: still coming, {last}")
     return failures
 
 
@@ -441,6 +499,44 @@ def main() -> int:
         back_at, _ = played("the game taken up again", "continue", 2, (began_at[0], began_at[2]))
         if math.dist(left_at, back_at) > 1.0:
             failures.append(f"the game taken up again is at {back_at}, not where it was saved ({left_at})")
+        # Fast travel: the loading screen a third time, the player on the ground at the new place.
+        at = tool("get_player")["position"]
+        x, z = travel_to(at)
+        unread = tool("get_terrain", {"points": [[x, z]]})["heights"][0] is None
+
+        def travel():
+            tool("travel_player", {"position": [x, TRAVEL_UP, z]})
+            return True
+
+        recorded = game.begin_frames()
+        recorded, seconds, menu = begun(game, travel, recorded)
+        world = dict(tool("get_world"), ground_building=tool("get_terrain")["meshes"]["building"])
+        behind = behind_text(game.last_frame())
+        # (Where it stands as play goes on, before it could have fallen there.)
+        player = tool("get_player")
+        there = player["position"]
+        ground = tool("get_terrain", {"points": [[x, z]]})["heights"][0]
+        flown = run(game, recorded, TRAVEL_FRAMES)
+        after = tool("get_player")
+        times = frame_stats(flown)
+        name = "fast travel"
+        print(f"game_gate: {name}: {math.dist(at, there):.0f} m, to where the ground was "
+              f"{'not read yet' if unread else 'already in'}; loading took {seconds:.1f} s over "
+              f"{menu['loading_frames']} frames; behind when play began: {behind}")
+        print(f"game_gate: {name}: the loading screen last waited for: {menu['waited']}")
+        print(f"game_gate: {name}: {times['frames']} frames from the first of play: {describe(times)}")
+        slow = slow_frames(flown, game.slow, game.typicals, game.slow_over_ms)
+        if slow:
+            print(f"game_gate: {name}: {slow}")
+        failures += loading_failures(name, menu, world, seconds, 3, real_gpu)
+        if not unread:
+            failures.append(f"{name}: the ground at ({x}, {z}) was read already: a travel to ground not read is to be tried")
+        if ground is None or math.hypot(there[0] - x, there[2] - z) > 1.0 or abs(there[1] - ground) > 1.0:
+            failures.append(f"{name}: the player was not put on the ground where it travelled to ({x}, {z}, the ground "
+                            f"{ground}) as play went on: at {there}")
+        if not after["on_ground"] or math.dist(after["position"], there) > 1.0:
+            failures.append(f"{name}: the player did not stay standing where it was put ({there}): at "
+                            f"{after['position']}, on_ground {after['on_ground']}")
         world = tool("get_world")
         print(f"game_gate: {world['loaded']} cells loaded at the end")
         if world["failed"] or world["far_ground"]["failed"]:
