@@ -508,9 +508,10 @@ an offline cooker can use it without a device.
   ground falls back to the ground's own voxel; a brick thinned to nothing
   takes no pool room. Colour and facing count by coverage. The voxel world
   compares material rows itself each update (a row's values change under
-  unchanged cells as textures arrive) and rebuilds what uses a changed one;
-  one used by more than an eighth of the instances rebuilds everything,
-  as any bulk change does.
+  unchanged cells as textures arrive) and rebuilds what uses a changed
+  one, a share of its instances a frame as any change (more than an
+  eighth of the instances taken in in one frame rebuild everything, as
+  any bulk change does).
 - **Canopy normals (photoreal part 6c-2).** `Material::canopy` (0 to 1,
   saved with world materials, MCP `canopy` on entities, kit pieces and
   scatter items) bends the shading normal towards the direction out from
@@ -928,7 +929,7 @@ cell's work, not the world's:
   shadows: cheap per instance, but whole-cell tests come next. Streamed
   out cells are gone from the voxel far field too (cells need saved voxel
   stand-ins for that, later). While many cells stream in at once (more
-  than an eighth of the scene in a frame, or over 4096 64 m squares of
+  than an eighth of the scene taken in in a frame, or over 4096 64 m squares of
   changes waiting) the voxel world still rebuilds every window; holes cost a few bytes per
   instance a frame in the loops that walk every instance. Meshes are imported when a world opens (the
   index lists them), not as cells stream. Unloading a cell is one
@@ -6030,8 +6031,38 @@ Done in N2 part 2:
   few hundred jobs, not a rebuild. When the renderer's meshes change
   (streaming adds some most frames), only meshes it had found missing are
   looked up again: a removed one is reported by `forget_mesh`, and a mesh
-  never changes once added. More than 256 changes in a frame (or an eighth of the
-  instances), over 4,096 squares waiting, or any other removal rebuild
+  never changes once added. What may have changed is not all looked at
+  in the frame it comes: the instances of the cells that changed (every
+  instance at once with no cells to go by, as before), those of a
+  material row that looks different and those of a mesh that came are
+  owed a look (`m_owed`, a bit each), and each frame compares its share
+  of them with the copies, 1,024 at least or 64 that did differ (about a
+  tenth of a millisecond either way) and then for a quarter of the
+  frame's voxel budget, going
+  round from where the last frame stopped so that a cell changing every
+  frame keeps none waiting for ever. One looked at later is compared with
+  the instance as it is by then. The workers are made to stand back only
+  once an instance does differ, so a frame in which nothing changed
+  takes nothing from them. Until this, a row of cells streaming in was
+  compared and taken in whole in its frame, thousands of instances at
+  once, and more than an eighth of the scene changing copied every
+  instance again and built every window again: 2 to 8 ms of a frame on
+  the development machine for the first and 20 to 35 ms for the second,
+  3.5 ms of the worst frame in a flight at 90 m/s on an RTX 5090 PC.
+  `voxels.owed` counts the instances waiting (part of `pending`, so a
+  loading screen waits for them, and the far field leaves one a mesh
+  until it is looked at) and `voxels.looks` those compared this frame.
+  A cell of more instances than a frame's looks whose version changes
+  every frame is owed again each frame, so `pending` never reaches 0
+  while it does (none does today: things that move every frame change
+  only their part of a cell, or are in cells of their own).
+  More than 256 changes taken in in one frame (or an eighth of the
+  instances: a frame with the time for that many is behind a loading
+  screen, so how often it happens depends on the machine; the result
+  does not), over 4,096 squares waiting, or a list that shrank other than by one
+  run (which is still seen at once, every index having moved: the
+  editor's cells keep their places, so its list shrinks only when it is
+  laid out afresh) rebuild
   every window, one rebuild at a time (another waits for it rather than
   restarting it, so constant changes still settle); `voxels.rebuilds`
   counts them. Big searches (coarse bricks, whole windows) look through
@@ -6071,7 +6102,7 @@ Done in N2 part 2:
   picks the rest's LOD cuts (meshes and cuts held, so a mesh removed
   meanwhile stays until the build is done) and builds. The main thread
   takes the whole scene for the part of `update` that changes it
-  (`see_changes`), for `set_water` and `set_stand_in_radius`, and the
+  (`see_changes`, on frames in which an instance looked at differs), for `set_water` and `set_stand_in_radius`, and the
   workers take no new share while it wants it (`m_writing`), so it waits
   only for the shares held then: each one brick's finding and copying
   out, which lets go past 2,048 instances found or 32,768 looked at (a

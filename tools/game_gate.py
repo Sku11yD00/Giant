@@ -142,10 +142,11 @@ def flight_at(metres, heights):
 
 
 def flight_text(speed, seconds, times, behind, caught_up, last):
-    """A flight's line. `behind`: {"most", "end", "built", "marked", "samples", "rebuilds", "slowest"} of the
-    voxel world over the flight (its work pending at most and as it ended; built and marked summed
-    over the frames sampled; how often every window was built again, too much having changed at
-    once; the frame sampled in which it took the main thread longest, as last_frame's voxels, or
+    """A flight's line. `behind`: {"most", "end", "built", "marked", "samples", "rebuilds", "owed", "slowest"}
+    of the voxel world over the flight (its work pending at most and as it ended; built and marked
+    summed over the frames sampled; how often every window was built again, too much having
+    changed at once; the most instances that waited at once to be compared, a share a frame, with
+    what it holds of them; the frame sampled in which it took the main thread longest, as last_frame's voxels, or
     None); `caught_up`: seconds after stopping, or None if it never did; `last`: what was last
     still to come (coming's answer)."""
     samples = max(behind["samples"], 1)
@@ -160,7 +161,8 @@ def flight_text(speed, seconds, times, behind, caught_up, last):
     return (f"flying at {speed:.0f} m/s for {seconds:.0f} s: {describe(times)}; the voxel world's work pending "
             f"at most {behind['most']} ({behind['end']} as it stopped), {after}; it built "
             f"{behind['built'] / samples:.0f} bricks of {behind['marked'] / samples:.0f} marked a frame sampled, and "
-            f"built every window again {behind['rebuilds']} times{took}")
+            f"built every window again {behind['rebuilds']} times; changed instances waited their turn to be taken "
+            f"in, {behind.get('owed', 0)} at most{took}")
 
 
 def jump_text(metres, seconds, last, arriving):
@@ -235,7 +237,7 @@ def flown(editor, metres_from, speed, seconds, heights):
     if ready is None:
         raise RuntimeError(f"the world never settled before the flight at {speed:.0f} m/s: still coming, {still}")
     editor.hover(240)  # (the frame times kept hold none of what came before)
-    behind = {"most": 0, "end": 0, "built": 0, "marked": 0, "samples": 0, "rebuilds": 0, "slowest": None}
+    behind = {"most": 0, "end": 0, "built": 0, "marked": 0, "samples": 0, "rebuilds": 0, "owed": 0, "slowest": None}
     rebuilds = editor.last_frame()["voxels"]["rebuilds"]
     times = []
     recorded = editor.begin_frames()
@@ -254,6 +256,7 @@ def flown(editor, metres_from, speed, seconds, heights):
         behind["marked"] += voxels["marked"]
         behind["samples"] += 1
         behind["rebuilds"] = voxels["rebuilds"] - rebuilds
+        behind["owed"] = max(behind["owed"], voxels["owed"])
         if behind["slowest"] is None or voxels["cpu_ms"] > behind["slowest"]["cpu_ms"]:
             behind["slowest"] = voxels
         stop += 1

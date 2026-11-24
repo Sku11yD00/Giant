@@ -30,6 +30,8 @@
 // thousands; world streaming will hand over changes instead).
 #pragma once
 
+#include "index_set.h"
+
 #include "giant/core/jobs.h"
 #include "giant/core/math.h"
 #include "giant/core/types.h"
@@ -46,6 +48,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <span>
 #include <unordered_map>
@@ -75,9 +78,14 @@ struct VoxelStats {
     u32 building = 0;
     u32 changes = 0;
     u32 marked = 0;
+    // Instances that may have changed and wait to be compared with what the voxel world holds
+    // (a share of them is looked at each frame; counted in `changes`), and those looked at
+    // this frame.
+    u32 owed = 0;
+    u32 looks = 0;
     // Where cpu_ms went this frame, for finding what takes a frame over its budget: the windows
     // following the camera (slabs entered, the bricks they push out forgotten), taking in the scene's
-    // changes (the workers stand back meanwhile), finding bricks (marking), and bricks (those
+    // changes (a frame's share of them; the workers stand back if any is one), finding bricks (marking), and bricks (those
     // built placed and uploaded, more started, some built here).
     float shift_ms = 0.0f;
     float changes_ms = 0.0f;
@@ -127,7 +135,9 @@ public:
     // changes whenever a mesh is added or removed. Works for about
     // `budget_ms` (at least one step and one brick, if any wait).
     // With `cells` (FrameInput::cells), only the cells that changed since
-    // the last update are compared.
+    // the last update are compared, a share of their instances a frame
+    // (VoxelStats::owed: those still to be); with none, every instance each
+    // update.
     void update(rhi::CommandList& cmd, const DVec3& camera, std::span<const Instance> instances,
                 std::span<const CellRange> cells, std::span<const Material> materials, u64 meshes_version,
                 const MeshLookup& meshes, float budget_ms);
@@ -397,9 +407,16 @@ private:
     bool find_into(const Box& box, std::vector<u32>& found, std::vector<u32>& seen, u32& stamp, usize most,
                    usize* resume) const;
 
-    // `only`: the cells to compare (the rest are as last time); null: all.
+    // `only`: the cells that may differ (the rest are as last time); null:
+    // every instance may. What may differ is owed a look (m_owed), and a
+    // frame's share of the looks is taken here: `out_of_time` ends them
+    // (after the least a frame takes), and the rest wait for later frames.
     void see_changes(std::span<const Instance> instances, std::span<const Material> materials,
-                     const std::vector<CellRange>* only, u64 meshes_version, const MeshLookup& meshes);
+                     const std::vector<CellRange>* only, u64 meshes_version, const MeshLookup& meshes,
+                     const std::function<bool()>& out_of_time);
+    IndexSet m_owed;          // instances to compare with their copies yet
+    IndexSet m_owed_whatever; // of those, the ones to take in whether they differ or not (their mesh is another)
+    u32 m_owed_from = 0;      // where the last frame's looks stopped
     void set_copy(u32 index, const Instance& in, std::span<const Material> materials, const MeshLookup& meshes);
     void change(u32 index, const Instance& in, std::span<const Material> materials, const MeshLookup& meshes);
     void copy_all(std::span<const Instance> instances, std::span<const Material> materials,
@@ -567,6 +584,7 @@ private:
     // What the bricks are built from.
     std::vector<Copy> m_copies;
     std::vector<MeshId> m_copy_mesh; // each copy's mesh, packed (looked through whenever meshes come and go)
+    std::vector<u32> m_copy_material; // and its material (whenever a material row looks different)
     std::vector<CellRange> m_seen_cells;    // FrameInput::cells as last seen
     std::vector<CellRange> m_changed_cells; // this update's (scratch)
     std::unordered_map<Cell, std::vector<u32>, CellHash> m_grid;
