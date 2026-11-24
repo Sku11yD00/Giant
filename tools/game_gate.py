@@ -91,7 +91,8 @@ SETTLE_SECONDS = 300.0        # the most it may take to come in where a flight s
 JUMP_METRES = 1200.0          # how far on down -z the editor's camera jumps after the flights (they end at z -300 or before)
 TRAVEL_Z = 1750.0             # the game's player fast travels to z this or minus this, whichever is farther:
                               # past what is loaded round it (1536 m), where the ground is not read yet
-TRAVEL_X = 300.0              # (off the river, which runs down the middle)
+TRAVEL_X = 1500.0             # (and off to the side: cells stay loaded farther than they are read, round
+                              # everywhere the player ran, down the valley's middle)
 TRAVEL_UP = 200.0             # the height of the point given (over any ground of the valley: none is known there)
 TRAVEL_FRAMES = 600           # of play timed after the travel
 
