@@ -1103,9 +1103,9 @@ int run(const Options& options) {
             if (view_jump.on()) {
                 const editor::TerrainMeshStats ground = terrain_meshes.stats();
                 u64 coming = u64{ground.building - ground.waiting} + scatter.stats().building;
-                const editor::FarGroundStats far = far_ground.stats();
-                coming += far.reading + far.wanted;
-                for (usize l = 0; l < far.building.size(); ++l) coming += far.building[l] - far.waiting[l];
+                const editor::FarGroundStats chunks = far_ground.stats();
+                coming += chunks.reading + chunks.wanted;
+                for (usize l = 0; l < chunks.building.size(); ++l) coming += chunks.building[l] - chunks.waiting[l];
                 if (state.render_settings.voxel_world) coming += state.scene_stats.voxel_pending;
                 if (world_streaming.active(state.scene_generation)) coming += world_streaming.coming();
                 view_jump.wait(coming);
