@@ -45,6 +45,7 @@ struct Bench {
     geometry::ClusterMesh cube = geometry::build_clusters(geometry::make_cube());
     std::shared_ptr<const geometry::ClusterMesh> held; // mesh 1, when set
     u32 lookups[3] = {}; // of mesh 0, 1, any other
+    MeshId cubes_below = 0; // meshes 2 up to this are the cube too
     std::unique_ptr<VoxelScene> voxels; // after cube: its workers' builds may still read it
     std::vector<Instance> instances;
     std::vector<Material> materials;
@@ -67,7 +68,8 @@ struct Bench {
         voxels->update(*cmd, camera, instances, cells, materials, version,
                        [this](MeshId id) {
                            ++lookups[id < 2 ? id : 2];
-                           return id == 0   ? std::shared_ptr<const geometry::ClusterMesh>(std::shared_ptr<void>(), &cube)
+                           return id == 0 || (id >= 2 && id < cubes_below)
+                                      ? std::shared_ptr<const geometry::ClusterMesh>(std::shared_ptr<void>(), &cube)
                                   : id == 1 ? held
                                             : nullptr;
                        },
@@ -1872,4 +1874,43 @@ GIANT_TEST("voxel scene: a mesh that comes late is taken in for its instances a 
     GIANT_CHECK(b.voxels->stats().pending == 0);
     GIANT_CHECK(b.voxels->probe(0, b.instances[0].position) == VoxelProbe::solid);
     GIANT_CHECK(b.voxels->probe(0, b.instances[989].position) == VoxelProbe::solid);
+}
+
+// Meshes that went (or came) leave their instances owed a look, over many
+// frames: the meshes themselves are looked up at once all the same, so that
+// no worker meets one never looked up over a brick meanwhile (it would hand
+// the brick back for the main thread to look the meshes up, and after two
+// such the main thread begins the brick itself, all in one frame).
+GIANT_TEST("voxel scene: meshes that went are looked up before the workers meet them") {
+    Bench b(4096);
+    GIANT_CHECK(b.voxels->init());
+    b.cubes_below = 602;
+    add_cubes(b.instances, 600, 0.6);
+    for (u32 i = 0; i < 600; ++i) b.instances[i].mesh = 2 + i; // each a mesh of its own, as terrain tiles are
+    add_cubes(b.instances, 1, 0.6);
+    b.cells = {cell_of(0, 600, 1), cell_of(600, 1, 1)};
+    b.step();
+    for (int i = 0; i < 2000 && b.voxels->stats().pending > 0; ++i) b.step();
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    const u64 sent_back = b.voxels->sent_back_to_workers();
+    const u64 begun = b.voxels->begun_on_main_thread();
+    // Every one of the meshes goes (their instances are as they were: the cell says nothing). The
+    // bricks over them are built again as the first of them are taken in, with the rest still
+    // waiting their looks (and one more instance changes each frame). (Without the look-up at
+    // once this fails here: bricks are sent back to the workers.)
+    b.cubes_below = 0;
+    for (MeshId id = 2; id < 602; ++id) b.voxels->forget_mesh(id);
+    ++b.version;
+    for (int f = 0; f < 12; ++f) {
+        b.instances[600].position.y += 0.01;
+        b.cells[1].version = static_cast<u64>(2 + f);
+        b.step(0.0f);
+        if (f == 0) GIANT_CHECK(b.voxels->stats().owed >= 600 - 64);
+    }
+    for (int i = 0; i < 4000 && b.voxels->stats().pending > 0; ++i) b.step(0.0f);
+    GIANT_CHECK(b.voxels->stats().pending == 0);
+    GIANT_CHECK(b.voxels->sent_back_to_workers() == sent_back);
+    GIANT_CHECK(b.voxels->begun_on_main_thread() == begun);
+    GIANT_CHECK(b.voxels->probe(0, b.instances[0].position) == VoxelProbe::empty); // gone with its mesh
+    GIANT_CHECK(b.voxels->probe(0, b.instances[600].position) == VoxelProbe::solid);
 }

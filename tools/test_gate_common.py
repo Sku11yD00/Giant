@@ -3,7 +3,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gate_common import Editor, slow_over, frame_stats, held_by_window, hitch_limit, leg_slow_frames, slow_frames, without_held  # noqa: E402
+from gate_common import (Editor, slow_over, frame_stats, held_by_window, hitch_limit, leg_slow_frames,  # noqa: E402
+                         slow_frames, without_held, worst_frame)
 
 
 def frame(ms, cpu, **phases):
@@ -22,6 +23,26 @@ def main():
     check(frame_stats(times)["hitches"] == 2, "two hitches")
     typical = {"render": 8.0, "render/voxels": 2.0, "scatter": 0.5, "end_frame": 1.0, "streaming": 0.0}
     typicals = [(100, typical, 9.0), (100, typical, 9.0)]
+    # The slowest frame of those kept: which phases took more than they typically do, and the rest.
+    kept = [frame(11.0, 9.5, render=9.0, render__voxels=2.1, end_frame=1.0),
+            frame(14.0, 11.6, render=8.1, render__voxels=4.5, scatter=3.0, end_frame=1.2, streaming=0.2)]
+    text = worst_frame(kept, typicals)
+    check(text.startswith("the slowest frame, 14.0 ms: ms over a typical frame's, by phase: scatter +2.5;"),
+          f"the slowest frame's phases over typical, the most over first (under 0.3 ms left out): {text}")
+    check("inside render: voxels +2.5" in text, f"and render's parts: {text}")
+    check("its CPU time 11.6 ms (typically 9.0), and 1.2 ms with the main thread neither working nor waiting" in text,
+          f"its CPU time and what is unaccounted for (14.0 - 11.6 - end_frame's 1.2): {text}")
+    check("waiting on the GPU" not in text, f"no wait stood out: {text}")
+    waited = worst_frame([frame(14.0, 9.0, render=8.0, render__voxels=2.0, end_frame=5.0)], typicals)
+    check("by phase: end_frame +4.0 (begin_frame, end_frame, tail: waiting on the GPU, the driver or the display);" in waited,
+          f"a frame that waited says so, by the phases: {waited}")
+    first = worst_frame([frame(15.0, 9.0, render=8.0, tail=6.0, physics=1.0), frame(11.0, 9.0, render=9.0)], typicals)
+    check(first.startswith("the slowest frame, 15.0 ms") and "by phase: tail +6.0, physics +1.0 (" in first,
+          f"the slowest wherever it is in the list, with phases a typical frame has none of: {first}")
+    check("by phase: none stands out;" in worst_frame([frame(9.5, 9.0, render=8.1, end_frame=1.0)], typicals),
+          "nothing over: said")
+    check(worst_frame([], typicals) is None and worst_frame(kept, []) is None, "nothing kept, or nothing typical: no line")
+
     slow = [
         # The renderer's voxels took 30 ms more: render blamed, voxels inside.
         frame(40.0, 39.0, render=38.0, render__voxels=32.0, scatter=0.5, end_frame=1.0),

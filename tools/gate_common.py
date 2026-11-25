@@ -206,6 +206,35 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
     return "\n".join(lines) if lines else None
 
 
+def worst_frame(slow, typicals, least_over_ms=0.3):
+    """Where the time of the slowest frame among `slow` went (Editor.read_frames's self.slow, with
+    self.typicals): its time, each phase at least `least_over_ms` over its typical time (the
+    parts of render after render itself), and how long the main thread neither worked nor waited
+    at the frame's begin or end. One line; None with no slow frames kept or nothing typical."""
+    if not slow or not typicals:
+        return None
+    frame = max(slow, key=lambda f: f["ms"])
+    names = set(frame["phases"])
+    for _, typical, _ in typicals:
+        names.update(typical)
+    typical = {n: weighted_median([(f, t.get(n, 0.0)) for f, t, _ in typicals]) for n in names}
+    over = sorted(((n, frame["phases"].get(n, 0.0) - typical[n]) for n in names), key=lambda x: (-x[1], x[0]))
+    top = [f"{n} +{e:.1f}" for n, e in over if "/" not in n and e >= least_over_ms]
+    inner = [f"{n[len('render/'):]} +{e:.1f}" for n, e in over if n.startswith("render/") and e >= least_over_ms]
+    waits = sum(frame["phases"].get(n, 0.0) for n in WAIT_PHASES)
+    stalled = max(0.0, frame["ms"] - frame["cpu_ms"] - waits)
+    typical_cpu = weighted_median([(f, c) for f, _, c in typicals])
+    text = (f"the slowest frame, {frame['ms']:.1f} ms: ms over a typical frame's, by phase: "
+            f"{', '.join(top) if top else 'none stands out'}")
+    if any(n in WAIT_PHASES and e >= least_over_ms for n, e in over):
+        text += " (begin_frame, end_frame, tail: waiting on the GPU, the driver or the display)"
+    if inner:
+        text += f"; inside render: {', '.join(inner)}"
+    text += (f"; its CPU time {frame['cpu_ms']:.1f} ms (typically {typical_cpu:.1f}), and {stalled:.1f} ms with the main "
+             f"thread neither working nor waiting at the frame's begin or end")
+    return text
+
+
 def leg_slow_frames(times, slow, typicals, slow_over_ms, in_leg):
     """Where the main thread's time went in the slow frames of one leg of a flight that fails its speed
     targets by itself (slow_frames of the leg's own `times` and of those of `slow` read at a stop
