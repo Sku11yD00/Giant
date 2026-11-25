@@ -90,6 +90,12 @@ public:
     void finish(world::Terrain& terrain);
 
     TerrainMeshStats stats() const;
+    // How long the parts of the last update took, in ms by `clock`: taking the changes, the
+    // uploads, the swaps, and the queue (looks, builds started, meshes of tiles gone freed).
+    struct PartsMs {
+        float changes = 0.0f, uploads = 0.0f, swaps = 0.0f, starts = 0.0f;
+    };
+    const PartsMs& last_parts_ms() const { return m_parts_ms; }
     // Its workers, for other terrain work (making heights) between frames.
     JobSystem& jobs() { return m_jobs; }
     // In play, and behind a game's loading screen (a frame there may take what it takes).
@@ -168,6 +174,7 @@ private:
     bool m_finishing = false; // finish(): nothing waits to settle
     std::vector<world::CellCoord> m_changed;
     world::TerrainChanges m_last_changes;
+    PartsMs m_parts_ms;
     std::deque<Result> m_arrived;            // finished builds waiting for the upload budget
     std::vector<world::CellCoord> m_waiting; // tiles with an uploaded mesh not loaded yet
     u32 m_in_flight = 0;                     // builds started and not taken back

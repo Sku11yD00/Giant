@@ -231,6 +231,11 @@ void TerrainMeshes::commit(world::CellCoord cell, Tile& tile) {
 void TerrainMeshes::update(world::Terrain& terrain) {
     // What changed: a changed tile's mesh and its neighbours' (they reach
     // into it; one whose heights snapshot comes out the same is not built).
+    const auto now_ms = [this] {
+        return clock ? clock()
+                     : std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    const double began = now_ms();
     world::TerrainChanges changes = terrain.take_changes();
     ++m_frame;
     if (terrain.identity() != m_identity) {
@@ -273,11 +278,8 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         for (Result& r : done) m_arrived.push_back(std::move(r));
     }
     u32 taken = 0;
-    const auto now_ms = [this] {
-        return clock ? clock()
-                     : std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
     const double uploads_began = now_ms();
+    m_parts_ms.changes = static_cast<float>(uploads_began - began);
     while (!m_arrived.empty() && taken < uploads_per_frame &&
            (taken == 0 || now_ms() - uploads_began < static_cast<double>(upload_ms_per_frame))) {
         Result r = std::move(m_arrived.front());
@@ -308,6 +310,8 @@ void TerrainMeshes::update(world::Terrain& terrain) {
             m_waiting.push_back(r.cell);
         }
     }
+    const double swaps_began = now_ms();
+    m_parts_ms.uploads = static_cast<float>(swaps_began - uploads_began);
     // Uploaded meshes replace the old ones once they can draw, so a tile
     // never blinks out while its new mesh streams in.
     for (usize k = 0; k < m_waiting.size();) {
@@ -323,6 +327,8 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         m_waiting.pop_back();
     }
 
+    const double starts_began = now_ms();
+    m_parts_ms.swaps = static_cast<float>(starts_began - swaps_began);
     // Start builds, oldest wish first; a tile already building waits its
     // turn. Each look takes a heights snapshot (cheap); one that matches
     // what is drawn needs no build.
@@ -377,6 +383,7 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         start(cell, tile, std::move(heights), hash);
         ++started;
     }
+    m_parts_ms.starts = static_cast<float>(now_ms() - starts_began);
 }
 
 void TerrainMeshes::finish(world::Terrain& terrain) {

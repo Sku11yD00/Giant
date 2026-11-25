@@ -782,7 +782,22 @@ int run(const Options& options) {
             terrain_meshes.more_workers = loading ? editor::MoreWorkers::for_loading() : 0u;
         }
         terrain_meshes.update(state.scene.terrain);
-        terrain_paint.update(state.scene.terrain, *renderer);
+        {
+            // The terrain's parts, within its phase (a screenshot's frame is the command's).
+            const auto paint_began = clock::now();
+            terrain_paint.update(state.scene.terrain, *renderer);
+            if (!in_screenshot) {
+                const editor::TerrainMeshes::PartsMs& parts = terrain_meshes.last_parts_ms();
+                const auto part = [&](editor::TerrainPart p) -> float& {
+                    return phase_ms[editor::k_frame_terrain_parts + static_cast<usize>(p)];
+                };
+                part(editor::TerrainPart::changes) += parts.changes;
+                part(editor::TerrainPart::uploads) += parts.uploads;
+                part(editor::TerrainPart::swaps) += parts.swaps;
+                part(editor::TerrainPart::starts) += parts.starts;
+                part(editor::TerrainPart::paint) += std::chrono::duration<float, std::milli>(clock::now() - paint_began).count();
+            }
+        }
         mark(editor::FramePhase::terrain);
         far_ground.update(state.camera.position, world_streaming, state.scene_generation, terrain_meshes,
                           state.scene.terrain);

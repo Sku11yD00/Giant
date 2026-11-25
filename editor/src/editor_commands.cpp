@@ -103,7 +103,7 @@ void register_editor_commands(ai::CommandRegistry& registry, EditorState& state)
          "null backend) the window size in pixels, and `arriving`: the view jumped over 64 m in a frame (never in a game being played) and the world round "
          "it is coming in with a loading screen's shares of each frame (for 20 s at most). With phases_since, frame_times.phases: where the main "
          "thread's time went in the frames since then (each phase's median, and the phases of those over "
-         "phases_over_ms), for finding what makes a frame slow; with each slow frame, the GPU device's counts "
+         "phases_over_ms; the parts of render and of terrain are named render/<part> and terrain/<part>), for finding what makes a frame slow; with each slow frame, the GPU device's counts "
          "(device: resources created, new memory allocations, resources released, begin_frame's wait for the GPU "
          "in ms and its freeing after (release_ms); device_before: the two frames before, counts summed), and typical_device the median frame's; and `window`: the window itself was handled in the frame "
          "(moved, sized, minimised or restored, its focus come or gone, or drawn again several times at once as "

@@ -4,13 +4,18 @@
 #include "giant_test.h"
 #include "heap_ranges.h"
 #include "rhi_test_shaders.h"
+#include "spare.h"
 
 #include <array>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -1484,6 +1489,52 @@ GIANT_TEST("rhi: d3d12 places small buffers in shared heaps, reuses their room, 
     GIANT_CHECK(device->validation_errors() == 0);
 }
 
+GIANT_TEST("rhi: d3d12 gets another heap when the first are full, and no buffer fails meanwhile") {
+    auto device = warp_device();
+    if (device == nullptr) {
+        return;
+    }
+    const DeviceCounts start = device->counts();
+    GIANT_CHECK(start.heaps >= 1);
+    // 4 MiB buffers with their data, the largest placed: sixteen fill a heap. Made until the
+    // device has one heap more than it began with; any made while the spare heap was not ready
+    // are committed, and none fails.
+    const u32 words = (4u << 20) / 4;
+    std::vector<u32> values(words);
+    for (u32 i = 0; i < words; ++i) values[i] = i * 2654435761u;
+    BufferDesc desc;
+    desc.size = words * 4;
+    desc.usage = BufferUsage::shader_read;
+    std::vector<BufferHandle> made;
+    const u32 most = 16 * (static_cast<u32>(start.heaps) + 4);
+    while (device->counts().heaps == start.heaps && made.size() < most) {
+        CommandList* cmd = device->begin_frame(nullptr);
+        GIANT_CHECK(cmd != nullptr);
+        if (cmd == nullptr) break;
+        made.push_back(device->create_buffer(desc, {reinterpret_cast<const u8*>(values.data()), desc.size}));
+        device->end_frame();
+        GIANT_CHECK(made.back().valid());
+        if (!made.back().valid()) break;
+    }
+    device->wait_idle();
+    const DeviceCounts end = device->counts();
+    GIANT_CHECK(end.heaps == start.heaps + 1);
+    // New memory was made for the next spare heap, if it is done by now, and for each buffer
+    // committed while none was ready, if any: never one each for those placed.
+    GIANT_CHECK(end.allocations - start.allocations < made.size());
+    if (!made.empty()) {
+        GIANT_CHECK(as_u32(device->read_buffer(made.back())) == values); // the one placed in the new heap
+        GIANT_CHECK(as_u32(device->read_buffer(made.front())) == values);
+    }
+    for (const BufferHandle b : made) device->destroy(b);
+    for (u32 i = 0; i <= Device::k_frames_in_flight; ++i) {
+        if (device->begin_frame(nullptr) != nullptr) device->end_frame();
+    }
+    device->wait_idle();
+    GIANT_CHECK(!device->device_lost());
+    GIANT_CHECK(device->validation_errors() == 0);
+}
+
 GIANT_TEST("rhi: d3d12 keeps a resource used this frame alive past a mid-frame upload") {
     auto device = warp_device();
     if (device == nullptr) {
@@ -2279,3 +2330,70 @@ GIANT_TEST("rhi: d3d12 samples block-compressed texture arrays at each mip and l
     GIANT_CHECK(device->validation_errors() == 0);
 }
 #endif
+
+GIANT_TEST("rhi: a spare is made ahead on its own thread, taken without waiting, and made again") {
+    struct Gate {
+        std::mutex mutex; // protects all below
+        std::condition_variable changed;
+        bool open = true;
+        int made = 0;
+        int fail_from = 1000;
+    };
+    Gate gate;
+    Spare<int> spare([&gate]() -> std::optional<int> {
+        std::unique_lock lock(gate.mutex);
+        gate.changed.wait(lock, [&] { return gate.open; });
+        ++gate.made;
+        gate.changed.notify_all();
+        if (gate.made >= gate.fail_from) return std::nullopt;
+        return gate.made;
+    });
+    // Nothing is made until one is wanted; wanting twice makes one.
+    GIANT_CHECK(!spare.take().has_value() && !spare.making() && !spare.failed());
+    spare.want();
+    spare.want();
+    spare.wait();
+    GIANT_CHECK(!spare.making());
+    spare.want(); // one is ready: no other is made
+    spare.wait();
+    {
+        const std::lock_guard lock(gate.mutex);
+        GIANT_CHECK(gate.made == 1);
+    }
+    const std::optional<int> first = spare.take();
+    GIANT_CHECK(first.has_value() && *first == 1);
+    GIANT_CHECK(!spare.take().has_value()); // taken once
+    // While the next is being made, taking gives nothing and does not wait for it.
+    {
+        const std::lock_guard lock(gate.mutex);
+        gate.open = false;
+    }
+    spare.want();
+    GIANT_CHECK(spare.making());
+    GIANT_CHECK(!spare.take().has_value()); // (would hang here, not fail, if taking waited)
+    spare.want();                           // one is being made: no other
+    {
+        const std::lock_guard lock(gate.mutex);
+        gate.open = true;
+        gate.fail_from = 3;
+        gate.changed.notify_all();
+    }
+    spare.wait();
+    const std::optional<int> second = spare.take();
+    GIANT_CHECK(second.has_value() && *second == 2);
+    // One that cannot be made: said, and not tried again.
+    spare.want();
+    spare.wait();
+    GIANT_CHECK(spare.failed() && !spare.making() && !spare.take().has_value());
+    spare.want();
+    spare.wait();
+    const std::lock_guard lock(gate.mutex);
+    GIANT_CHECK(gate.made == 3);
+}
+
+GIANT_TEST("rhi: a spare whose making throws is one that could not be made") {
+    Spare<int> spare([]() -> std::optional<int> { throw std::runtime_error("no memory"); });
+    spare.want();
+    spare.wait();
+    GIANT_CHECK(spare.failed() && !spare.making() && !spare.take().has_value());
+}

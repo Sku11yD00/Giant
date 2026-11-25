@@ -116,12 +116,28 @@ inline constexpr std::array<const char*, static_cast<usize>(FramePhase::count)> 
 static_assert(k_frame_phase_names.back() != nullptr, "a name for every phase");
 static_assert(render::k_cpu_section_names.back() != nullptr, "a name for every section");
 // Then the renderer's own (render::CpuSection, within `render`), named
-// "render/<section>".
-inline constexpr usize k_frame_phases = static_cast<usize>(FramePhase::count) + render::k_cpu_section_names.size();
+// "render/<section>", and the terrain's (TerrainPart, within `terrain`),
+// named "terrain/<part>" (the near tiles' only: the far ground's levels are
+// timed whole, under `far_ground`).
+enum class TerrainPart : u8 {
+    changes, // taking the terrain's changes: which tiles to look at
+    uploads, // handing built meshes to the renderer (its buffers are made here)
+    swaps,   // meshes the renderer can draw replacing the old, which are freed
+    starts,  // the queue looked through: heights copied, builds started, meshes of tiles gone freed
+    paint,   // the tiles' paint handed to the renderer
+    count
+};
+inline constexpr std::array<const char*, static_cast<usize>(TerrainPart::count)> k_terrain_part_names = {
+    "changes", "uploads", "swaps", "starts", "paint"};
+static_assert(k_terrain_part_names.back() != nullptr, "a name for every part");
+inline constexpr usize k_frame_render_parts = static_cast<usize>(FramePhase::count);
+inline constexpr usize k_frame_terrain_parts = k_frame_render_parts + render::k_cpu_section_names.size();
+inline constexpr usize k_frame_phases = k_frame_terrain_parts + k_terrain_part_names.size();
 using FramePhaseMs = std::array<float, k_frame_phases>;
 inline std::string frame_phase_name(usize i) {
-    return i < k_frame_phase_names.size() ? std::string(k_frame_phase_names[i])
-                                          : "render/" + std::string(render::k_cpu_section_names[i - k_frame_phase_names.size()]);
+    if (i < k_frame_render_parts) return std::string(k_frame_phase_names[i]);
+    if (i < k_frame_terrain_parts) return "render/" + std::string(render::k_cpu_section_names[i - k_frame_render_parts]);
+    return "terrain/" + std::string(k_terrain_part_names[i - k_frame_terrain_parts]);
 }
 
 // The last few seconds of frame times, for get_engine_info (performance
