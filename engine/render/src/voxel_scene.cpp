@@ -1229,6 +1229,14 @@ void VoxelScene::see_changes(std::span<const Instance> instances, std::span<cons
                 if (id <= top && is_stale[id] != 0) {
                     m_owed.add(i);
                     m_owed_whatever.add(i); // (its mesh is another now, though nothing of the instance differs)
+                    if (is_stale[id] == 1) {
+                        // Looked up now, once (its instances are taken in over the frames to
+                        // come): a worker meeting one never looked up over a brick hands the
+                        // brick back for that, and after two such it is the main thread's to
+                        // begin, whole, in one frame.
+                        is_stale[id] = 2;
+                        mesh_cache(id, meshes);
+                    }
                 }
             }
         }

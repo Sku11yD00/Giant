@@ -6049,6 +6049,10 @@ Done in N2 part 2:
   instance again and built every window again: 2 to 8 ms of a frame on
   the development machine for the first and 20 to 35 ms for the second,
   3.5 ms of the worst frame in a flight at 90 m/s on an RTX 5090 PC.
+  A mesh that went or came is looked up again at once all the same (its
+  instances wait their turn): a worker that met one never looked up over
+  a brick would hand the brick back, and after two such the main thread
+  would begin it itself, whole, in one frame (`begun_here`).
   `voxels.owed` counts the instances waiting (part of `pending`, so a
   loading screen waits for them, and the far field leaves one a mesh
   until it is looked at) and `voxels.looks` those compared this frame.

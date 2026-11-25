@@ -4,8 +4,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from game_gate import (FLIGHT_FROM, FLIGHT_OVER, FLIGHT_SPACING, TRAVEL_X, TRAVEL_Z, begun, coming, flight_at,  # noqa: E402
-                       flight_text, heading, jump_text, loading_failures, package_failures, settled, travel_to)
+from game_gate import (FLIGHT_FROM, FLIGHT_OVER, FLIGHT_SPACING, TRAVEL_X, TRAVEL_Z, begun, coming,  # noqa: E402
+                       flight_at, flight_text, heading, jump_text, kept_over, loading_failures, package_failures,
+                       settled, travel_to)
 
 
 def main():
@@ -32,12 +33,14 @@ def main():
     check(flight_at(1e9, heights)[0][2] == FLIGHT_FROM[1] - FLIGHT_SPACING * 3, "it stops at the last height read")
     check(flight_at(-5.0, heights)[0][2] == FLIGHT_FROM[1], "and never starts before the first")
     times = {"frames": 9, "average_ms": 8.0, "p99_ms": 9.0, "worst_ms": 10.0, "hitches": 0}
-    behind = {"most": 400, "end": 120, "built": 900, "marked": 1200, "samples": 3, "rebuilds": 2, "owed": 5120}
+    behind = {"most": 400, "end": 120, "built": 900, "marked": 1200, "samples": 3, "rebuilds": 2, "owed": 5120, "begun": 3}
     text = flight_text(90.0, 10.0, times, behind, 1.26, {"scatter": 2})
     check("at 90 m/s for 10 s" in text and "work pending at most 400 (120 as it stopped)" in text, f"a flight's line: {text}")
     check("caught up 1.3 s after stopping (last to come: scatter 2)" in text, f"when it caught up, and what came last: {text}")
     check("built 300 bricks of 400 marked a frame sampled" in text, f"its rates: {text}")
     check("built every window again 2 times" in text, f"its rebuilds: {text}")
+    check("the main thread began 3 bricks itself in the frames sampled (about every other one)" in text,
+          f"the bricks begun on the main thread: {text}")
     check("waited their turn to be taken in, 5120 at most" in text, f"the changed instances that waited: {text}")
     slowest = {"cpu_ms": 3.46, "shift_ms": 0.1, "changes_ms": 2.04, "find_ms": 0.12, "bricks_ms": 1.2, "begun_here": 1}
     text = flight_text(90.0, 10.0, times, dict(behind, slowest=slowest), 1.26, {})
@@ -47,6 +50,14 @@ def main():
     check("caught up 0.0 s after stopping;" in flight_text(90.0, 10.0, times, behind, 0.0, {}), "nothing came last if nothing came")
     check("not caught up (voxel work 7)" in flight_text(90.0, 10.0, times, dict(behind, samples=0), None, {"voxel work": 7}),
           "one that never caught up says so, and what was still coming")
+
+    # Which of a flight's frames are kept in full: those 15% over a frame at rest, one in a hundred at most.
+    check(abs(kept_over(20.8, 8.33, []) - 9.5795) < 1e-9, "before the flight: 15% over a frame at rest")
+    check(kept_over(20.8, 0.5, []) == 2.0, "never under 2 ms")
+    check(kept_over(20.8, 8.33, [8.3] * 90 + [14.0] * 10) == 14.0 and kept_over(20.8, 8.33, [8.3] * 300) < 9.6,
+          "with frames flown: never under their 99th percentile")
+    check(kept_over(20.8, 2.5, [6.0] * 200) == 6.0, "a flight all well over a frame at rest keeps few, not all")
+    check(kept_over(20.8, 30.0, [40.0] * 10) == 20.8, "and never over what is usual")
 
     # The camera's jump: how long the world round it took, what came last, whether the editor said so.
     text = jump_text(1400.4, 6.26, {"voxel work": 3}, True)

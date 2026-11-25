@@ -73,11 +73,12 @@ import sys
 import tempfile
 import time
 
-from gate_common import Editor, describe, frame_stats, slow_frames, speed_failures
+from gate_common import Editor, describe, frame_stats, slow_frames, speed_failures, worst_frame
 from n2_gate import ALL_ON, behind_text, set_resolution
 from n3_gate import TOWN, WEATHER_ON, build_valley
 
 RESOLUTION = (2560, 1440)
+SLOWEST_FACTOR = 1.15     # a flight's frames this many times a frame at rest are kept in full (the slowest is told)
 RUN_FRAMES = 1200         # of each run
 RUN_METRES = 20.0         # the least the player is to cover in a run, over the ground (8 m/s: 1200 frames at 480 fps)
 LOADING_SECONDS = 60.0    # the most a loading screen may take on a real GPU
@@ -141,14 +142,28 @@ def flight_at(metres, heights):
     return [x, y, z], [x, y, z - 100.0]
 
 
+def kept_over(usual, at_rest_ms, times):
+    """The frame time (ms) over which a flight's frames are kept in full (their phases, for saying
+    where the slowest one's time went): SLOWEST_FACTOR times a frame at rest (`at_rest_ms`),
+    never under 2 ms; then, once the flight has frames (`times`), never under their 99th
+    percentile, so that a flight whose every frame is well over a frame at rest (no vsync) keeps
+    one in a hundred, not all of them (kept frames are written out in full inside timed frames);
+    and never over `usual` (Editor.begin_frames's). The slowest frame so far is always over it."""
+    over = max(2.0, SLOWEST_FACTOR * at_rest_ms)
+    if times:
+        over = max(over, frame_stats(times)["p99_ms"])
+    return min(usual, over)
+
+
 def flight_text(speed, seconds, times, behind, caught_up, last):
-    """A flight's line. `behind`: {"most", "end", "built", "marked", "samples", "rebuilds", "owed", "slowest"}
-    of the voxel world over the flight (its work pending at most and as it ended; built and marked
+    """A flight's line. `behind`: {"most", "end", "built", "marked", "samples", "rebuilds", "owed", "begun",
+    "slowest"} of the voxel world over the flight (its work pending at most and as it ended; built and marked
     summed over the frames sampled; how often every window was built again, too much having
     changed at once; the most instances that waited at once to be compared, a share a frame, with
-    what it holds of them; the frame sampled in which it took the main thread longest, as last_frame's voxels, or
-    None); `caught_up`: seconds after stopping, or None if it never did; `last`: what was last
-    still to come (coming's answer)."""
+    what it holds of them; the bricks the main thread began itself, summed over the frames sampled
+    (the workers prepare them: none is expected in a flight); the frame sampled in which it took
+    the main thread longest, as last_frame's voxels, or None); `caught_up`: seconds after stopping,
+    or None if it never did; `last`: what was last still to come (coming's answer)."""
     samples = max(behind["samples"], 1)
     came = ", ".join(f"{key} {value}" for key, value in last.items())
     after = f"not caught up ({came or 'nothing seen coming'})" if caught_up is None else \
@@ -162,7 +177,8 @@ def flight_text(speed, seconds, times, behind, caught_up, last):
             f"at most {behind['most']} ({behind['end']} as it stopped), {after}; it built "
             f"{behind['built'] / samples:.0f} bricks of {behind['marked'] / samples:.0f} marked a frame sampled, and "
             f"built every window again {behind['rebuilds']} times; changed instances waited their turn to be taken "
-            f"in, {behind.get('owed', 0)} at most{took}")
+            f"in, {behind.get('owed', 0)} at most; the main thread began {behind.get('begun', 0)} bricks itself in "
+            f"the frames sampled (about every other one){took}")
 
 
 def jump_text(metres, seconds, last, arriving):
@@ -222,7 +238,7 @@ def settled(editor, seconds, clock=time.perf_counter):
                 return since, last
 
 
-def flown(editor, metres_from, speed, seconds, heights):
+def flown(editor, metres_from, speed, seconds, heights, real_gpu):
     """One flight: from a standstill `metres_from` along the way, `speed` m/s by the clock for
     `seconds`. Returns (frame times, the voxel world's `behind`, seconds to catch up or None,
     what was last still to come)."""
@@ -237,10 +253,16 @@ def flown(editor, metres_from, speed, seconds, heights):
     if ready is None:
         raise RuntimeError(f"the world never settled before the flight at {speed:.0f} m/s: still coming, {still}")
     editor.hover(240)  # (the frame times kept hold none of what came before)
-    behind = {"most": 0, "end": 0, "built": 0, "marked": 0, "samples": 0, "rebuilds": 0, "owed": 0, "slowest": None}
+    behind = {"most": 0, "end": 0, "built": 0, "marked": 0, "samples": 0, "rebuilds": 0, "owed": 0, "begun": 0,
+              "slowest": None}
     rebuilds = editor.last_frame()["voxels"]["rebuilds"]
     times = []
+    at_rest = sorted(tool("get_engine_info")["frame_times"]["recent_ms"])  # (hovering)
     recorded = editor.begin_frames()
+    usual = editor.slow_over_ms
+    if real_gpu and at_rest:
+        # Frames well over a frame at rest are kept in full, for saying where the slowest one's time went.
+        editor.slow_over_ms = kept_over(usual, at_rest[len(at_rest) // 2], times)
     start = time.perf_counter()
     stop = 0
     while True:
@@ -257,11 +279,14 @@ def flown(editor, metres_from, speed, seconds, heights):
         behind["samples"] += 1
         behind["rebuilds"] = voxels["rebuilds"] - rebuilds
         behind["owed"] = max(behind["owed"], voxels["owed"])
+        behind["begun"] += voxels["begun_here"]
         if behind["slowest"] is None or voxels["cpu_ms"] > behind["slowest"]["cpu_ms"]:
             behind["slowest"] = voxels
         stop += 1
         if stop % 50 == 0:  # (the editor keeps its last 240 frames: two commands a stop)
             times, recorded = editor.read_frames(times, recorded, stop)
+            if real_gpu and at_rest:
+                editor.slow_over_ms = kept_over(usual, at_rest[len(at_rest) // 2], times)
     times, recorded = editor.read_frames(times, recorded, stop)
     editor.end_frames(times)
     return (times, behind, *settled(editor, CATCH_UP_SECONDS))
@@ -283,12 +308,15 @@ def flights(editor, real_gpu):
     failures = []
     metres = 0.0
     for speed in FLIGHT_SPEEDS:
-        times, behind, caught_up, last = flown(editor, metres, speed, seconds, heights)
+        times, behind, caught_up, last = flown(editor, metres, speed, seconds, heights, real_gpu)
         metres += speed * seconds
         print(f"game_gate: {flight_text(speed, seconds, frame_stats(times), behind, caught_up, last)}")
         slow = slow_frames(times, editor.slow, editor.typicals, editor.slow_over_ms)
         if slow and real_gpu:
             print(f"game_gate: flying at {speed:.0f} m/s: {slow}")
+        worst = worst_frame(editor.slow, editor.typicals)
+        if worst and real_gpu:
+            print(f"game_gate: flying at {speed:.0f} m/s: {worst}")
         if caught_up is None and real_gpu:  # (by the clock: on the null device it says nothing)
             failures.append(f"flying at {speed:.0f} m/s: the world had not caught up {CATCH_UP_SECONDS:.0f} s "
                             f"after the camera stopped: still coming, {last}")
