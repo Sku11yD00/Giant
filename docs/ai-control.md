@@ -8,6 +8,10 @@ through MCP.
 ## Connect Claude Code
 
 The editor is an MCP server on stdin/stdout when started with `--mcp`.
+Its replies are written on a thread of their own (`platform::LineWriter`), so a
+client slow to read one never holds a frame; with over 4 MiB of replies still
+unread, it runs no more messages until they are read. Leaving, it waits for the
+replies made to be read (5 s after the client last read any).
 Claude Code starts it for you. On Windows, from the folder that holds
 `giant_editor.exe`:
 

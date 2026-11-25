@@ -17,7 +17,7 @@ double ms2(float ms) { return std::round(static_cast<double>(ms) * 100.0) / 100.
 // The frames since `since` (counted from 0, ever) still kept: each phase's
 // median ms over them and their main thread's CPU time (`typical`), and,
 // for those over `over_ms`, the frame's phases (those of 0.05 ms or more).
-// Only the slow frames in full, so the reply stays small: it is written
+// Only the slow frames in full, so the reply stays small: it is made
 // inside a frame being timed.
 Json frame_phases(const FrameTimes& times, usize since, float over_ms) {
     std::vector<usize> slots;

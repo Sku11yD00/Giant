@@ -21,8 +21,10 @@ person can read cold, and that sanitizers can check.
 ## Threads
 
 - Use the job system (`giant/core/jobs.h`), never raw `std::thread` in
-  module code. The one exception is `platform::LineReader`, whose thread
-  blocks on stdin; a blocking OS read would tie up a worker forever.
+  module code. The exceptions are `platform::LineReader`, whose thread
+  blocks on stdin, and `platform::LineWriter`, whose thread blocks on
+  stdout; a blocking OS read or write would tie up a worker for as long as
+  the client takes.
 - Shared mutable state needs a comment naming what protects it.
 - Jobs must not throw, and a job may only wait on work it submitted itself.
   (One stated exception: a voxel brick job waits for the main thread to
