@@ -124,7 +124,9 @@ def build_scene(tool, call, check):
     check(phases["since"] == recorded - 10 and phases["frames"] >= 10, f"the frames asked for: {phases}")
     check(all(name in phases["typical"] for name in ("mcp", "ui", "physics", "scene", "render", "ui_draw",
                                                      "render/voxels", "render/shading", "end_frame",
-                                                     "streaming", "tail")),
+                                                     "streaming", "tail", "terrain", "terrain/changes",
+                                                     "terrain/uploads", "terrain/swaps", "terrain/starts",
+                                                     "terrain/paint")),
           f"the frame's phases, got {sorted(phases['typical'])}")
     check(len(phases["slow"]) == phases["frames"], "every frame over 0 ms is given in full")
     check(phases["typical"]["render"] > 0, "rendering a scene takes time")
@@ -135,6 +137,8 @@ def build_scene(tool, call, check):
         # 0.05 ms left out: a little slack).
         parts = sum(t for n, t in p.items() if n.startswith("render/"))
         check(parts <= p.get("render", 0) + 0.1, f"the renderer's parts fit within render: {frame}")
+        ground = sum(t for n, t in p.items() if n.startswith("terrain/"))
+        check(ground <= p.get("terrain", 0) + 0.1, f"the terrain's parts fit within terrain: {frame}")
         # The phases cover the frame: together close to its wall-clock time.
         whole = sum(t for n, t in p.items() if "/" not in n)
         check(abs(whole - frame["ms"]) <= 1.0 + 0.02 * frame["ms"],

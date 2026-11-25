@@ -8,6 +8,7 @@
 #include "../backends.h"
 #include "../heap_ranges.h"
 #include "../pool.h"
+#include "../spare.h"
 
 #include "rhi_shaders.h"
 
@@ -28,6 +29,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -35,6 +37,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -457,7 +460,11 @@ public:
     CommandList* begin_frame(SwapChain* swap_chain) override;
     void end_frame() override;
     const FrameStats& last_frame_stats() const override { return m_last_stats; }
-    DeviceCounts counts() const override { return m_counts; }
+    DeviceCounts counts() const override {
+        DeviceCounts total = m_counts;
+        total.allocations += m_spare_heaps_made.load(std::memory_order_relaxed); // (made on the spare's thread)
+        return total;
+    }
     std::span<const GpuTiming> gpu_timings() const override { return m_gpu_timings; }
     float gpu_frame_ms() const override { return m_gpu_frame_ms; }
     std::vector<u8> read_texture(TextureHandle texture) override;
@@ -541,7 +548,12 @@ private:
     // none could be made (the caller falls back to a committed one).
     ComPtr<ID3D12Resource> create_placed_buffer(u64 size, D3D12_RESOURCE_FLAGS flags, const char* name,
                                                 HeapRanges::Range& range);
-    bool add_buffer_heap();
+    // Another shared heap: the spare one if it is ready (the next is then
+    // made, off this thread). `now`: with none ready, makes one here (start-up).
+    // False: none yet (the buffer is committed), or none can be made.
+    bool add_buffer_heap(bool now);
+    // A heap for small buffers, or null. Called on any thread.
+    static ComPtr<ID3D12Heap> make_buffer_heap(ID3D12Device* device);
 
     AdapterInfo m_info;
     ComPtr<IDXGIFactory6> m_factory;
@@ -574,6 +586,17 @@ private:
     std::vector<ComPtr<ID3D12Heap>> m_buffer_heaps;
     HeapRanges m_heap_ranges{k_heap_bytes / k_heap_unit};
     bool m_heaps_failed = false; // CreateHeap failed once: committed buffers only (logged)
+    // The next heap, made ahead of need on a thread of its own (spare.h): a
+    // heap made in the frame that found the others full held that frame.
+    // (After m_device and the heaps: it is done before they go.)
+    // Counted as memory made when it is made, not when it is taken (counts()).
+    std::atomic<u64> m_spare_heaps_made{0};
+    Spare<ComPtr<ID3D12Heap>> m_spare_heap{[this]() -> std::optional<ComPtr<ID3D12Heap>> {
+        ComPtr<ID3D12Heap> heap = make_buffer_heap(m_device.Get());
+        if (heap == nullptr) return std::nullopt;
+        m_spare_heaps_made.fetch_add(1, std::memory_order_relaxed);
+        return heap;
+    }};
     DeviceCounts m_counts;  // running totals (counts())
     float m_wait_ms = 0.0f; // the last begin_frame's (FrameStats)
     float m_release_ms = 0.0f;
@@ -836,7 +859,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
         log_info("rhi", "d3d12: GIANT_D3D12_COMMITTED: every buffer is its own allocation");
     }
     for (u32 i = 0; i < k_initial_heaps && !m_heaps_failed; ++i) {
-        if (!add_buffer_heap()) {
+        if (!add_buffer_heap(true)) {
             break;
         }
     }
@@ -1374,10 +1397,7 @@ ComPtr<ID3D12Resource> D3D12Device::create_committed_buffer(D3D12_HEAP_TYPE heap
     return buffer;
 }
 
-bool D3D12Device::add_buffer_heap() {
-    if (m_heaps_failed) {
-        return false;
-    }
+ComPtr<ID3D12Heap> D3D12Device::make_buffer_heap(ID3D12Device* device) {
     D3D12_HEAP_DESC desc{};
     desc.SizeInBytes = k_heap_bytes;
     desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1386,19 +1406,52 @@ bool D3D12Device::add_buffer_heap() {
     // without the flag (the Windows one, no Agility SDK) gets zeroed heaps.
     desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED;
     ComPtr<ID3D12Heap> heap;
-    if (FAILED(m_device->CreateHeap(&desc, IID_PPV_ARGS(&heap)))) {
+    if (FAILED(device->CreateHeap(&desc, IID_PPV_ARGS(&heap)))) {
         desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
-        if (!check_gpu(m_device->CreateHeap(&desc, IID_PPV_ARGS(&heap)), "CreateHeap(small buffers)")) {
-            m_heaps_failed = true;
-            log_warning("rhi", "d3d12: could not make a buffer heap; small buffers are committed from now on");
-            return false;
+        const HRESULT result = device->CreateHeap(&desc, IID_PPV_ARGS(&heap));
+        if (FAILED(result)) {
+            // (Only said here: whether the device is lost is found by the next call on its own thread.)
+            char code[16];
+            std::snprintf(code, sizeof(code), "0x%08lX", static_cast<unsigned long>(result));
+            log_warning("rhi", std::string("d3d12: CreateHeap(small buffers) failed: ") + code);
+            return nullptr;
         }
     }
     heap->SetName(L"small buffers");
+    return heap;
+}
+
+bool D3D12Device::add_buffer_heap(bool now) {
+    if (m_heaps_failed) {
+        return false;
+    }
+    ComPtr<ID3D12Heap> heap;
+    bool made_here = false;
+    if (std::optional<ComPtr<ID3D12Heap>> spare = m_spare_heap.take()) {
+        heap = std::move(*spare);
+    } else if (now) {
+        heap = make_buffer_heap(m_device.Get());
+        made_here = heap != nullptr;
+        if (heap == nullptr) {
+            // (Start-up may wait: the spare being made, if it comes, is not left unused.)
+            m_spare_heap.wait();
+            if (std::optional<ComPtr<ID3D12Heap>> late = m_spare_heap.take()) heap = std::move(*late);
+        }
+    }
+    if (heap == nullptr) {
+        if (now || m_spare_heap.failed()) {
+            m_heaps_failed = true;
+            log_warning("rhi", "d3d12: could not make a buffer heap; small buffers are committed from now on");
+        } else {
+            m_spare_heap.want(); // (being made already, unless this is the first asked for)
+        }
+        return false;
+    }
     m_buffer_heaps.push_back(std::move(heap));
     m_heap_ranges.add_heap();
-    ++m_counts.allocations;
+    if (made_here) ++m_counts.allocations; // (a spare was counted when it was made)
     ++m_counts.heaps;
+    m_spare_heap.want(); // the next, before it is needed
     return true;
 }
 
@@ -1408,8 +1461,10 @@ ComPtr<ID3D12Resource> D3D12Device::create_placed_buffer(u64 size, D3D12_RESOURC
     range = m_heap_ranges.allocate(units);
     if (!range.valid()) {
         // Every heap is full: another (rare: 64 MiB at a time, never
-        // given back, so a burst's room is there for the next).
-        if (!add_buffer_heap()) {
+        // given back, so a burst's room is there for the next). The spare
+        // one, made ahead; while that is still being made, this buffer is
+        // committed instead of the frame waiting for it.
+        if (!add_buffer_heap(false)) {
             return nullptr;
         }
         range = m_heap_ranges.allocate(units);

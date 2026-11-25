@@ -249,6 +249,13 @@ GIANT_TEST("terrain meshes: built off the main thread, a change rebuilds its nei
     u64 before = m.stats().built;
     m.update(fresh);
     GIANT_CHECK(m.stats().built - before == 3);
+    {
+        // The update's parts by the same clock (0.2 ms a reading): the uploads' four readings, one each for the rest.
+        const TerrainMeshes::PartsMs& parts = m.last_parts_ms();
+        const auto near_ms = [](float ms, float expected) { return std::abs(ms - expected) < 0.01f; };
+        GIANT_CHECK(near_ms(parts.changes, 0.2f) && near_ms(parts.uploads, 0.8f) && near_ms(parts.swaps, 0.2f) &&
+                    near_ms(parts.starts, 0.2f));
+    }
     m.upload_ms_per_frame = 0.0f; // no time at all: still one a frame, so they always come
     before = m.stats().built;
     m.update(fresh);

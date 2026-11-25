@@ -42,6 +42,22 @@ def main():
     check("by phase: none stands out;" in worst_frame([frame(9.5, 9.0, render=8.1, end_frame=1.0)], typicals),
           "nothing over: said")
     check(worst_frame([], typicals) is None and worst_frame(kept, []) is None, "nothing kept, or nothing typical: no line")
+    ground = worst_frame([dict(frame(17.0, 15.0, render=8.0, render__voxels=2.0, terrain=7.5, terrain__uploads=7.2,
+                                     terrain__starts=0.2, end_frame=1.0),
+                               device={"created": 6, "allocations": 1, "released": 0, "wait_ms": 0.0})], typicals)
+    check("by phase: terrain +7.5;" in ground and "inside terrain: uploads +7.2;" in ground and "inside render" not in ground,
+          f"the terrain's parts, as render's (a part under 0.3 ms over left out): {ground}")
+    check("in it the GPU device made 6 resources, made new memory 1 times (a resource's own, a heap or a staging chunk) "
+          "and freed 0 resources;" in ground, f"what the device made in the frame: {ground}")
+    both = worst_frame([dict(frame(20.0, 18.0, render=12.0, render__voxels=6.0, terrain=5.0, terrain__paint=4.0),
+                             device={"created": 0, "allocations": 1, "released": 3},
+                             typical_device={"created": 2, "allocations": 0, "released": 1})], typicals)
+    check("; inside render: voxels +4.0; inside terrain: paint +4.0; in it the GPU device made 0 (typically 2) resources, "
+          "made new memory 1 (typically 0) times" in both and "freed 3 (typically 1) resources; its CPU time" in both,
+          f"render's parts and terrain's in one line, and the device's counts beside a typical frame's: {both}")
+    check("the GPU device" not in text and "the GPU device" not in
+          worst_frame([dict(frame(14.0, 9.0, render=8.0), device={"created": 0, "allocations": 0, "released": 0})], typicals),
+          "an older editor, or a device that made nothing: not said")
 
     slow = [
         # The renderer's voxels took 30 ms more: render blamed, voxels inside.
@@ -58,6 +74,16 @@ def main():
     # A spike in render outside its sections: render/rest, not a section.
     rest = slow_frames(times, [frame(40.0, 39.0, render=38.0, render__voxels=2.0)], typicals)
     check("inside render, most over: render/rest 1" in rest, f"the rest of render: {rest}")
+    # A phase's part is told only of that phase: terrain's largest is not render's.
+    ground_typicals = [(f, dict(t, **{"terrain": 0.5, "terrain/uploads": 0.3}), c) for f, t, c in typicals]
+    mixed = slow_frames(times, [frame(52.0, 51.0, render=30.0, render__voxels=10.0, terrain=20.0, terrain__uploads=19.8)],
+                        ground_typicals)
+    check("inside render, most over: render/rest 1" in mixed and "terrain/uploads" not in mixed,
+          f"render blamed: render's own part, though a part of terrain is more over: {mixed}")
+    ground_hitch = slow_frames(times, [frame(40.0, 39.0, render=8.0, render__voxels=2.0, terrain=30.0, terrain__uploads=29.0)],
+                               ground_typicals)
+    check("inside terrain, most over: terrain/uploads 1" in ground_hitch and "inside render" not in ground_hitch,
+          f"terrain blamed: its part named: {ground_hitch}")
     # The device around the hitches: allocations beside a typical frame's.
     typical_device = {"created": 1, "allocations": 0, "released": 1, "wait_ms": 0.5}
     waited = [dict(frame(40.0, 8.0, begin_frame=30.0), typical_device=typical_device,

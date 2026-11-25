@@ -128,8 +128,13 @@ follow without touching the renderer.
   waits behind that work. Streaming makes and drops thousands of small
   buffers (terrain tiles, meshes), so on D3D12 a gpu-memory buffer up to
   4 MiB made with all its contents is placed in one of a few 64 MiB heaps
-  instead (four made at init, 256 MiB, more when they fill, none given
-  back), a range of 64 KiB units each (src/heap_ranges.h; a tiny buffer
+  instead (four made at init and a fifth kept spare, 320 MiB, more when
+  they fill, none given back; the spare is made ahead on a thread of its
+  own, src/spare.h, and the next as soon as it is taken, because making one
+  in the frame whose buffer found the others full held that frame for
+  milliseconds; a buffer that finds them full before the spare is ready is
+  committed, and once a heap cannot be made none is tried again), a range
+  of 64 KiB units each (src/heap_ranges.h; a tiny buffer
   takes a whole unit, as a committed one does). The heaps are not zeroed
   and their ranges are reused, so a buffer made without its contents stays
   committed (it comes zeroed). Larger buffers and textures are committed

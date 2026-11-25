@@ -160,10 +160,12 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
                 excess[n].append(p.get(n, 0.0) - typical[n])
             worst = max(top, key=lambda n: p.get(n, 0.0) - typical[n])
             blamed[worst] = blamed.get(worst, 0) + 1
-            if worst == "render" and inner:
-                part = max(inner, key=lambda n: p.get(n, 0.0) - typical[n])
+            parts = [n for n in inner if n.startswith(worst + "/")]  # (render's, or terrain's)
+            if parts:
+                part = max(parts, key=lambda n: p.get(n, 0.0) - typical[n])
                 if p.get(part, 0.0) - typical[part] >= 1.0:
-                    inner_blamed[part] = inner_blamed.get(part, 0) + 1
+                    table = inner_blamed.setdefault(worst, {})
+                    table[part] = table.get(part, 0) + 1
             waits = sum(p.get(n, 0.0) for n in WAIT_PHASES)
             stalled.append(max(0.0, frame["ms"] - frame["cpu_ms"] - waits))
             if leg is not None:
@@ -176,8 +178,8 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
         if legs:
             lines.append(f"  by the flight's leg (by the stop the frames were read at: the frame of a leg's last "
                          f"read is counted with the next): {counts(legs)}")
-        if inner_blamed:
-            lines.append(f"  inside render, most over: {counts(inner_blamed)}")
+        for parent, table in sorted(inner_blamed.items()):
+            lines.append(f"  inside {parent}, most over: {counts(table)}")
         stalls = sum(1 for t in stalled if t > STALL_MS)
         lines.append(f"  the main thread neither working nor waiting at a frame's begin or end (preempted, blocked on a "
                      f"lock or the disk, or waiting on the GPU elsewhere) over {STALL_MS:.0f} ms in {stalls} of the {len(frames)}, worst {max(stalled):.1f} ms; "
@@ -209,8 +211,10 @@ def slow_frames(times, slow, typicals, slow_over_ms=25.0, leg=None):
 def worst_frame(slow, typicals, least_over_ms=0.3):
     """Where the time of the slowest frame among `slow` went (Editor.read_frames's self.slow, with
     self.typicals): its time, each phase at least `least_over_ms` over its typical time (the
-    parts of render after render itself), and how long the main thread neither worked nor waited
-    at the frame's begin or end. One line; None with no slow frames kept or nothing typical."""
+    parts of render and of terrain after the phases themselves), what the GPU device made and
+    freed in it (new memory is slow to make, and the GPU's queue waits behind it), and how long
+    the main thread neither worked nor waited at the frame's begin or end. One line; None with no slow
+    frames kept or nothing typical."""
     if not slow or not typicals:
         return None
     frame = max(slow, key=lambda f: f["ms"])
@@ -220,7 +224,8 @@ def worst_frame(slow, typicals, least_over_ms=0.3):
     typical = {n: weighted_median([(f, t.get(n, 0.0)) for f, t, _ in typicals]) for n in names}
     over = sorted(((n, frame["phases"].get(n, 0.0) - typical[n]) for n in names), key=lambda x: (-x[1], x[0]))
     top = [f"{n} +{e:.1f}" for n, e in over if "/" not in n and e >= least_over_ms]
-    inner = [f"{n[len('render/'):]} +{e:.1f}" for n, e in over if n.startswith("render/") and e >= least_over_ms]
+    inner = {part: [f"{n[len(part) + 1:]} +{e:.1f}" for n, e in over if n.startswith(part + "/") and e >= least_over_ms]
+             for part in ("render", "terrain")}
     waits = sum(frame["phases"].get(n, 0.0) for n in WAIT_PHASES)
     stalled = max(0.0, frame["ms"] - frame["cpu_ms"] - waits)
     typical_cpu = weighted_median([(f, c) for f, _, c in typicals])
@@ -228,8 +233,17 @@ def worst_frame(slow, typicals, least_over_ms=0.3):
             f"{', '.join(top) if top else 'none stands out'}")
     if any(n in WAIT_PHASES and e >= least_over_ms for n, e in over):
         text += " (begin_frame, end_frame, tail: waiting on the GPU, the driver or the display)"
-    if inner:
-        text += f"; inside render: {', '.join(inner)}"
+    for part, parts in inner.items():
+        if parts:
+            text += f"; inside {part}: {', '.join(parts)}"
+    device = frame.get("device")
+    if device and (device.get("created") or device.get("allocations") or device.get("released")):
+        usual = frame.get("typical_device") or {}
+
+        def count(name):
+            return f"{device.get(name, 0)}" + (f" (typically {usual[name]})" if name in usual else "")
+        text += (f"; in it the GPU device made {count('created')} resources, made new memory {count('allocations')} "
+                 f"times (a resource's own, a heap or a staging chunk) and freed {count('released')} resources")
     text += (f"; its CPU time {frame['cpu_ms']:.1f} ms (typically {typical_cpu:.1f}), and {stalled:.1f} ms with the main "
              f"thread neither working nor waiting at the frame's begin or end")
     return text

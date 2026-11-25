@@ -299,6 +299,10 @@ GIANT_TEST("editor: frame phases name the slow frames' parts") {
     GIANT_CHECK(last["slow"].size() == 10);
     GIANT_CHECK(last["slow"][1]["window"] == true && last["slow"][2]["window"] == false);
     GIANT_CHECK(frame_phase_name(at(FramePhase::count)) == "render/cells");
+    // (The terrain's parts come after the renderer's, the last of all.)
+    GIANT_CHECK(frame_phase_name(k_frame_terrain_parts) == "terrain/changes" &&
+                frame_phase_name(k_frame_terrain_parts - 1).rfind("render/", 0) == 0 &&
+                frame_phase_name(k_frame_phases - 1) == "terrain/paint");
     GIANT_CHECK(frame_phase_name(at(FramePhase::tail)) == "tail");
     // (What runs before a frame begins, each its own so a slow frame names one of them.)
     GIANT_CHECK(frame_phase_name(at(FramePhase::animation)) == "animation" && frame_phase_name(at(FramePhase::cloth)) == "cloth" &&
