@@ -24,6 +24,7 @@ from gate_person import write_person
 from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
 
 TIMEOUT = 3000  # seconds for the whole run (the gates are heavy on the software renderer with GPU validation: 1300-1500 s on Windows CI runners by N3 part 4, whose speed varies 2x; each gate prints its time)
+LATE_READ_SECONDS = 2.0  # how late late_reader_gate reads a reply
 
 
 def decode_png(data):
@@ -1259,6 +1260,35 @@ def mod_scripts_gate(tool, call, check, sample, settings):
         tool("new_scene")
 
 
+def late_reader_gate(editor, tool, call, check):
+    """A client slow to read a reply bigger than the pipe holds (4 KiB on Windows; made so here
+    elsewhere) holds no frame: the reply is written on a thread of its own."""
+    if sys.platform == "win32":
+        holds = 4096  # (what subprocess's pipes hold there)
+    else:
+        try:
+            import fcntl
+            fcntl.fcntl(editor.stdout.fileno(), getattr(fcntl, "F_SETPIPE_SZ", 1031), 4096)
+            holds = fcntl.fcntl(editor.stdout.fileno(), getattr(fcntl, "F_GETPIPE_SZ", 1032))
+        except (ImportError, OSError):
+            print("mcp_smoke: the late reader is not tried (the pipe's size cannot be set or read here)")
+            return
+    since = tool("get_engine_info")["frame_times"]["recorded"]
+    message = {"jsonrpc": "2.0", "id": "late", "method": "tools/list"}  # (every command: a big reply)
+    editor.stdin.write(json.dumps(message) + "\n")
+    editor.stdin.flush()
+    time.sleep(LATE_READ_SECONDS)
+    line = editor.stdout.readline()
+    check(len(line) > 2 * holds, f"the reply read late is bigger than the pipe holds ({holds}), got {len(line)} bytes")
+    check(json.loads(line).get("id") == "late", "the reply read late is the one asked for")
+    for _ in range(3):
+        call("ping")  # (the frame that answered is recorded when the next begins)
+    limit = 500.0 * LATE_READ_SECONDS
+    times = tool("get_engine_info", {"phases_since": since, "phases_over_ms": limit})["frame_times"]
+    held = [frame for frame in times["phases"]["slow"] if frame["phases"].get("mcp", 0.0) >= limit]
+    check(not held, f"no frame waited for the client to read a reply, got {held}")
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -1322,6 +1352,7 @@ def main() -> int:
 
         info = tool("get_engine_info")
         check(info["frames_completed"] >= 0, "engine info")
+        late_reader_gate(editor, tool, call, check)
 
         way = tool("find_path", {"from": [0, 0, 0], "to": [5, 0, 0]})
         check(way["state"] in ("found", "failed"), "find_path answers")

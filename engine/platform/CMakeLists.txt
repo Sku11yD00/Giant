@@ -2,6 +2,7 @@ giant_module(platform
   SOURCES
     src/audio_sdl.cpp
     src/line_reader.cpp
+    src/line_writer.cpp
     src/window_sdl.cpp
   DEPENDS core
 )
@@ -11,6 +12,7 @@ giant_module_tests(platform
   SOURCES
     tests/test_audio_output.cpp
     tests/test_line_reader.cpp
+    tests/test_line_writer.cpp
     tests/test_window.cpp
 )
 # The tests post synthetic OS events, so they see SDL directly.

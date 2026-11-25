@@ -24,6 +24,7 @@
 // (tests of the waiting; with a window it is the Chat panel's own box).
 #include "chat_bridge.h"
 #include "editor_commands.h"
+#include "mcp_pump.h"
 #include "mesh_library.h"
 #include "texture_library.h"
 #include "scene_render.h"
@@ -87,7 +88,6 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
-#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -217,29 +217,6 @@ bool parse_options(const std::vector<std::string>& argv, Options& out) {
         }
     }
     return true;
-}
-
-// Answers every MCP message that arrived since the last frame. Returns false
-// once the client can no longer receive replies. Messages after a quit
-// request are not run.
-//
-// Replies are blocking writes: a client that stops reading entirely stalls
-// the editor once the pipe fills. MCP clients always read, so this is
-// accepted for now.
-bool pump_mcp(platform::LineReader& reader, ai::McpServer& server, const bool& quit_requested) {
-    for (const std::string& line : reader.take_lines()) {
-        if (quit_requested) {
-            break;
-        }
-        if (line.empty()) {
-            continue;
-        }
-        if (auto reply = server.handle(line)) {
-            std::cout << *reply << '\n';
-        }
-    }
-    std::cout.flush();
-    return static_cast<bool>(std::cout);
 }
 
 // Where Giant.Scripting.dll is: next to the editor in a download, one level
@@ -641,10 +618,21 @@ int run(const Options& options) {
     editor::register_editor_commands(commands, state);
 
     std::unique_ptr<platform::LineReader> mcp_reader;
+    std::unique_ptr<platform::LineWriter> mcp_writer;
+    // However the program leaves from here on, the replies made are written first (the answer to
+    // quit among them): a writer destroyed with some waiting drops them.
+    struct LastReplies {
+        const std::unique_ptr<platform::LineWriter>& writer;
+        ~LastReplies() {
+            if (writer != nullptr) editor::write_last_replies(*writer);
+        }
+    } last_replies{mcp_writer};
     std::unique_ptr<ai::McpServer> mcp_server;
     if (options.mcp) {
 #if defined(_WIN32)
-        // Messages end in \n only; text mode would turn that into \r\n.
+        // Messages end in \n only. The replies are raw writes (platform::LineWriter), which
+        // text mode does not touch; this keeps anything else that strays onto stdout from
+        // gaining a \r.
         _setmode(_fileno(stdout), _O_BINARY);
 #else
         // A client that closes its end must not kill the editor mid-write;
@@ -652,6 +640,7 @@ int run(const Options& options) {
         std::signal(SIGPIPE, SIG_IGN);
 #endif
         mcp_reader = platform::LineReader::from_stdin();
+        mcp_writer = platform::LineWriter::to_stdout();
         mcp_server = std::make_unique<ai::McpServer>(
             commands, ai::McpServerInfo{"giant-editor", "0.1.0", editor::mcp_instructions()});
         log_info("editor", "MCP server listening on stdin/stdout");
@@ -1004,7 +993,7 @@ int run(const Options& options) {
         mark(editor::FramePhase::events);
         const bool window_handled = window->take_handled();
         if (mcp_reader != nullptr) {
-            if (!pump_mcp(*mcp_reader, *mcp_server, state.quit_requested) ||
+            if (!editor::pump_mcp(*mcp_reader, *mcp_writer, *mcp_server, state.quit_requested) ||
                 mcp_reader->finished()) {
                 log_info("editor", "MCP client disconnected; closing");
                 break;
