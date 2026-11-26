@@ -38,14 +38,16 @@ static_assert(sizeof(Vertex) == 48, "the simplifier reads the normal and uv as 5
 // A vertex as the GPU reads it (k_packed_vertex_bytes, the geometry pool's
 // layout, engine/render/shaders/common.slang): the position as floats, the
 // normal and tangent as octahedral snorm16 pairs (the tangent's lowest y bit
-// holding the bitangent sign: 1 for -1), the uv as floats.
+// holding the bitangent sign: 1 for -1), the uv as floats, then the way it
+// grows (pack_grow; 0: it does not).
 struct PackedVertex {
     float position[3];
     u32 normal;
     u32 tangent;
     float uv[2];
+    u32 grow;
 };
-inline constexpr u32 k_packed_vertex_bytes = 28;
+inline constexpr u32 k_packed_vertex_bytes = 32;
 static_assert(sizeof(PackedVertex) == k_packed_vertex_bytes);
 
 // A unit vector as two snorm16 octahedral coordinates (x low, y high);
@@ -54,7 +56,32 @@ u32 pack_octahedral(const Vec3& unit);
 Vec3 unpack_octahedral(u32 packed);
 // The tangent is first made perpendicular to the normal (any perpendicular
 // when it is parallel or zero); a non-unit normal is normalised (+Y if zero).
-PackedVertex pack_vertex(const Vertex& vertex);
+// `grow`: the way it grows (pack_grow), 0 for none.
+PackedVertex pack_vertex(const Vertex& vertex, u32 grow = 0);
+
+// Growing. Something thinner than a pixel (a far trunk, a railing, a mast)
+// lands on a pixel in one frame and between two in the next, so it blinks
+// as the camera moves. The renderer therefore draws every vertex half a
+// pixel further out (half a texel in a shadow map), so the thinnest thing
+// is a pixel wide and never drops out. The way a vertex
+// grows is worked out once per mesh from every vertex at its place: the
+// direction midway between their normals, and as far along it as moves
+// each of their faces out by one (a cube's corner: along its diagonal, by
+// the square root of three), at most k_most_grow. Vertices at one place get
+// one answer, so faces meeting at a hard edge stay joined, at every level
+// of detail. Normals that cancel (the two faces of a leaf card) do not grow.
+//
+// Packed in 32 bits: the direction as two snorm12 octahedral coordinates
+// (x in bits 0 to 11, y in 12 to 23), the length in 64ths in bits 24 to 31
+// (0: none).
+inline constexpr float k_most_grow = 2.0f;
+u32 pack_grow(const Vec3& grow);
+Vec3 unpack_grow(u32 packed);
+// One per vertex. Vertices at the same place (bit for bit) share one.
+// `with`: more vertices whose normals count at their places (the rest of a
+// mesh drawn in parts: a corner where two parts meet must grow one way in
+// both); none is returned for them.
+std::vector<u32> grow_directions(std::span<const Vertex> vertices, std::span<const Vertex> with = {});
 Vertex unpack_vertex(const PackedVertex& packed);
 
 struct TriangleMesh {

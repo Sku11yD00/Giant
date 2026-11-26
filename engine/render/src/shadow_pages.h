@@ -87,6 +87,9 @@ public:
     static constexpr u32 k_pages_per_axis = 16;
     static constexpr u32 k_slots = k_pages_per_axis * k_pages_per_axis; // per level
     static constexpr u32 k_no_page = ~0u;
+    // Texels past its bounds a caster may be drawn (grown: renderer.h's
+    // RenderSettings::grow_pixels): the pages under that are its too.
+    static constexpr double k_grown_texels = 4.0;
     // Table entries: the physical page in the low bits, these flags above.
     static constexpr u32 k_page_mask = 0xFFFFu;
     static constexpr u32 k_drawn_bit = 1u << 30; // has content (drawn at least once)

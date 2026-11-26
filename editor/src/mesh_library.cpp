@@ -156,8 +156,11 @@ MeshLibrary::Loaded MeshLibrary::import(const std::string& path, Mesh* replace) 
             // the parts never crack apart however coarse each is drawn.
             const std::vector<u8> seams =
                 geometry::part_seams(imported.mesh, imported.triangle_materials, source.material, seam_vertices);
+            // (A corner where two parts meet grows one way in both: the whole mesh's
+            // normals count there, or a hard edge between two materials would open.)
             part_clusters.push_back(geometry::build_clusters(
-                geometry::part_of(imported.mesh, imported.triangle_materials, source.material), seams));
+                geometry::part_of(imported.mesh, imported.triangle_materials, source.material), seams,
+                geometry::Growing{true, imported.mesh.vertices}));
             // Much of a big part on seams (materials woven through each other): it cannot
             // thin with distance, which the file's author should hear of.
             const usize on_seams = static_cast<usize>(std::count_if(seams.begin(), seams.end(), [](u8 s) { return s != 0; }));

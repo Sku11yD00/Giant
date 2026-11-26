@@ -258,4 +258,11 @@ GIANT_TEST("weather: the wind near the ground follows it, gusting harder in a st
     GIANT_CHECK(f.state.render_settings.wind_distance == 80.0f && f.state.render_settings.wind_shadow_pages_per_frame == 0);
     GIANT_CHECK(f.run("get_render_settings").value["wind_distance"].get<float>() == 80.0f);
     GIANT_CHECK(!f.run("set_render_settings", {{"wind_distance", -1}}).ok);
+    // Growing (nothing drawn thinner than a pixel): half a pixel as it comes, set and read back, held to 0 to 2.
+    GIANT_CHECK(f.run("get_render_settings").value["grow_pixels"].get<float>() == 0.5f);
+    GIANT_CHECK(f.run("set_render_settings", {{"grow_pixels", 0}}).ok && f.state.render_settings.grow_pixels == 0.0f);
+    GIANT_CHECK(f.run("set_render_settings", {{"grow_pixels", 1.25}}).ok);
+    GIANT_CHECK(f.run("get_render_settings").value["grow_pixels"].get<float>() == 1.25f);
+    GIANT_CHECK(!f.run("set_render_settings", {{"grow_pixels", 2.5}}).ok && !f.run("set_render_settings", {{"grow_pixels", -0.1}}).ok);
+    GIANT_CHECK(f.run("set_render_settings", {{"grow_pixels", 0.5}}).ok);
 }

@@ -170,8 +170,16 @@ void PoseBakes::run(Bake& bake) {
     Vec3 lo{}, hi{};
     bool any = false;
     bake.parts.resize(figure.parts.size());
+    // Every part posed first: a corner where two parts meet grows one way
+    // in both (geometry::Growing), so the others' vertices count there.
+    std::vector<geometry::TriangleMesh> posed_parts(figure.parts.size());
+    std::vector<geometry::Vertex> whole;
     for (usize p = 0; p < figure.parts.size(); ++p) {
-        const geometry::TriangleMesh posed = geometry::bake_pose(figure.parts[p], skin);
+        posed_parts[p] = geometry::bake_pose(figure.parts[p], skin);
+        whole.insert(whole.end(), posed_parts[p].vertices.begin(), posed_parts[p].vertices.end());
+    }
+    for (usize p = 0; p < figure.parts.size(); ++p) {
+        const geometry::TriangleMesh& posed = posed_parts[p];
         for (const geometry::Vertex& v : posed.vertices) {
             const Vec3& at = v.position;
             lo = any ? Vec3{std::min(lo.x, at.x), std::min(lo.y, at.y), std::min(lo.z, at.z)} : at;
@@ -179,7 +187,8 @@ void PoseBakes::run(Bake& bake) {
             any = true;
         }
         bake.baked_triangles += static_cast<u32>(posed.indices.size() / 3);
-        bake.parts[p] = geometry::build_clusters(posed); // (empty when the part came to nothing)
+        // (empty when the part came to nothing)
+        bake.parts[p] = geometry::build_clusters(posed, {}, geometry::Growing{true, whole});
     }
     if (!any || bake.baked_triangles == 0) {
         bake.problem = "nothing was left of its mesh";

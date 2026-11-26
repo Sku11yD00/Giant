@@ -839,6 +839,7 @@ Json render_settings_json(const EditorState& state) {
             {"precipitation", state.render_settings.precipitation},
             {"wet_surfaces", state.render_settings.wet_surfaces},
             {"wind_distance", state.render_settings.wind_distance},
+            {"grow_pixels", state.render_settings.grow_pixels},
             {"wind_shadow_pages_per_frame", state.render_settings.wind_shadow_pages_per_frame},
             {"weather_cover", state.render_settings.weather_cover},
             {"last_frame",
@@ -2274,6 +2275,10 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"wind_distance", number(0, 100000, "Metres from the camera that swaying materials move in the "
                                                     "wind, fading out over the last third. 0: nothing sways. "
                                                     "Default 150.")},
+                {"grow_pixels", number(0, 2, "Pixels every mesh vertex is drawn further out (texels in the sun's "
+                                             "shadows). At 0.5 the thinnest thing is a pixel wide, so far "
+                                             "trunks, railings and their shadows do not blink in and out as "
+                                             "the camera moves. 0: off. Default 0.5.")},
                 {"wind_shadow_pages_per_frame",
                  {{"type", "integer"}, {"minimum", 0}, {"maximum", 4096},
                   {"description", "Shadow pages under swaying things drawn again a frame at most, so their "
@@ -2333,6 +2338,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.wet_surfaces = args.value("wet_surfaces", r.wet_surfaces);
              r.weather_cover = args.value("weather_cover", r.weather_cover);
              r.wind_distance = args.value("wind_distance", r.wind_distance);
+             r.grow_pixels = args.value("grow_pixels", r.grow_pixels);
              r.wind_shadow_pages_per_frame = args.value("wind_shadow_pages_per_frame", r.wind_shadow_pages_per_frame);
              return CommandResult::success(render_settings_json(state));
          }});

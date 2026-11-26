@@ -476,7 +476,8 @@ GIANT_TEST("geometry: glTF's default material is counted; lines do not count; sp
     }
 }
 
-GIANT_TEST("geometry: vertices pack to 28 bytes and back within a hair") {
+GIANT_TEST("geometry: vertices pack to 32 bytes and back within a hair") {
+    static_assert(sizeof(PackedVertex) == 32 && k_packed_vertex_bytes == 32);
     // Directions over the sphere, both hemispheres and the axes.
     std::vector<Vec3> dirs = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
     for (int i = 0; i < 200; ++i) {
@@ -513,6 +514,125 @@ GIANT_TEST("geometry: vertices pack to 28 bytes and back within a hair") {
     bad.normal = {std::nanf(""), 0, 0};
     const Vertex nan_fixed = unpack_vertex(pack_vertex(bad));
     GIANT_CHECK(near3(nan_fixed.normal, {0, 1, 0}, 1e-4f));
+}
+
+GIANT_TEST("geometry: the way a vertex grows: out from every face at its place, one answer a place, none where normals cancel") {
+    // Packing: a direction and a length to 2, within a 64th and a tenth of a degree; none is 0.
+    GIANT_CHECK(pack_grow({}) == 0 && pack_grow({std::nanf(""), 0, 0}) == 0 && length(unpack_grow(0)) == 0.0f);
+    for (int i = 0; i < 200; ++i) {
+        const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / 200.0f;
+        const float a = static_cast<float>(i) * 2.39996f;
+        const float r = std::sqrt(1.0f - z * z);
+        const Vec3 d{r * std::cos(a), r * std::sin(a), z};
+        const float len = 0.05f + 1.95f * static_cast<float>(i) / 199.0f;
+        const Vec3 back = unpack_grow(pack_grow(d * len));
+        GIANT_CHECK(std::fabs(length(back) - len) <= 1.0f / 128.0f + 1e-5f);
+        GIANT_CHECK(dot(normalize_or_zero(back), d) > 0.999998f);
+    }
+    GIANT_CHECK(std::fabs(length(unpack_grow(pack_grow({0, 9, 0}))) - k_most_grow) < 1e-5f); // (no further than the most)
+    for (const Vec3 axis : {Vec3{1, 0, 0}, Vec3{-1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, -1, 0}, Vec3{0, 0, 1}, Vec3{0, 0, -1}}) {
+        GIANT_CHECK(near3(unpack_grow(pack_grow(axis)), axis, 1e-3f));
+    }
+    // The packed vertex carries it.
+    GIANT_CHECK(pack_vertex(Vertex{}).grow == 0 && pack_vertex(Vertex{}, 0x40123456u).grow == 0x40123456u);
+
+    // A cube (flat faces: three vertices a corner): every corner grows along its diagonal, far
+    // enough that each of its three faces moves out by one; the three vertices there agree.
+    const TriangleMesh cube = make_cube();
+    const std::vector<u32> grow = grow_directions(cube.vertices);
+    GIANT_CHECK(grow.size() == cube.vertices.size());
+    for (usize v = 0; v < cube.vertices.size(); ++v) {
+        const Vertex& vertex = cube.vertices[v];
+        const Vec3 g = unpack_grow(grow[v]);
+        const Vec3 diagonal = normalize_or_zero(vertex.position);
+        GIANT_CHECK(dot(normalize_or_zero(g), diagonal) > 0.9999f);
+        GIANT_CHECK(std::fabs(length(g) - std::sqrt(3.0f)) < 0.02f);
+        GIANT_CHECK(std::fabs(dot(g, vertex.normal) - 1.0f) < 0.02f); // (its face moves out by one)
+        for (usize o = 0; o < cube.vertices.size(); ++o) {
+            if (cube.vertices[o].position == vertex.position) GIANT_CHECK(grow[o] == grow[v]);
+        }
+    }
+    // A smooth sphere: along the normal, by one (a uv seam's repeats count once).
+    const TriangleMesh sphere = make_sphere(16, 8);
+    const std::vector<u32> round = grow_directions(sphere.vertices);
+    for (usize v = 0; v < sphere.vertices.size(); ++v) {
+        const Vec3 g = unpack_grow(round[v]);
+        GIANT_CHECK(std::fabs(length(g) - 1.0f) < 0.02f && dot(g, sphere.vertices[v].normal) > 0.99f);
+    }
+    // The two faces of a card cancel: it does not grow. A vertex with no normal neither. Minus
+    // and plus zero are one place.
+    std::vector<Vertex> card(5);
+    card[0].position = {0.0f, 1, 2};
+    card[0].normal = {0, 0, 1};
+    card[1].position = {-0.0f, 1, 2};
+    card[1].normal = {0, 0, -1};
+    card[2].position = {5, 5, 5};
+    card[2].normal = {};
+    card[3].position = {7, 0, 0}; // a knife's edge: faces 151 degrees apart, held to the most
+    card[3].normal = normalize_or_zero(Vec3{1, 0.25f, 0});
+    card[4].position = {7, 0, 0};
+    card[4].normal = normalize_or_zero(Vec3{-1, 0.25f, 0});
+    const std::vector<u32> flat = grow_directions(card);
+    GIANT_CHECK(flat[0] == 0 && flat[1] == 0 && flat[2] == 0);
+    GIANT_CHECK(flat[3] == flat[4] && near3(unpack_grow(flat[3]), {0, k_most_grow, 0}, 0.02f));
+    GIANT_CHECK(grow_directions({}).empty());
+
+    // Clusters carry one per vertex, the same at one place at every level; skinned ones none.
+    const ClusterMesh clusters = build_clusters(make_sphere(64, 32));
+    GIANT_CHECK(clusters.grow.size() == clusters.vertices.size() && clusters.levels > 1);
+    usize growing = 0;
+    for (const u32 g : clusters.grow) {
+        if (g != 0) ++growing;
+    }
+    GIANT_CHECK(growing == clusters.grow.size());
+    // (Every level's clusters draw from the one array: any two vertices at one place agree.)
+    std::vector<u32> by_place(clusters.vertices.size());
+    for (u32 v = 0; v < by_place.size(); ++v) by_place[v] = v;
+    const auto before = [&clusters](u32 a, u32 b) {
+        const Vec3& p = clusters.vertices[a].position;
+        const Vec3& q = clusters.vertices[b].position;
+        return p.x != q.x ? p.x < q.x : p.y != q.y ? p.y < q.y : p.z < q.z;
+    };
+    std::sort(by_place.begin(), by_place.end(), before);
+    usize shared = 0, differing = 0;
+    for (usize i = 1; i < by_place.size(); ++i) {
+        if (clusters.vertices[by_place[i]].position == clusters.vertices[by_place[i - 1]].position) {
+            ++shared;
+            if (clusters.grow[by_place[i]] != clusters.grow[by_place[i - 1]]) ++differing;
+        }
+    }
+    GIANT_CHECK(differing == 0);
+    std::printf("    %zu of the sphere's %zu cluster vertices share a place with another\n", shared, by_place.size());
+    // Not made when not asked for (the ground).
+    GIANT_CHECK(build_clusters(make_cube(), {}, Growing{false, {}}).grow.empty());
+
+    // A cube drawn in two parts (its +x face one, the rest the other): where they meet, each
+    // part's corners grow as the whole cube's do, given the whole to count; alone, the face
+    // would grow straight out and open the edge.
+    const TriangleMesh whole = make_cube();
+    std::vector<u16> parts(whole.indices.size() / 3, 0);
+    for (usize t = 0; t < parts.size(); ++t) {
+        if (whole.vertices[whole.indices[t * 3]].normal.x > 0.5f) parts[t] = 1;
+    }
+    const TriangleMesh face = part_of(whole, parts, 1);
+    GIANT_CHECK(face.indices.size() == 6);
+    const ClusterMesh joined = build_clusters(face, {}, Growing{true, whole.vertices});
+    const ClusterMesh alone = build_clusters(face);
+    GIANT_CHECK(joined.grow.size() == joined.vertices.size() && !joined.vertices.empty());
+    for (usize v = 0; v < joined.vertices.size(); ++v) {
+        const Vec3 diagonal = normalize_or_zero(joined.vertices[v].position);
+        GIANT_CHECK(dot(normalize_or_zero(unpack_grow(joined.grow[v])), diagonal) > 0.9999f);
+    }
+    for (usize v = 0; v < alone.vertices.size(); ++v) {
+        GIANT_CHECK(near3(unpack_grow(alone.grow[v]), {1, 0, 0}, 1e-3f));
+    }
+    // Far too long to measure: none, not a broken direction.
+    GIANT_CHECK(pack_grow({3e30f, 3e30f, 0}) == 0);
+    SkinnedTriangleMesh skinned;
+    skinned.mesh = make_cube();
+    skinned.weights.assign(skinned.mesh.vertices.size(), SkinWeights{{0, 0, 0, 0}, {255, 0, 0, 0}});
+    const SkinnedClusterMesh posed = build_skinned_clusters(skinned);
+    GIANT_CHECK(!posed.mesh.empty() && posed.mesh.grow.empty());
 }
 
 GIANT_TEST("geometry: tangents follow the uvs; mirrored uv seams split, kept tangents stay") {

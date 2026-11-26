@@ -78,8 +78,9 @@ u32 pack_octahedral(const Vec3& unit) {
 
 Vec3 unpack_octahedral(u32 packed) { return decode(from_snorm16(low16(packed)), from_snorm16(high16(packed))); }
 
-PackedVertex pack_vertex(const Vertex& vertex) {
+PackedVertex pack_vertex(const Vertex& vertex, u32 grow) {
     PackedVertex out{};
+    out.grow = grow;
     out.position[0] = vertex.position.x;
     out.position[1] = vertex.position.y;
     out.position[2] = vertex.position.z;
@@ -105,6 +106,95 @@ Vertex unpack_vertex(const PackedVertex& packed) {
     v.bitangent_sign = (high16(packed.tangent) & 1) != 0 ? -1.0f : 1.0f;
     v.uv = {packed.uv[0], packed.uv[1]};
     return v;
+}
+
+u32 pack_grow(const Vec3& grow) {
+    if (!finite(grow)) return 0;
+    const float len = length(grow);
+    if (!std::isfinite(len)) return 0; // (too long to measure)
+    const u32 q = static_cast<u32>(std::lround(std::min(len, k_most_grow) * 64.0f));
+    const Vec3 direction = unit_or(grow, Vec3{});
+    if (q == 0 || length_squared(direction) == 0.0f) return 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    octahedral(direction, x, y);
+    const auto snorm12 = [](float f) {
+        return static_cast<u32>(std::lround(std::clamp(f, -1.0f, 1.0f) * 2047.0f)) & 0xFFFu;
+    };
+    return snorm12(x) | (snorm12(y) << 12) | (q << 24);
+}
+
+Vec3 unpack_grow(u32 packed) {
+    const u32 q = packed >> 24;
+    if (q == 0) return {};
+    const auto from12 = [](u32 bits) {
+        const i32 v = static_cast<i32>(bits << 20) >> 20; // sign-extended
+        return std::max(static_cast<float>(v) / 2047.0f, -1.0f);
+    };
+    return decode(from12(packed & 0xFFFu), from12((packed >> 12) & 0xFFFu)) * (static_cast<float>(q) / 64.0f);
+}
+
+std::vector<u32> grow_directions(std::span<const Vertex> vertices, std::span<const Vertex> with) {
+    // Every vertex (the mesh's, then `with`) in the order of its place, so
+    // those at one place are a run. (-0 and +0 are one place.)
+    struct At {
+        u32 bits[3];
+        u32 vertex;
+    };
+    const usize count = vertices.size();
+    const auto vertex = [&](u32 i) -> const Vertex& { return i < count ? vertices[i] : with[i - count]; };
+    std::vector<At> order(count + with.size());
+    for (usize i = 0; i < order.size(); ++i) {
+        const Vec3& p = vertex(static_cast<u32>(i)).position;
+        const float place[3] = {p.x + 0.0f, p.y + 0.0f, p.z + 0.0f};
+        std::memcpy(order[i].bits, place, sizeof(place));
+        order[i].vertex = static_cast<u32>(i);
+    }
+    std::sort(order.begin(), order.end(), [](const At& a, const At& b) {
+        if (a.bits[0] != b.bits[0]) return a.bits[0] < b.bits[0];
+        if (a.bits[1] != b.bits[1]) return a.bits[1] < b.bits[1];
+        if (a.bits[2] != b.bits[2]) return a.bits[2] < b.bits[2];
+        return a.vertex < b.vertex;
+    });
+    std::vector<u32> out(count, 0);
+    std::vector<Vec3> normals;
+    std::vector<Vec3> found;
+    for (usize begin = 0; begin < order.size();) {
+        usize end = begin + 1;
+        while (end < order.size() && std::memcmp(order[end].bits, order[begin].bits, sizeof(order[begin].bits)) == 0) ++end;
+        // The normals there, in an order of their own (not the vertices':
+        // a part and the rest of its mesh must come to the same answer bit
+        // for bit, whichever of them is `vertices` and which `with`), each
+        // once (a uv seam repeats one).
+        found.clear();
+        for (usize i = begin; i < end; ++i) {
+            const Vec3 n = unit_or(vertex(order[i].vertex).normal, Vec3{});
+            if (length_squared(n) > 0.0f) found.push_back(n);
+        }
+        std::sort(found.begin(), found.end(), [](const Vec3& a, const Vec3& b) {
+            return a.x != b.x ? a.x < b.x : a.y != b.y ? a.y < b.y : a.z < b.z;
+        });
+        normals.clear();
+        for (const Vec3& n : found) {
+            bool known = false;
+            for (const Vec3& have : normals) known = known || dot(have, n) > 0.9999f;
+            if (!known) normals.push_back(n);
+        }
+        Vec3 sum{};
+        for (const Vec3& n : normals) sum = sum + n;
+        u32 packed = 0;
+        if (length(sum) > 1e-3f) {
+            const Vec3 direction = normalize_or_zero(sum);
+            float least = 1.0f;
+            for (const Vec3& n : normals) least = std::min(least, dot(direction, n));
+            packed = pack_grow(direction * (1.0f / std::clamp(least, 1.0f / k_most_grow, 1.0f)));
+        }
+        for (usize i = begin; i < end; ++i) {
+            if (order[i].vertex < count) out[order[i].vertex] = packed;
+        }
+        begin = end;
+    }
+    return out;
 }
 
 void generate_tangents(TriangleMesh& mesh, std::vector<SkinWeights>* weights, std::span<const u8> keep,

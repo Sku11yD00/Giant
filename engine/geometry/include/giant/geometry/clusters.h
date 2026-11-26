@@ -71,6 +71,10 @@ struct ClusterNode {
 
 struct ClusterMesh {
     std::vector<Vertex> vertices; // shared by every level
+    // The way each vertex grows where it is drawn thinner than a pixel
+    // (mesh.h's pack_grow), one per vertex; empty: none grow (skinned
+    // meshes, whose normals turn with the pose; the ground).
+    std::vector<u32> grow;
     std::vector<u32> indices;     // per cluster, into vertices
     std::vector<Cluster> clusters;
     std::vector<ClusterGroup> groups; // in increasing depth
@@ -88,7 +92,13 @@ struct ClusterMesh {
 // Vertices marked non-zero in `locked` (one per mesh vertex, or empty) keep
 // their place at every level: the edges of terrain tiles, which must meet
 // their neighbours' at any detail.
-ClusterMesh build_clusters(const TriangleMesh& mesh, std::span<const u8> locked = {});
+// `growing`: whether ClusterMesh::grow is made, and the vertices that count
+// with the mesh's own (grow_directions' `with`).
+struct Growing {
+    bool on = true;
+    std::span<const Vertex> with{};
+};
+ClusterMesh build_clusters(const TriangleMesh& mesh, std::span<const u8> locked = {}, const Growing& growing = {});
 
 // A skinned mesh's clusters, vertices merged only where their weights
 // and morph deltas match too. `weights` is one per ClusterMesh vertex;

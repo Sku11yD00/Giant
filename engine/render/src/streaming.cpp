@@ -203,7 +203,8 @@ bool GeometryStreamer::add(u32 mesh, const geometry::ClusterMesh& data, std::vec
             out.triangle_count = c.triangle_count;
             out.vertex_offset = static_cast<u32>(L.blob.size() - start);
             for (const u32 v : order) {
-                const geometry::PackedVertex packed = geometry::pack_vertex(data.vertices[v]);
+                const geometry::PackedVertex packed =
+                    geometry::pack_vertex(data.vertices[v], v < data.grow.size() ? data.grow[v] : 0u);
                 append(&packed, sizeof(packed));
             }
             out.triangle_offset = static_cast<u32>(L.blob.size() - start);

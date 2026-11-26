@@ -422,12 +422,16 @@ bool ShadowPages::for_pages_under(const DVec3& min, const DVec3& max, u32 levels
     }
     for (u32 level = 0; level < std::min(levels, m_desc.levels); ++level) {
         const double size = page_size(level);
+        // Casters are drawn grown by texels of the level (RenderSettings::
+        // grow_pixels, 2 at most, times the longest way a vertex grows, 2):
+        // the pages that far past the box hold some of it too.
+        const double past = k_grown_texels * texel_size(level);
         const Window& w = m_window[level];
         const i32 n = i32(k_pages_per_axis);
-        const i32 x0 = std::max(page_floor(lx0 / size), w.x);
-        const i32 y0 = std::max(page_floor(ly0 / size), w.y);
-        const i32 x1 = std::min(page_floor(lx1 / size), w.x + n - 1);
-        const i32 y1 = std::min(page_floor(ly1 / size), w.y + n - 1);
+        const i32 x0 = std::max(page_floor((lx0 - past) / size), w.x);
+        const i32 y0 = std::max(page_floor((ly0 - past) / size), w.y);
+        const i32 x1 = std::min(page_floor((lx1 + past) / size), w.x + n - 1);
+        const i32 y1 = std::min(page_floor((ly1 + past) / size), w.y + n - 1);
         for (i32 y = y0; y <= y1; ++y) {
             for (i32 x = x0; x <= x1; ++x) {
                 Page& p = page(level, slot_of(x, y));

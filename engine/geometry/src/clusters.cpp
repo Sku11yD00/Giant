@@ -306,8 +306,10 @@ ClusterMesh build(const TriangleMesh& source, std::span<const u8> locked, const 
 
 } // namespace
 
-ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locked) {
-    return build(source, locked, nullptr, nullptr, {}, nullptr, true);
+ClusterMesh build_clusters(const TriangleMesh& source, std::span<const u8> locked, const Growing& growing) {
+    ClusterMesh out = build(source, locked, nullptr, nullptr, {}, nullptr, true);
+    if (growing.on) out.grow = grow_directions(out.vertices, growing.with);
+    return out;
 }
 
 SkinnedClusterMesh build_skinned_clusters(const SkinnedTriangleMesh& source, bool levels, std::span<const u8> locked) {

@@ -117,11 +117,25 @@ Drawn drawn_cluster(uint id) {
 }
 
 // Where a vertex is drawn: swayed by the wind (resolve.slang moves it the
-// same way, so the triangle it finds is the one drawn).
+// same way, so the triangle it finds is the one drawn), and grown across
+// the screen so that nothing is thinner than a pixel (common.slang's
+// grown). Only x and y move, by what the grown point's would be: the depth
+// and w stay the vertex's own, so a grown thing is no nearer the eye, and
+// a flat face's every point moves by its own depth's half pixel however
+// large the face and wherever its corners are (the move is linear in the
+// place: clipping and interpolation are exact, also across the eye's
+// plane), so a floor does not rise under what stands on it. (In a shadow
+// map a face the sun grazes is in effect a little nearer the sun for
+// having slid across it: architecture.md, "Growing".)
 float4 clip_position(Frame f, Drawn d, Swayer w, uint local_vertex) {
     const float3 p = to_world(d.inst, cluster_position(read_buffer(f.pool), d.base, d.cluster, local_vertex));
-    const float3 moved = p + wind_offset(f, w, p);
-    return transform(f.view_proj[0], f.view_proj[1], f.view_proj[2], f.view_proj[3], float4(moved, 1.0));
+    const float3 swayed = p + wind_offset(f, w, p);
+    const float4 clip = transform(f.view_proj[0], f.view_proj[1], f.view_proj[2], f.view_proj[3], float4(swayed, 1.0));
+    const float3 out_by = grown(d.inst, cluster_grow(read_buffer(f.pool), d.base, d.cluster, local_vertex),
+                                grow_by(f, depth_ahead(f, swayed)));
+    const float4 moved = transform(f.view_proj[0], f.view_proj[1], f.view_proj[2], f.view_proj[3],
+                                   float4(swayed + out_by, 1.0));
+    return float4(moved.xy, clip.zw);
 }
 
 // A lamp's shadow face (local_size set): whether the cluster is inside the
