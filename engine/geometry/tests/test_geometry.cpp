@@ -477,7 +477,7 @@ GIANT_TEST("geometry: glTF's default material is counted; lines do not count; sp
 }
 
 GIANT_TEST("geometry: vertices pack to 32 bytes and back within a hair") {
-    GIANT_CHECK(sizeof(PackedVertex) == 32 && k_packed_vertex_bytes == 32);
+    static_assert(sizeof(PackedVertex) == 32 && k_packed_vertex_bytes == 32);
     // Directions over the sphere, both hemispheres and the axes.
     std::vector<Vec3> dirs = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
     for (int i = 0; i < 200; ++i) {
