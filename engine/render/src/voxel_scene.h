@@ -95,6 +95,11 @@ struct VoxelStats {
     // sent back to them twice for its meshes, or one over many that the main thread met while
     // helping or with the workers starved.
     u32 begun_here = 0;
+    // Of cpu_ms (which is time passed, not time run), what the main thread spent not running:
+    // waiting on something or kept off its core. And what passed while it handed bricks to the
+    // worker threads (which takes no lock: next to nothing, unless a woken worker took its core).
+    float stalled_ms = 0.0f;
+    float handoff_ms = 0.0f;
 };
 
 // What the voxel world holds at a point, on one level.
@@ -462,6 +467,7 @@ private:
         bool have = false;
     };
     void submit_batch();
+    void hand_over(JobSystem& jobs, std::function<void()> job);
     // A worker, or the main thread helping (`here`): false if another has it.
     bool work(Build& build, bool here);
     // With a share of the scene held (one after another, for a brick over many): what is over the
@@ -630,6 +636,7 @@ private:
     bool m_main_thread_helps = true;
     u64 m_prepared_on_workers = 0;
     u64 m_begun_here = 0;
+    double m_handoff_ms = 0.0; // this update's (VoxelStats::handoff_ms)
     u64 m_sent_back = 0;
     u32 m_most_in_a_brick = 0;
     u32 m_most_water_in_a_brick = 0;

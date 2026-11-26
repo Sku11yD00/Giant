@@ -3,6 +3,7 @@
 #include "giant_test.h"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <numeric>
 #include <thread>
@@ -130,4 +131,130 @@ GIANT_TEST("jobs: parallel_for inside a job") {
     });
     jobs.wait(group);
     GIANT_CHECK(sum.load() == 1000);
+}
+
+namespace {
+// Until `done` (or five seconds: a job never run fails the check after, rather than hang).
+template <typename Done> void until(const Done& done) {
+    const auto start = std::chrono::steady_clock::now();
+    while (!done() && std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+} // namespace
+
+// submit() pushes onto a list no lock guards: what one thread submits is still run in the
+// order it submitted it (one worker, and nobody helping).
+GIANT_TEST("jobs: one thread's jobs run in the order it submitted them") {
+    WaitGroup group;
+    std::vector<int> order; // (the one worker's)
+    std::atomic<int> ran{0};
+    JobSystem jobs(1); // (last: destroyed first, whatever a check below finds, so no job outlives what it writes)
+    for (int round = 0; round < 20; ++round) {
+        for (int i = 0; i < 100; ++i) {
+            jobs.submit(group, [&order, &ran, n = round * 100 + i] {
+                order.push_back(n);
+                ran.fetch_add(1);
+            });
+        }
+        if (round % 4 == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); // (the worker asleep for some, busy for others)
+        }
+    }
+    until([&ran] { return ran.load() == 2000; });
+    GIANT_CHECK(ran.load() == 2000);
+    until([&group] { return group.done(); });
+    GIANT_CHECK(group.done());
+    bool in_order = order.size() == 2000;
+    for (usize i = 0; in_order && i < order.size(); ++i) {
+        in_order = order[i] == static_cast<int>(i);
+    }
+    GIANT_CHECK(in_order);
+}
+
+// A worker with nothing to do sleeps; a job submitted then wakes one (nobody calls wait).
+GIANT_TEST("jobs: a sleeping worker is woken by a job") {
+    WaitGroup group;
+    std::atomic<int> ran{0};
+    JobSystem jobs(2); // (last: destroyed first)
+    for (int round = 0; round < 50; ++round) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(round % 3)); // (asleep, or about to be)
+        jobs.submit(group, [&ran] { ran.fetch_add(1); });
+        until([&ran, round] { return ran.load() == round + 1; });
+        GIANT_CHECK(ran.load() == round + 1);
+    }
+}
+
+GIANT_TEST("jobs: jobs submitted from many threads at once all run, each once") {
+    JobSystem jobs(3);
+    constexpr int k_threads = 6;
+    constexpr int k_each = 3000;
+    std::vector<std::atomic<int>> hits(k_threads * k_each);
+    WaitGroup group;
+    std::vector<std::thread> submitters;
+    for (int t = 0; t < k_threads; ++t) {
+        submitters.emplace_back([&jobs, &hits, &group, t] {
+            for (int i = 0; i < k_each; ++i) {
+                jobs.submit(group, [&hits, n = t * k_each + i] { hits[static_cast<usize>(n)].fetch_add(1); });
+            }
+        });
+    }
+    for (std::thread& t : submitters) {
+        t.join();
+    }
+    jobs.wait(group);
+    bool all_once = true;
+    for (const std::atomic<int>& h : hits) {
+        all_once = all_once && h.load() == 1;
+    }
+    GIANT_CHECK(all_once);
+}
+
+// Destroying the system: jobs that submit more as they run are run too, and theirs.
+GIANT_TEST("jobs: destroying the system runs what its last jobs submit") {
+    std::atomic<int> ran{0};
+    WaitGroup group;
+    {
+        JobSystem jobs(2);
+        for (int i = 0; i < 50; ++i) {
+            jobs.submit(group, [&jobs, &group, &ran] {
+                ran.fetch_add(1);
+                jobs.submit(group, [&jobs, &group, &ran] {
+                    ran.fetch_add(1);
+                    jobs.submit(group, [&ran] { ran.fetch_add(1); });
+                });
+            });
+        }
+    }
+    GIANT_CHECK(ran.load() == 150);
+    GIANT_CHECK(group.done());
+}
+
+// A thread waiting on its group sleeps on the same signal as the workers: woken for a job
+// (which it then runs or finds gone) or for another group, it still sees its own finish.
+GIANT_TEST("jobs: waiters on different groups each see their own finish") {
+    std::atomic<int> ran{0};
+    JobSystem jobs(1); // (last: destroyed first)
+    std::vector<std::thread> waiters;
+    for (int t = 0; t < 4; ++t) {
+        waiters.emplace_back([&jobs, &ran, t] {
+            for (int round = 0; round < 200; ++round) {
+                WaitGroup group;
+                for (int i = 0; i <= (round + t) % 3; ++i) {
+                    jobs.submit(group, [&ran] { ran.fetch_add(1); });
+                }
+                jobs.wait(group);
+            }
+        });
+    }
+    for (std::thread& t : waiters) {
+        t.join();
+    }
+    int expected = 0;
+    for (int t = 0; t < 4; ++t) {
+        for (int round = 0; round < 200; ++round) {
+            expected += (round + t) % 3 + 1;
+        }
+    }
+    GIANT_CHECK(ran.load() == expected);
 }

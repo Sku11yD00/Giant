@@ -6146,7 +6146,25 @@ Done in N2 part 2:
   PC: the one slow frame left in a flight at 90 m/s (`begun_here`
   counted them; a flight begins none now, and the brick part of the
   voxel world's frame took 3.6 ms at worst in flights there, null
-  device, where it reached 13). The main
+  device, where it reached 13). Handing a brick's batch to the workers
+  takes no lock: `JobSystem::submit` pushes the job onto a list with an
+  atomic compare-and-swap and wakes a sleeping thread, and the threads
+  that run jobs (the workers, and a thread in `wait` or `parallel_for`)
+  take the list in under the queue's lock, held for a few pointers'
+  work: the job is moved out and its node freed after. Behind the queue's
+  lock, as it was, the main thread stood still whenever a worker holding
+  it was off its core: up to 9 ms of a frame on the development machine
+  (4 cores, null device), and the likely cause of a 13 ms frame at
+  30 m/s on an RTX 5090 PC whose voxel step passed 7.6 ms with 7.1 of
+  them not running (not proven there). On Windows a thread woken from
+  a wait is boosted for a moment, and with every core busy may take the
+  core of the thread that woke it: the job workers turn that boost off
+  (`no_wake_boost_for_this_thread`) and the frame's thread runs one
+  step ahead of them (`prefer_this_thread`, above normal; not proven
+  to matter there either). `stalled_ms` and `handoff_ms` in the frame's
+  voxel figures say what of its time the main thread spent not running,
+  and submitting bricks; the game gate prints them for the frame
+  sampled in which the voxel world took longest. The main
   thread still begins every brick with `set_preparing_on_workers(false)`
   (tests): a few hundred instances copied between looks at the clock,
   one over at most 16 instances and water triangles built there too

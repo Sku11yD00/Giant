@@ -7,13 +7,17 @@
 //   jobs.wait(done);                      // the waiting thread helps run jobs
 //
 // Jobs must not throw. Destroying the JobSystem runs every job still queued.
+//
+// submit() never waits for another thread: the job is pushed onto a list no lock guards and
+// one sleeping thread is woken. A frame's thread hands work over many times a frame; behind
+// a lock it shared with the workers, it stood still for as long as a worker that held the
+// lock was kept off its core (milliseconds, on a busy machine). wait() and parallel_for()
+// do take the queue's lock, as the workers do, for a few pointers' work.
 #pragma once
 
 #include "giant/core/types.h"
 
 #include <atomic>
-#include <condition_variable>
-#include <deque>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -69,12 +73,28 @@ private:
 
     bool try_run_one();
     void finish(WaitGroup& group);
-    void worker_loop(std::stop_token stop);
+    void worker_loop();
+    void stop_workers();
+    void signal(bool all);
 
-    std::mutex m_mutex; // protects m_queue
-    std::condition_variable_any m_wake; // a job was queued or a group finished
-    std::deque<Job> m_queue;
-    std::vector<std::jthread> m_workers;
+    // A submitted job. Posted ones are a list, the newest first, pushed by any thread without
+    // a lock; whichever thread next looks for work takes the whole list (under m_mutex) and
+    // turns it round: the queue, the oldest first, through the same `next`. Made by submit
+    // and freed by the thread that runs it, outside the lock.
+    struct Posted {
+        Job job;
+        Posted* next;
+    };
+    std::atomic<Posted*> m_posted{nullptr};
+    // Counts every job posted and every group finished; a thread with nothing to do sleeps
+    // until it changes from what it read before it looked.
+    std::atomic<u32> m_signal{0};
+    std::atomic<bool> m_stop{false};
+    // Protects the queue: taken by the threads that run jobs (the workers, and a thread in
+    // wait or parallel_for), for a few pointers' work; never to submit one.
+    std::mutex m_mutex;
+    Posted* m_first = nullptr; // the queue: the oldest taken in and not yet run
+    std::vector<std::thread> m_workers;
 };
 
 } // namespace giant

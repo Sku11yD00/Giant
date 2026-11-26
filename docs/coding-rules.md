@@ -7,8 +7,10 @@ person can read cold, and that sanitizers can check.
 
 - No owning raw pointers. Own with values, `std::unique_ptr`, or engine
   handles. Raw pointers and references are for borrowing only.
-- No `new`/`delete` outside allocators. The one exception is a deliberately
-  leaked singleton that must outlive static destruction (the log).
+- No `new`/`delete` outside allocators. The exceptions: a deliberately
+  leaked singleton that must outlive static destruction (the log), and the
+  job system's list nodes (`JobSystem::submit` makes one a job, pushed with
+  no lock; the thread that runs the job frees it).
 - Hot paths use plain arrays of structs indexed by handles, not object graphs.
 
 ## Errors

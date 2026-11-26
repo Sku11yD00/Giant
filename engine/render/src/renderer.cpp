@@ -4964,6 +4964,8 @@ void Renderer::copy_streaming_stats() {
     m_stats.voxel_find_ms = v.find_ms;
     m_stats.voxel_bricks_ms = v.bricks_ms;
     m_stats.voxel_begun_here = v.begun_here;
+    m_stats.voxel_stalled_ms = v.stalled_ms;
+    m_stats.voxel_handoff_ms = v.handoff_ms;
     m_stats.far_field = m_far_field;
     m_stats.far_culled = m_far_culled;
     const ShadowStats& sh = m_shadows->stats();

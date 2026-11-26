@@ -445,6 +445,10 @@ private:
 int run(const Options& options) {
     // Before anything logs, so the AI can read start-up messages too.
     const LogHistory log_history;
+    // This thread makes the frames: a step ahead of the workers it wakes (rule 9; Windows).
+    if (prefer_this_thread()) {
+        log_info("editor", "the main thread runs a step ahead of the worker threads");
+    }
 
     platform::WindowDesc window_desc;
     window_desc.title = options.game.empty() ? "Giant Editor" : options.game_name.empty() ? "Giant" : options.game_name;

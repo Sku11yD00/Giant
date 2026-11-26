@@ -4,6 +4,7 @@
 
 #include "giant/core/assert.h"
 #include "giant/core/log.h"
+#include "giant/core/thread_time.h"
 #include "gpu_layout.h"
 
 #include <algorithm>
@@ -1896,12 +1897,21 @@ void VoxelScene::submit_batch() {
         return;
     }
     JobSystem& jobs = next_workers(static_cast<u32>(m_batch.size()));
-    jobs.submit(m_build_group, [this, batch = std::move(m_batch)] {
+    hand_over(jobs, [this, batch = std::move(m_batch)] {
         for (const std::shared_ptr<Build>& b : batch) {
             work(*b, false);
         }
     });
     m_batch.clear();
+}
+
+void VoxelScene::hand_over(JobSystem& jobs, std::function<void()> job) {
+    // (Timed: the one place the main thread submits to the workers; JobSystem::submit takes no
+    // lock. Not in it: making the job, before the call, and the workers woken as the scene is
+    // let go after a change (Writing): both are in stalled_ms if the thread stood still.)
+    const auto before = std::chrono::steady_clock::now();
+    jobs.submit(m_build_group, std::move(job));
+    m_handoff_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - before).count();
 }
 
 bool VoxelScene::work(Build& b, bool here) {
@@ -2224,7 +2234,7 @@ bool VoxelScene::gather(const MeshLookup& meshes, const std::function<bool()>& o
         m_inline_ms += (took - m_inline_ms) * 0.125;
     } else {
         b.queued_at = m_updates;
-        next_workers(1).submit(m_build_group, [job = m_gathering] { job->run(); });
+        hand_over(next_workers(1), [job = m_gathering] { job->run(); });
     }
     m_gathering.reset();
     return true;
@@ -2375,6 +2385,7 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
                         std::span<const CellRange> cells, std::span<const Material> materials, u64 meshes_version,
                         const MeshLookup& meshes, float budget_ms) {
     using clock = std::chrono::steady_clock;
+    const double ran_before = thread_cpu_ms(); // (first: its first call in a program takes 5 ms on Windows)
     const auto start = clock::now();
     m_stats.built = 0;
     m_stats.uploaded = 0;
@@ -2382,6 +2393,8 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     m_stats.looks = 0;
     m_stats.shift_ms = m_stats.changes_ms = m_stats.find_ms = m_stats.bricks_ms = 0.0f;
     m_stats.begun_here = 0;
+    m_stats.stalled_ms = m_stats.handoff_ms = 0.0f;
+    m_handoff_ms = 0.0;
     const u64 begun_before = m_begun_here;
     m_placed.clear();
     m_rebuilt.clear();
@@ -2742,7 +2755,10 @@ void VoxelScene::update(rhi::CommandList& cmd, const DVec3& camera, std::span<co
     m_stats.overflow = m_stats.missing > 0;
     m_stats.begun_here = static_cast<u32>(m_begun_here - begun_before);
     part(m_stats.bricks_ms);
-    m_stats.cpu_ms = static_cast<float>(elapsed());
+    const double passed = elapsed();
+    m_stats.cpu_ms = static_cast<float>(passed);
+    m_stats.stalled_ms = static_cast<float>(std::max(0.0, passed - (thread_cpu_ms() - ran_before)));
+    m_stats.handoff_ms = static_cast<float>(m_handoff_ms);
 }
 
 void VoxelScene::idle() {
@@ -2763,6 +2779,7 @@ void VoxelScene::idle() {
     m_stats.cpu_ms = 0.0f;
     m_stats.shift_ms = m_stats.changes_ms = m_stats.find_ms = m_stats.bricks_ms = 0.0f;
     m_stats.begun_here = 0;
+    m_stats.stalled_ms = m_stats.handoff_ms = 0.0f;
 }
 
 usize VoxelScene::longest_queue() const {

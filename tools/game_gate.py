@@ -172,7 +172,10 @@ def flight_text(speed, seconds, times, behind, caught_up, last):
     took = "" if not slowest else (
         f"; at its slowest it took the main thread {slowest['cpu_ms']:.1f} ms of a frame (the windows following the "
         f"camera {slowest['shift_ms']:.1f}, the scene's changes {slowest['changes_ms']:.1f}, finding bricks "
-        f"{slowest['find_ms']:.1f}, bricks {slowest['bricks_ms']:.1f} with {slowest['begun_here']} begun there)")
+        f"{slowest['find_ms']:.1f}, bricks {slowest['bricks_ms']:.1f} with {slowest['begun_here']} begun there" +
+        # (Editors that report it: what of the whole the thread spent not running, and handing bricks to the workers.)
+        (f"; of the whole, the thread was not running for {slowest['stalled_ms']:.1f} and spent "
+         f"{slowest.get('handoff_ms', 0.0):.1f} handing bricks to the workers" if "stalled_ms" in slowest else "") + ")")
     return (f"flying at {speed:.0f} m/s for {seconds:.0f} s: {describe(times)}; the voxel world's work pending "
             f"at most {behind['most']} ({behind['end']} as it stopped), {after}; it built "
             f"{behind['built'] / samples:.0f} bricks of {behind['marked'] / samples:.0f} marked a frame sampled, and "
