@@ -939,6 +939,10 @@ struct RenderStats {
     float voxel_find_ms = 0.0f;
     float voxel_bricks_ms = 0.0f;
     u32 voxel_begun_here = 0;
+    // Of voxel_cpu_ms, what the main thread spent not running (waiting, or kept off its core),
+    // and what passed while it handed bricks to the worker threads.
+    float voxel_stalled_ms = 0.0f;
+    float voxel_handoff_ms = 0.0f;
     // The far field (this frame, on the CPU).
     bool far_field = false; // on this frame
     u32 far_culled = 0;     // instances left to the voxel world

@@ -46,6 +46,14 @@ double thread_cpu_ms() {
     }
     return static_cast<double>(cycles) / rate;
 }
+
+bool prefer_this_thread() {
+    return SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) != 0;
+}
+
+bool no_wake_boost_for_this_thread() {
+    return SetThreadPriorityBoost(GetCurrentThread(), TRUE) != 0; // (TRUE: boosts off)
+}
 #else
 double thread_cpu_ms() {
     timespec t{};
@@ -53,6 +61,14 @@ double thread_cpu_ms() {
         return 0.0;
     }
     return static_cast<double>(t.tv_sec) * 1000.0 + static_cast<double>(t.tv_nsec) / 1e6;
+}
+
+bool prefer_this_thread() {
+    return false;
+}
+
+bool no_wake_boost_for_this_thread() {
+    return false;
 }
 #endif
 

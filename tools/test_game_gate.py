@@ -46,6 +46,11 @@ def main():
     text = flight_text(90.0, 10.0, times, dict(behind, slowest=slowest), 1.26, {})
     check("at its slowest it took the main thread 3.5 ms of a frame" in text and "the scene's changes 2.0" in text and
           "bricks 1.2 with 1 begun there" in text, f"its slowest frame, and on what: {text}")
+    check("not running" not in text, f"an editor that does not report the stall: {text}")
+    text = flight_text(90.0, 10.0, times, dict(behind, slowest=dict(slowest, stalled_ms=2.12, handoff_ms=0.04)), 1.26, {})
+    check("bricks 1.2 with 1 begun there; of the whole, the thread was not running for 2.1 and spent 0.0 handing "
+          "bricks to the workers)" in text,
+          f"its slowest frame's stall: {text}")
     check("at its slowest" not in flight_text(90.0, 10.0, times, dict(behind, slowest=None), 1.26, {}), "none sampled: not said")
     check("caught up 0.0 s after stopping;" in flight_text(90.0, 10.0, times, behind, 0.0, {}), "nothing came last if nothing came")
     check("not caught up (voxel work 7)" in flight_text(90.0, 10.0, times, dict(behind, samples=0), None, {"voxel work": 7}),

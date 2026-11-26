@@ -731,7 +731,8 @@ GIANT_TEST("voxel scene: going there and back with bricks waiting builds each on
     b.voxels->idle();
     const VoxelStats idle = b.voxels->stats();
     GIANT_CHECK(idle.cpu_ms == 0.0f && idle.shift_ms == 0.0f && idle.changes_ms == 0.0f && idle.find_ms == 0.0f &&
-                idle.bricks_ms == 0.0f && idle.begun_here == 0 && idle.marked == 0);
+                idle.bricks_ms == 0.0f && idle.begun_here == 0 && idle.marked == 0 && idle.stalled_ms == 0.0f &&
+                idle.handoff_ms == 0.0f);
 }
 
 // Where a frame's time went adds up to the time it took.
@@ -739,6 +740,7 @@ GIANT_TEST("voxel scene: the parts of a frame's time add up to it") {
     Bench b(4096);
     GIANT_CHECK(b.voxels->init());
     add_street(b);
+    bool handed = false;
     for (int frame = 0; frame < 30; ++frame) {
         b.camera.x += 2.0;
         b.step(frame % 2 == 0 ? 0.5f : 1000.0f);
@@ -746,7 +748,12 @@ GIANT_TEST("voxel scene: the parts of a frame's time add up to it") {
         const float parts = s.shift_ms + s.changes_ms + s.find_ms + s.bricks_ms;
         GIANT_CHECK(s.shift_ms >= 0.0f && s.changes_ms >= 0.0f && s.find_ms >= 0.0f && s.bricks_ms >= 0.0f);
         GIANT_CHECK(parts <= s.cpu_ms + 0.001f && parts >= s.cpu_ms - 0.05f - 0.01f * s.cpu_ms);
+        // What it spent not running, and handing bricks to the workers, is some of that time.
+        GIANT_CHECK(s.stalled_ms >= 0.0f && s.stalled_ms <= s.cpu_ms);
+        GIANT_CHECK(s.handoff_ms >= 0.0f && s.handoff_ms <= s.cpu_ms + 0.001f);
+        handed = handed || s.handoff_ms > 0.0f;
     }
+    GIANT_CHECK(handed); // (the workers prepare the bricks: handing them over was timed)
 }
 
 // Most bricks under an instance's bounds hold none of its triangles (the air over a slope and the

@@ -246,6 +246,8 @@ GIANT_TEST("editor: render settings are view state") {
     GIANT_CHECK(!f.state.render_settings.antialiasing && !f.state.render_settings.specular_antialiasing);
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"].contains("post_draws"));
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"].contains("overflow"));
+    GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["voxels"].contains("stalled_ms"));
+    GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["voxels"].contains("handoff_ms"));
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["streaming"].contains("pool_bytes"));
     GIANT_CHECK(f.run("get_render_settings").value["last_frame"]["particles"].contains("alive"));
     const auto unseen = f.run("set_render_settings", {{"particles", false}});
