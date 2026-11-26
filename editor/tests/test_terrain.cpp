@@ -176,6 +176,7 @@ GIANT_TEST("terrain meshes: built off the main thread, a change rebuilds its nei
         for (i32 x = 0; x < 3; ++x) t.set({x, z}, Terrain::Heights(64, 1.0f));
     }
     TerrainMeshes m(nullptr);
+    m.start_ms_per_frame = TerrainMeshes::k_loading_start_ms; // (counts are checked here; the time has a test of its own)
     m.update(t);
     GIANT_CHECK(m.stats().building == 9 && m.stats().tiles == 0);
     m.finish(t);
@@ -277,6 +278,7 @@ GIANT_TEST("terrain meshes: new tiles settle before building; changed ones do no
     t.set_samples(8);
     TerrainMeshes m(nullptr);
     m.settle_frames = 3;
+    m.start_ms_per_frame = TerrainMeshes::k_loading_start_ms; // (counts are checked here; the time has a test of its own)
     m.update(t); // a terrain new to it: everything is looked at at once
     // A row of tiles arriving one a frame (a world streaming in): each builds once.
     for (i32 x = 0; x < 6; ++x) {
@@ -302,13 +304,142 @@ GIANT_TEST("terrain meshes: new tiles settle before building; changed ones do no
     m.finish(t);
     GIANT_CHECK(m.stats().tiles == 106);
     m.drops_per_frame = 16;
+    m.uploads_per_frame = 0; // (the first row's tiles are built again, their neighbours gone: not swapped in meanwhile)
+    m.take_changed();
     for (i32 z = 1; z < 11; ++z) {
         for (i32 x = 0; x < 10; ++x) t.remove({x, z});
     }
     m.update(t);
-    GIANT_CHECK(m.stats().tiles == 106 - 16);
+    // (Not drawn from the frame they went in; their meshes freed sixteen a frame.)
+    GIANT_CHECK(m.stats().tiles == 6 && m.stats().gone == 100 - 16 && !m.drawn({3, 3}) && m.drawn({3, 0}));
+    {
+        const std::vector<CellCoord> changed = m.take_changed();
+        GIANT_CHECK(std::count(changed.begin(), changed.end(), CellCoord{3, 3}) == 1); // (said once, as it went)
+    }
+    m.update(t);
+    GIANT_CHECK(m.stats().gone == 100 - 32 && m.take_changed().empty());
+    // One back before its mesh is freed is drawn again as it was.
+    m.uploads_per_frame = 8;
+    m.take_changed();
+    t.set({9, 10}, Terrain::Heights(64, 1.0f));
+    m.start_ms_per_frame = 0.0f; // (one mesh freed a frame, one tile looked at)
+    m.drops_per_frame = 1;
+    m.update(t);
+    GIANT_CHECK(m.drawn({9, 10}) && m.stats().tiles == 7);
+    m.drops_per_frame = 16;
     m.finish(t);
-    GIANT_CHECK(m.stats().tiles == 6);
+    GIANT_CHECK(m.stats().tiles == 7 && m.stats().gone == 0 && m.drawn({9, 10}));
+    t.remove({9, 10});
+    m.finish(t);
+    GIANT_CHECK(m.stats().tiles == 6 && m.stats().gone == 0);
+    // A whole terrain put in its place (an undo, a scene opened) without some of the tiles: those
+    // are let go in the first update, not when the queue gets to them.
+    Terrain other = t;
+    other.remove({0, 0});
+    other.remove({1, 0});
+    m.drops_per_frame = 0;
+    m.update(other);
+    GIANT_CHECK(m.last_changes().all && !m.drawn({0, 0}) && !m.drawn({1, 0}) && m.drawn({2, 0}));
+    GIANT_CHECK(m.stats().tiles == 4 && m.stats().gone == 2);
+    // ...and the first terrain back before they are freed: drawn again.
+    m.update(t);
+    GIANT_CHECK(m.last_changes().all && m.drawn({0, 0}) && m.drawn({1, 0}) && m.stats().gone == 0);
+    m.drops_per_frame = 16;
+    m.finish(t);
+    GIANT_CHECK(m.stats().tiles == 6 && m.stats().gone == 0 && m.stats().building == 0);
+
+}
+
+// Looking at queued tiles, starting builds and freeing the meshes of tiles gone are held to a
+// frame's time as well as to their counts: 64 looks, or 64 meshes freed, in one frame were the
+// slowest part of a frame at speed.
+GIANT_TEST("terrain meshes: looks, starts and drops are budgeted by time; one of each always comes") {
+    Terrain t;
+    t.set_samples(8);
+    for (i32 z = 0; z < 6; ++z) {
+        for (i32 x = 0; x < 6; ++x) t.set({x, z}, Terrain::Heights(64, 1.0f));
+    }
+    TerrainMeshes m(nullptr);
+    m.finish(t);
+    GIANT_CHECK(m.stats().tiles == 36 && m.stats().building == 0);
+    GIANT_CHECK(m.start_ms_per_frame == TerrainMeshes::k_start_ms); // (play's, unless told)
+    double clock_ms = 0.0;
+    m.clock = [&clock_ms] { return clock_ms += 0.2; }; // (each look at the clock is 0.2 ms later)
+    m.uploads_per_frame = 0;                           // (built ones wait: the counts below stay put)
+    m.builds_per_frame = m.builds_in_flight = 30;
+    // Every tile changed: 36 to look at. With 0.5 ms, three are looked at and started (one
+    // always, then while under the time), not thirty.
+    for (auto& [c, h] : t.tiles()) t.modify(c)->at(9) = 2.0f;
+    m.update(t);
+    GIANT_CHECK(m.stats().in_flight == 3 && m.stats().building == 36);
+    // No time at all: still one a frame.
+    m.start_ms_per_frame = 0.0f;
+    m.update(t);
+    GIANT_CHECK(m.stats().in_flight == 4);
+    m.update(t);
+    GIANT_CHECK(m.stats().in_flight == 5);
+    // Behind a loading screen: as many as the counts allow.
+    m.set_budgets(true, 30);
+    GIANT_CHECK(m.start_ms_per_frame == TerrainMeshes::k_loading_start_ms);
+    m.uploads_per_frame = 0;
+    m.update(t);
+    GIANT_CHECK(m.stats().in_flight - m.stats().arrived == 30); // (on the workers: those built meanwhile hold no place)
+    // finish() waits for no clock, and leaves the budget as it was.
+    m.start_ms_per_frame = 0.0f;
+    m.finish(t);
+    GIANT_CHECK(m.stats().building == 0 && m.stats().tiles == 36 && m.start_ms_per_frame == 0.0f);
+
+    // Every tile gone: none is drawn from that frame on, and 36 meshes are to be freed, for half
+    // the time: with 0.5 ms two a frame (the second reading is past 0.25), with none one, then the rest.
+    m.take_changed();
+    for (i32 z = 0; z < 6; ++z) {
+        for (i32 x = 0; x < 6; ++x) t.remove({x, z});
+    }
+    m.start_ms_per_frame = 0.5f;
+    m.update(t);
+    GIANT_CHECK(m.stats().tiles == 0 && m.stats().gone == 34 && m.take_changed().size() == 36);
+    m.start_ms_per_frame = 0.0f;
+    m.update(t);
+    GIANT_CHECK(m.stats().gone == 33);
+    m.set_budgets(false, TerrainMeshes::k_per_frame); // (play's again: 0.5 ms)
+    GIANT_CHECK(m.start_ms_per_frame == TerrainMeshes::k_start_ms);
+    m.update(t);
+    GIANT_CHECK(m.stats().gone == 31);
+    m.start_ms_per_frame = TerrainMeshes::k_loading_start_ms;
+    m.update(t);
+    GIANT_CHECK(m.stats().gone == 0 && m.stats().building == 0 && m.take_changed().empty());
+    {
+        // The part's time by the same clock: its first reading, one after each of the two
+        // freed, and the last.
+        m.start_ms_per_frame = 0.5f;
+        for (i32 x = 0; x < 6; ++x) t.set({x, 0}, Terrain::Heights(64, 1.0f));
+        m.finish(t);
+        for (i32 x = 0; x < 6; ++x) t.remove({x, 0});
+        m.update(t);
+        GIANT_CHECK(m.stats().gone == 4);
+        GIANT_CHECK(std::abs(m.last_parts_ms().starts - 0.6f) < 0.01f);
+        m.finish(t);
+    }
+    // Entries passed over (tiles settling) are no looks, yet the clock is read every 64 of them:
+    // 70 new tiles, none ready to be looked at, and the part's time is three readings' (0.4).
+    m.settle_frames = 1000;
+    for (i32 x = 0; x < 70; ++x) t.set({x, 20}, Terrain::Heights(64, 1.0f));
+    m.update(t);
+    GIANT_CHECK(m.stats().in_flight == 0 && m.stats().building == 70);
+    GIANT_CHECK(std::abs(m.last_parts_ms().starts - 0.4f) < 0.01f);
+    // ...and with the time up from passing over alone, the first tile ready is still looked at.
+    m.start_ms_per_frame = 0.0f;
+    m.settle_frames = 0;
+    t.set({0, 40}, Terrain::Heights(64, 1.0f)); // (behind the seventy in the queue, and ready at once)
+    m.update(t);
+    GIANT_CHECK(m.stats().in_flight == 1);
+    m.finish(t);
+    GIANT_CHECK(m.stats().tiles == 71 && m.stats().gone == 0 && m.stats().building == 0);
+    // The share for a frame's length: play's at 120 and 60 a second, 4% of a longer frame, never over 2 ms.
+    GIANT_CHECK(TerrainMeshes::start_ms_for(8.33f) == 0.5f && std::abs(TerrainMeshes::start_ms_for(16.7f) - 0.668f) < 0.001f);
+    GIANT_CHECK(std::abs(TerrainMeshes::start_ms_for(33.3f) - 1.332f) < 0.001f && TerrainMeshes::start_ms_for(500.0f) == 2.0f);
+    GIANT_CHECK(TerrainMeshes::start_ms_for(0.0f) == 0.5f && TerrainMeshes::start_ms_for(-1.0f) == 0.5f &&
+                TerrainMeshes::start_ms_for(std::numeric_limits<float>::quiet_NaN()) == 0.5f);
 }
 
 GIANT_TEST("terrain meshes: a tile changed while it builds is drawn with its newest heights") {

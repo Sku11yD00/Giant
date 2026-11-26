@@ -1009,7 +1009,20 @@ cut into tiles, one per world cell, kept in `Scene::terrain`:
   heights is kept and nothing compares them. A tile weighs samples^2 / 64
   entities against `entities_per_frame` (64 at 64 samples), and at most
   `unloads_per_frame` cells (128) go in one frame, the rest in the frames
-  after; their meshes are freed `drops_per_frame` (64) a frame. A tile new
+  after. A tile gone is not drawn from the update that sees it go (it
+  is let go: `drawn` is false and the far ground takes its place), and
+  its mesh is freed in its turn from a list of its own, at most
+  `drops_per_frame` (64) a frame; one back before then is drawn again
+  as it was. Freeing those meshes, looking at queued tiles (a copy and
+  a hash of the tile's heights each, up to 64 a frame) and starting
+  builds share `start_ms_per_frame`: 0.5 ms in play at 120 frames a
+  second, 4% of a longer frame up to 2 ms (`start_ms_for`), no limit
+  behind a loading screen or round a view that jumped. Meshes are freed
+  for half of it, then tiles looked at until it is up; the clock is
+  read after each, and the first mesh freed and the first look always
+  come. The scan of the queue ends with the time. Before, 64 looks or
+  64 meshes freed landing in one frame were the slowest part of a frame
+  in a flight on an RTX 5090 PC (`terrain/starts`, 4 to 5 ms). A tile new
   to `TerrainMeshes` waits `settle_frames` (6) with its neighbours before
   it is built, so a burst of tiles (a world opening) builds each once
   (changes to tiles already there do not wait). Flying, a tile at the
