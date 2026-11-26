@@ -55,6 +55,7 @@ struct TerrainMeshStats {
     u32 in_flight = 0; // started and not yet taken: being built on the workers, or built (`arrived`)
     u32 arrived = 0;   // of `in_flight`: built, waiting for a frame's uploads to take them
     u32 waiting = 0;   // of `building`: built and handed to the renderer, waiting for room in its geometry pool
+    u32 gone = 0;      // tiles gone (no longer drawn, nor counted in `tiles`) whose meshes wait their turn to be freed
     u64 built = 0;     // ever
     u64 triangles = 0; // in the drawn meshes, at full detail
 };
@@ -72,7 +73,9 @@ public:
     // 8 * builds_per_frame; one as drawn needs no build; one new here
     // settles first), starts builds (at most builds_per_frame,
     // builds_in_flight at once), frees the meshes of tiles gone (at most
-    // drops_per_frame), uploads finished meshes (at most
+    // drops_per_frame; a tile gone is no longer drawn from the update
+    // that sees it go, whenever its mesh is freed), these and the looks
+    // and starts for at most start_ms_per_frame after the first of each, uploads finished meshes (at most
     // uploads_per_frame, and for at most upload_ms_per_frame after the
     // first) and swaps each in once the renderer can draw it.
     void update(world::Terrain& terrain);
@@ -114,13 +117,33 @@ public:
     static constexpr float k_upload_ms = 0.5f;
     static constexpr float k_loading_upload_ms = std::numeric_limits<float>::infinity();
     float upload_ms_per_frame = k_upload_ms;
+    // The most time (ms) a frame's meshes of tiles gone freed, looks at queued tiles and builds
+    // started may take together, whatever their counts allow: a look copies and hashes the
+    // tile's heights, and a mesh freed is taken out of the renderer's tables, so 64 looks or
+    // 64 meshes freed in one frame were 4 to 5 ms of it at speed. Meshes are freed first, for
+    // half of it, then tiles looked at until all of it has passed. The clock is read after each
+    // one, so the last may run over; and the first mesh freed, and the first look, are always
+    // taken, so they always come. The rest wait for the next frame. Behind a loading screen:
+    // no limit.
+    static constexpr float k_start_ms = 0.5f;
+    static constexpr float k_loading_start_ms = std::numeric_limits<float>::infinity();
+    float start_ms_per_frame = k_start_ms;
+    // Play's, for a frame that took `frame_ms`: 0.5 ms at 120 frames a second, and 4% of a
+    // longer frame (0.67 ms at 60, 1.33 at 30, never over 2 ms): a machine making fewer frames
+    // has fewer to look and free in, and would fall behind a fast flight.
+    static float start_ms_for(float frame_ms) {
+        const float share = 0.04f * frame_ms;
+        return share > k_start_ms ? (share < 4.0f * k_start_ms ? share : 4.0f * k_start_ms) : k_start_ms; // (not a number: play's)
+    }
     // Play's budgets, or a loading screen's (a frame there may take what it takes): how many
-    // builds and uploads a frame and builds at once (`most`), and the uploads' time.
+    // builds and uploads a frame and builds at once (`most`), the uploads' time, and the
+    // looks', starts' and freed meshes' time.
     void set_budgets(bool loading, u32 most) {
         builds_per_frame = uploads_per_frame = builds_in_flight = most;
         upload_ms_per_frame = loading ? k_loading_upload_ms : k_upload_ms;
+        start_ms_per_frame = loading ? k_loading_start_ms : k_start_ms;
     }
-    // The clock the uploads are timed by, in ms (tests give their own; empty: the steady clock).
+    // The clock the uploads, and the looks, starts and freed meshes, are timed by, in ms (tests give their own; empty: the steady clock).
     std::function<double()> clock;
     // Threads that build beside the two that always do, while above zero (a
     // game's loading screen: MoreWorkers::for_loading).
@@ -139,6 +162,9 @@ private:
     struct Tile {
         render::MeshId mesh = render::k_no_mesh; // drawn
         bool drawn = false;    // has a mesh (with no renderer: counted as one)
+        // Its ground is gone (let_go): not drawn any more, and in m_gone until its mesh is
+        // freed (once no build of it is in flight), unless its ground comes back first.
+        bool gone = false;
         u32 triangles = 0;     // of the drawn mesh
         u64 hash = 0;          // of the heights it was made from (0: none)
         u64 wanted = 0;        // the build in flight (0: none wanted)
@@ -161,6 +187,8 @@ private:
     void start(world::CellCoord cell, Tile& tile, TileHeights heights, u64 hash);
     void commit(world::CellCoord cell, Tile& tile);
     void drop(world::CellCoord cell, Tile& tile);
+    void let_go(world::CellCoord cell, Tile& tile);
+    void came_back(world::CellCoord cell, Tile& tile);
 
     render::Renderer* m_renderer;
     u64 m_identity = 0;
@@ -168,6 +196,9 @@ private:
     u64 m_built = 0;
     std::unordered_map<world::CellCoord, Tile, world::CellCoordHash> m_tiles;
     std::deque<world::CellCoord> m_queue; // waiting to start, oldest first
+    // Tiles gone, their meshes to be freed, oldest first (one may be listed twice, or be back
+    // or freed already: Tile::gone says which still are).
+    std::deque<world::CellCoord> m_gone;
     // Queued cells, each with the frame it may be looked at from.
     std::unordered_map<world::CellCoord, u64, world::CellCoordHash> m_queued;
     u64 m_frame = 0;

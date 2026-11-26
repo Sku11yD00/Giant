@@ -777,11 +777,15 @@ int run(const Options& options) {
         {
             const u32 most = loading ? editor::TerrainMeshes::k_loading_per_frame : editor::TerrainMeshes::k_per_frame;
             terrain_meshes.set_budgets(loading, most);
+            const float start_ms = loading ? editor::TerrainMeshes::k_loading_start_ms
+                                           : editor::TerrainMeshes::start_ms_for(1000.0f * render_seconds);
+            terrain_meshes.start_ms_per_frame = start_ms;
             // (The far ground's keep their own counts; behind the loading screen, which waits
             // for them too, their uploads are not held to play's time.)
             for (u32 level = 1; level <= 2; ++level) {
                 editor::TerrainMeshes& far_meshes = far_ground.meshes(level);
                 far_meshes.upload_ms_per_frame = loading ? editor::TerrainMeshes::k_loading_upload_ms : editor::TerrainMeshes::k_upload_ms;
+                far_meshes.start_ms_per_frame = start_ms;
             }
             terrain_meshes.more_workers = loading ? editor::MoreWorkers::for_loading() : 0u;
         }

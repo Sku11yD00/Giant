@@ -168,7 +168,7 @@ render::MeshId TerrainMeshes::mesh(world::CellCoord cell) const {
 
 bool TerrainMeshes::drawn(world::CellCoord cell) const {
     const auto it = m_tiles.find(cell);
-    return it != m_tiles.end() && it->second.drawn;
+    return it != m_tiles.end() && it->second.drawn && !it->second.gone;
 }
 
 std::vector<world::CellCoord> TerrainMeshes::take_changed() {
@@ -191,10 +191,23 @@ void TerrainMeshes::drop(world::CellCoord cell, Tile& tile) {
         if (tile.mesh != render::k_no_mesh) m_renderer->remove_mesh(tile.mesh);
         if (tile.pending != render::k_no_mesh) m_renderer->remove_mesh(tile.pending);
     }
-    if (tile.drawn) {
-        m_changed.push_back(cell);
+    if (tile.drawn && !tile.gone) {
+        m_changed.push_back(cell); // (one let go said so then)
     }
     m_tiles.erase(cell);
+}
+
+void TerrainMeshes::let_go(world::CellCoord cell, Tile& tile) {
+    if (tile.gone) return;
+    tile.gone = true;
+    if (tile.drawn) m_changed.push_back(cell); // not drawn from now, whenever its mesh is freed
+    m_gone.push_back(cell);
+}
+
+void TerrainMeshes::came_back(world::CellCoord cell, Tile& tile) {
+    if (!tile.gone) return;
+    tile.gone = false; // (its place in m_gone is passed over)
+    if (tile.drawn) m_changed.push_back(cell);
 }
 
 void TerrainMeshes::start(world::CellCoord cell, Tile& tile, TileHeights heights, u64 hash) {
@@ -246,9 +259,30 @@ void TerrainMeshes::update(world::Terrain& terrain) {
     m_last_changes = changes;
     if (changes.all) {
         for (const auto& [cell, heights] : terrain.tiles()) want(cell);
-        for (const auto& [cell, tile] : m_tiles) want(cell);
+        // Those the terrain no longer has are let go now (not when the queue gets to them,
+        // behind every tile to build); one let go that it has again is back.
+        std::vector<world::CellCoord> held;
+        held.reserve(m_tiles.size());
+        for (const auto& [cell, tile] : m_tiles) held.push_back(cell);
+        for (const world::CellCoord cell : held) {
+            Tile& tile = m_tiles.find(cell)->second;
+            if (terrain.find(cell) == nullptr) {
+                let_go(cell, tile);
+            } else {
+                came_back(cell, tile);
+            }
+        }
     } else {
         for (const world::CellCoord c : changes.tiles) {
+            // One gone is not drawn from this frame on (its mesh is freed in its turn); one
+            // back before that is drawn again as it was.
+            if (const auto known = m_tiles.find(c); known != m_tiles.end()) {
+                if (terrain.find(c) == nullptr) {
+                    let_go(c, known->second);
+                } else {
+                    came_back(c, known->second);
+                }
+            }
             // A tile new here waits a few frames with its neighbours, for
             // the tiles arriving after it.
             const bool fresh = !m_tiles.contains(c) && terrain.find(c) != nullptr;
@@ -262,7 +296,9 @@ void TerrainMeshes::update(world::Terrain& terrain) {
                         continue;
                     }
                     const world::CellCoord n{static_cast<i32>(x), static_cast<i32>(z)};
-                    if (terrain.find(n) != nullptr || m_tiles.contains(n)) want(n, not_before);
+                    // (One let go is not looked at: there is nothing to build.)
+                    const auto held = m_tiles.find(n);
+                    if (terrain.find(n) != nullptr || (held != m_tiles.end() && !held->second.gone)) want(n, not_before);
                 }
             }
         }
@@ -291,6 +327,7 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         tile.in_flight = false;
         if (r.serial != tile.wanted) continue; // made from heights since replaced
         tile.wanted = 0;
+        if (tile.gone) continue; // its ground went while it was built: not handed to the renderer
         ++taken;
         ++m_built;
         render::MeshId id = render::k_no_mesh;
@@ -317,6 +354,10 @@ void TerrainMeshes::update(world::Terrain& terrain) {
     for (usize k = 0; k < m_waiting.size();) {
         const auto t = m_tiles.find(m_waiting[k]);
         const bool gone = t == m_tiles.end() || !t->second.waiting;
+        if (!gone && t->second.gone) {
+            ++k; // its ground is gone: not swapped in (freed with the tile, or swapped in if the ground is back)
+            continue;
+        }
         if (!gone && (m_renderer == nullptr || m_renderer->mesh_ready(t->second.pending))) {
             commit(t->first, t->second);
         } else if (!gone) {
@@ -329,6 +370,37 @@ void TerrainMeshes::update(world::Terrain& terrain) {
 
     const double starts_began = now_ms();
     m_parts_ms.swaps = static_cast<float>(starts_began - swaps_began);
+    // Their time (start_ms_per_frame), read after each mesh freed and each look, and every 64
+    // queue entries passed over.
+    const double start_ms = m_finishing ? static_cast<double>(k_loading_start_ms) : static_cast<double>(start_ms_per_frame);
+    // Tiles gone: their meshes freed, oldest first, for half the time; the first always. One
+    // whose build is still in flight waits for it to come back (behind the others).
+    u32 dropped = 0;
+    {
+        const double drop_ms = start_ms * 0.5;
+        bool read_clock = false;
+        for (usize listed = m_gone.size(); listed > 0 && dropped < drops_per_frame; --listed) {
+            if (read_clock) {
+                if (!(now_ms() - starts_began < drop_ms)) break;
+                read_clock = false;
+            }
+            const world::CellCoord cell = m_gone.front();
+            m_gone.pop_front();
+            const auto t = m_tiles.find(cell);
+            if (t == m_tiles.end() || !t->second.gone) continue; // freed already (listed twice), or back
+            if (terrain.find(cell) != nullptr) {
+                came_back(cell, t->second); // (a whole terrain changed: seen back here first)
+                continue;
+            }
+            if (t->second.in_flight) {
+                m_gone.push_back(cell);
+                continue;
+            }
+            drop(cell, t->second);
+            ++dropped;
+            read_clock = true;
+        }
+    }
     // Start builds, oldest wish first; a tile already building waits its
     // turn. Each look takes a heights snapshot (cheap); one that matches
     // what is drawn needs no build.
@@ -336,16 +408,22 @@ void TerrainMeshes::update(world::Terrain& terrain) {
     u32 looks = 0;
     const u32 max_looks = builds_per_frame > std::numeric_limits<u32>::max() / 8 ? builds_per_frame
                                                                                  : builds_per_frame * 8;
-    u32 dropped = 0;
-    // Tiles gone are dropped (their meshes freed) within their own budget,
-    // even while builds are full; a scan looks at a bounded part of the queue.
+    // A scan looks at a bounded part of the queue, and ends with the time: once it is up no
+    // more tiles are looked at, but for the first (with no time at all, one a frame still comes).
     const usize scan = m_finishing ? m_queue.size() : std::min<usize>(m_queue.size(), 4096);
+    bool out_of_time = false;
+    bool read_clock = false;
     for (usize looked = 0; looked < scan; ++looked) {
+        if (!out_of_time && (read_clock || looked % 64 == 63)) {
+            out_of_time = !(now_ms() - starts_began < start_ms);
+            read_clock = false;
+        }
         // (Those built and waiting for an upload are on no worker: they hold no build's place.)
         const u32 arrived = static_cast<u32>(m_arrived.size());
         const bool can_build = started < builds_per_frame && looks < max_looks && arrived < k_most_arrived &&
-                               m_in_flight - std::min(arrived, m_in_flight) < builds_in_flight;
-        if (!can_build && dropped >= drops_per_frame) break;
+                               m_in_flight - std::min(arrived, m_in_flight) < builds_in_flight &&
+                               (!out_of_time || looks == 0);
+        if (!can_build) break; // (nothing more is passed over: what waits keeps its place)
         const world::CellCoord cell = m_queue.front();
         m_queue.pop_front();
         if (const auto q = m_queued.find(cell); !m_finishing && q != m_queued.end() && q->second > m_frame) {
@@ -354,28 +432,20 @@ void TerrainMeshes::update(world::Terrain& terrain) {
         }
         const auto t = m_tiles.find(cell);
         if (terrain.find(cell) == nullptr) {
-            if (t != m_tiles.end() && t->second.in_flight) {
-                m_queue.push_back(cell); // dropped once its build is back
-                continue;
-            }
-            if (t != m_tiles.end()) {
-                if (dropped >= drops_per_frame) {
-                    m_queue.push_back(cell); // next frame
-                    continue;
-                }
-                drop(cell, t->second);
-                ++dropped;
-            }
+            // Gone: nothing to build. (Let go here when a whole terrain changed; else it was already.)
+            if (t != m_tiles.end()) let_go(cell, t->second);
             m_queued.erase(cell);
             continue;
         }
         Tile& tile = t != m_tiles.end() ? t->second : m_tiles[cell];
-        if (tile.in_flight || !can_build) {
-            m_queue.push_back(cell); // still wanted: built after this one, or next frame
+        came_back(cell, tile);
+        if (tile.in_flight) {
+            m_queue.push_back(cell); // still wanted: built after this one
             continue;
         }
         m_queued.erase(cell);
         ++looks;
+        read_clock = true;
         TileHeights heights = tile_heights(terrain, cell);
         heights.skirt = skirt_depth;
         const u64 hash = hash_of(heights);
@@ -388,7 +458,7 @@ void TerrainMeshes::update(world::Terrain& terrain) {
 
 void TerrainMeshes::finish(world::Terrain& terrain) {
     const u32 budgets[4] = {builds_per_frame, uploads_per_frame, builds_in_flight, drops_per_frame};
-    const float upload_ms = upload_ms_per_frame;
+    const float upload_ms = upload_ms_per_frame; // (start_ms_per_frame: not held to while m_finishing)
     builds_per_frame = uploads_per_frame = builds_in_flight = drops_per_frame = std::numeric_limits<u32>::max();
     upload_ms_per_frame = k_loading_upload_ms;
     m_finishing = true;
@@ -403,7 +473,7 @@ void TerrainMeshes::finish(world::Terrain& terrain) {
             if (t != m_tiles.end() && t->second.waiting) commit(c, t->second);
         }
         m_waiting.clear();
-        if (m_queue.empty() && m_in_flight == 0 && m_arrived.empty()) break;
+        if (m_queue.empty() && m_gone.empty() && m_in_flight == 0 && m_arrived.empty()) break;
         m_jobs.wait(m_builds);
         m_more.wait();
     }
@@ -419,6 +489,8 @@ void TerrainMeshes::finish(world::Terrain& terrain) {
 TerrainMeshStats TerrainMeshes::stats() const {
     TerrainMeshStats s;
     for (const auto& [cell, tile] : m_tiles) {
+        s.gone += tile.gone ? 1u : 0u;
+        if (tile.gone) continue; // (not drawn, and nothing of it is waited for)
         s.tiles += tile.drawn ? 1u : 0u;
         const bool building = (tile.in_flight || tile.waiting) && !m_queued.contains(cell);
         s.building += building ? 1u : 0u;
