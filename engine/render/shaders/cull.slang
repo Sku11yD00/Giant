@@ -166,7 +166,9 @@ void cs_instances(uint3 id : SV_DispatchThreadID) {
     }
     const float3 c = to_world(inst, mesh.bounds.xyz);
     // Swaying things reach past their bounds by up to this.
-    const float r = mesh.bounds.w * inst.max_scale + wind_reach(f, swayer_of(f, inst, mesh));
+    // (And everything by the furthest a vertex in it is drawn from its place: grown.)
+    const float r0 = mesh.bounds.w * inst.max_scale + wind_reach(f, swayer_of(f, inst, mesh));
+    const float r = r0 + grow_reach(f, c, r0);
     if (push.pass == 0 && !sphere_in_frustum(f, c, r)) {
         return;
     }
@@ -209,7 +211,8 @@ void test_cluster(Frame f, uint instance, Instance inst, MeshEntry mesh, uint in
         }
     }
     const float3 centre = to_world(inst, c.bounds.xyz);
-    const float radius = c.bounds.w * inst.max_scale + reach;
+    const float radius0 = c.bounds.w * inst.max_scale + reach;
+    const float radius = radius0 + grow_reach(f, centre, radius0);
     if (!sphere_in_frustum(f, centre, radius)) {
         return;
     }
@@ -290,7 +293,8 @@ void cs_retest(uint3 id : SV_DispatchThreadID) {
     const MeshEntry mesh = mesh_of(inst);
     const Cluster c = load_cluster(read_buffer_nonuniform(mesh.clusters), entry.y);
     const float3 centre = to_world(inst, c.bounds.xyz);
-    const float radius = c.bounds.w * inst.max_scale + wind_reach(f, swayer_of(f, inst, mesh));
+    const float radius0 = c.bounds.w * inst.max_scale + wind_reach(f, swayer_of(f, inst, mesh));
+    const float radius = radius0 + grow_reach(f, centre, radius0);
     if (!occluded(f, read_buffer(push.hzb), centre, radius, false)) {
         append_visible(entry.x, entry.y, c.triangle_count);
     }

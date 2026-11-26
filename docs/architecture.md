@@ -229,11 +229,11 @@ an offline cooker can use it without a device.
   angle, summed per vertex, made perpendicular to the normal), splitting a
   vertex whose triangles disagree on the sign (a mirrored uv seam); the
   glTF importer keeps a file's own TANGENT and makes the rest, and the
-  built-in shapes have uvs and tangents. The GPU reads 28 bytes a vertex
+  built-in shapes have uvs and tangents. The GPU reads 32 bytes a vertex
   (`geometry::PackedVertex`): position floats, normal and tangent as
   octahedral snorm16 pairs (the sign in the tangent's lowest y bit), uv
-  floats; `cluster_normal`, `cluster_tangent` and `cluster_uv` in
-  common.slang read them. Simplification weighs normals and, lightly, uvs,
+  floats, and the way it grows (below); `cluster_normal`, `cluster_tangent`,
+  `cluster_uv` and `cluster_grow` in common.slang read them. Simplification weighs normals and, lightly, uvs,
   and only drops vertices, so every level keeps the originals' uvs and
   tangents. Skinning poses the tangent with the normal and keeps it
   perpendicular; the uv stays put.
@@ -814,6 +814,74 @@ an offline cooker can use it without a device.
   shading pass, the change in normal across each 2x2 pixel quad (same
   instance only) widens the GGX roughness (Kaplanyan-Hoffman style, capped),
   so highlights on tight curves stay stable instead of flickering.
+- **Growing (nothing thinner than a pixel).** A trunk, railing or mast
+  thinner than a pixel covers a pixel's centre in one frame and falls
+  between two in the next, so far forests blinked as the camera moved, and
+  their shadows with them (seen on the valley's 0.35 m trunks past some
+  400 m); with no frames blended (rule 2) nothing hid it, and SMAA cannot
+  bring back what was never drawn. So every mesh vertex is drawn a little
+  further out across the screen: `RenderSettings::grow_pixels` (0.5; 0
+  turns it off) pixels in the view, the same share of a texel in each
+  level of the sun's shadow pages, nothing in a lamp's shadows. The
+  thinnest thing is then a pixel (a texel) wide and is on one in every
+  frame; a far thing is about a pixel fatter on screen for it (up to two
+  at the sharpest edges, or where an instance is scaled unevenly: the way
+  is turned as a normal is, so the thinnest axis never grows less).
+  - *By how much* is the vertex's own (`common.slang`'s `grow_by`):
+    `Frame::grow.x` metres (a shadow level's half texel) plus `grow.y`
+    for each metre it is in front of the eye (half a pixel there; less
+    than nothing behind it, so the amount is linear across a triangle
+    that crosses the eye's plane). Two vertices at one place so move
+    alike whatever they belong to: the parts of a mesh, two pieces laid
+    edge to edge.
+  - *Which way* is the mesh's (`geometry::grow_directions`, made by
+    `build_clusters` into `ClusterMesh::grow`, the vertex's last 4
+    bytes): the direction midway between the normals of every vertex at
+    its place, as far as moves each of their faces out by one (a cube's
+    corner: its diagonal, by root three; at most 2), so faces that meet
+    at a hard edge stay joined, at every level of detail, and normals
+    that cancel (a leaf card's two faces) do not grow. A mesh drawn in
+    parts (one a material, or a baked figure's) counts the whole mesh's
+    normals at each place (`geometry::Growing::with`), so a hard edge
+    between two parts does not open. Places are compared bit for bit.
+  - *Only the place on the screen moves* (`raster.slang`'s
+    `clip_position`, after the wind): clip x and y are the grown
+    point's, depth and w the vertex's own. The move is linear in the
+    place, so a flat face's every point moves by its own depth's half
+    pixel, however large the face and wherever its corners are (behind
+    the eye too): a floor is drawn where it was but for a pixel and does
+    not rise under what stands on it, and a grown thing is no nearer the
+    eye. Shading finds its triangle where it is, and `on_triangle` keeps
+    the half pixel round it on it. In the sun's pages a level's half
+    texel does not depend on the camera, so cached pages stay right.
+    Culling's spheres are wider by the furthest a vertex in them is drawn
+    from its place (`grow_reach`, `cull.slang`), a caster dirties the
+    shadow pages up to `ShadowPages::k_grown_texels` past its box, and
+    changing the setting draws the sun's pages again.
+  - Skinned meshes do not grow (their normals turn with the pose; a
+    crowd's baked figures, rigid meshes, do, so a far figure's limbs hold
+    a pixel), nor does the ground (`geometry::Growing{false}`: nothing
+    thin, and what lies just over a slope must not sink into it).
+  - Known limits: a face the sun grazes, slid half a texel across the
+    light at its own depth, is in effect that much (times the square of
+    the sine of its angle to the sun) nearer the sun, which uses up a
+    third of the 1.5 texels shading stands off a surface by: by reckoning
+    its own shadow could first show on a face within some 6 degrees of
+    edge-on to the sun (3 before; not seen, not measured); a vertex part
+    way along another triangle's edge (a T) moves by its own half pixel
+    and the edge by its ends', which can part them by under a pixel; a far
+    trunk is drawn a pixel wide in full colour where
+    a fifth of a pixel of it would have tinted the ground behind, so far
+    woods read a little darker under the crowns; gaps under two pixels
+    between thin things (a far railing's) close or blink in their turn; a
+    thing just over a pixel wide still steps between one pixel and two as
+    it moves; a thin shadow changes width where shading changes shadow
+    level; two separate single-sheet pieces meeting at an outside corner
+    each grow their own way and leave a notch under a pixel there (closed
+    pieces overlap instead, and sheets in one plane move alike); a
+    plank's middle axis grows less than its
+    thinnest under uneven scale; cut-out cards (leaves) move along their
+    normal and are not widened.
 - **CPU path.** `gpu_culling = false` chooses the cut on the CPU (frustum
   only) and feeds the same raster and shading passes; tests use it for
   exact counts.

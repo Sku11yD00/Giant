@@ -2244,6 +2244,120 @@ GIANT_TEST("render: d3d12 a lamp lights the floor round it, fading to nothing at
     device->destroy(target);
 }
 
+GIANT_TEST("render: d3d12 a rod a fifth of a pixel wide is on every row wherever it stands; ungrown it drops out") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 128, k_h = 128;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // The camera 10 m above a pale rod lying along z, looking straight down
+    // (60 degree view: some 9 cm a pixel, +x to the right of the image, the
+    // rod up and down it). The rod is 2 cm wide, a fifth of a pixel: as it
+    // is, it covers a pixel's centre in one place out of five. It is four
+    // lengths of 2 m end to end: where two meet, their corners are at one
+    // place and move alike, so no row between them is left out.
+    std::vector<Instance> instances(4);
+    for (Instance& in : instances) {
+        in.mesh = renderer->builtin(BuiltinMesh::cube);
+        in.scale = {0.02f, 0.02f, 2.0f};
+    }
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.9f, 0.9f, 0.9f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.voxel_far_field = false;
+    frame.view.position = {300.0, 10.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {2.0f, 2.0f, 2.0f};
+    frame.lighting.sky_light = {1.0f, 1.0f, 1.0f};
+    frame.lighting.ground_light = {1.0f, 1.0f, 1.0f};
+    // The rows of the image's middle half with any of the rod on them (it
+    // runs well past them both ways), and the most pixels of it on a row.
+    struct Seen {
+        u32 rows = 0;
+        u32 widest = 0;
+    };
+    const auto draw = [&] {
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        const std::vector<u8> image = device->read_texture(target);
+        Seen seen;
+        GIANT_CHECK(image.size() == usize{k_w} * k_h * 4);
+        if (image.size() != usize{k_w} * k_h * 4) return seen;
+        for (u32 y = k_h / 4; y < k_h * 3 / 4; ++y) {
+            u32 on_row = 0;
+            for (u32 x = 0; x < k_w; ++x) {
+                on_row += image[(usize{y} * k_w + x) * 4 + 1] > 16 ? 1u : 0u;
+            }
+            seen.rows += on_row > 0 ? 1u : 0u;
+            seen.widest = std::max(seen.widest, on_row);
+        }
+        return seen;
+    };
+    // Sixteen places a sixteenth of a pixel apart, across one pixel.
+    constexpr u32 k_rows = k_h / 2;
+    const double pixel = 2.0 * 10.0 * std::tan(0.5 * double(frame.view.vertical_fov_degrees) * 3.14159265358979 / 180.0) / k_h;
+    u32 grown_least = k_rows, grown_widest = 0, bare_least = k_rows, bare_most = 0;
+    for (u32 step = 0; step < 16; ++step) {
+        for (usize i = 0; i < instances.size(); ++i) {
+            instances[i].position = DVec3{300.0 + 0.4 + pixel * (double(step) + 0.5) / 16.0, 0.0, -3.0 + 2.0 * double(i)};
+        }
+        frame.settings.grow_pixels = 0.5f;
+        const Seen grown = draw();
+        frame.settings.grow_pixels = 0.0f;
+        const Seen bare = draw();
+        grown_least = std::min(grown_least, grown.rows);
+        grown_widest = std::max(grown_widest, grown.widest);
+        bare_least = std::min(bare_least, bare.rows);
+        bare_most = std::max(bare_most, bare.rows);
+    }
+    std::printf("    rows of %u with the rod on them: grown %u at the least (%u pixels at the widest); as it is %u to %u\n",
+                k_rows, grown_least, grown_widest, bare_least, bare_most);
+    // Grown, it is on every row wherever it stands, and never over two pixels wide.
+    GIANT_CHECK(grown_least == k_rows);
+    GIANT_CHECK(grown_widest >= 1 && grown_widest <= 2);
+    // As it is, it is there in some places (so the test sees it) and gone in others.
+    GIANT_CHECK(bare_most == k_rows);
+    GIANT_CHECK(bare_least == 0);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: lamp shadows are drawn once, again when a caster near moves, a few faces a frame (null device)") {
     NullScene s;
     if (s.renderer == nullptr) return;

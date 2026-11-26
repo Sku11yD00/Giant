@@ -224,7 +224,10 @@ void TerrainMeshes::start(world::CellCoord cell, Tile& tile, TileHeights heights
         r.serial = serial;
         r.hash = hash;
         r.triangles = static_cast<u32>(surface.mesh.indices.size() / 3);
-        r.mesh = geometry::build_clusters(surface.mesh, surface.edge);
+        // The ground does not grow (RenderSettings::grow_pixels): it has
+        // nothing thin, and what lies just over it (a road, a path) must
+        // not sink into a slope that rose more than it did.
+        r.mesh = geometry::build_clusters(surface.mesh, surface.edge, geometry::Growing{false, {}});
         const std::lock_guard lock(m_mutex);
         m_done.push_back(std::move(r));
     });

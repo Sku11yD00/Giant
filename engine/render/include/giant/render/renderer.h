@@ -712,6 +712,17 @@ struct RenderSettings {
     // shadow_pages_per_frame), so their shadows sway too.
     float wind_distance = 150.0f;
     u32 wind_shadow_pages_per_frame = 32;
+    // Growing: every mesh vertex is drawn this many pixels further out
+    // across the screen (texels, in the sun's shadow pages), along the way
+    // its mesh says it grows (geometry's grow_directions). At a half, the
+    // thinnest thing is a pixel wide: a far trunk or railing lands on a
+    // pixel in every frame, where without it would be on one in this frame
+    // and between two in the next, blinking as the camera moves (nothing
+    // here blends frames to hide that). Everything is about a pixel fatter
+    // on screen for it (up to two at the sharpest edges, or under uneven
+    // scale); depths are as they were. 0: off. Skinned meshes and the ground
+    // do not grow. (docs/architecture.md, "Growing".)
+    float grow_pixels = 0.5f;
 };
 
 // Water (lit views; water plan W2): the surfaces of lakes, rivers and the
@@ -1599,6 +1610,7 @@ private:
     rhi::PipelineHandle m_shadow_mesh_cut; // cut-out materials' shadows
     rhi::PipelineHandle m_shadow_vertex_cut;
     u64 m_shadow_cut_outs = 0xcbf29ce484222325ull; // the frame's cut-out materials, hashed (a change redraws all pages)
+    float m_shadow_grow = -1.0f; // RenderSettings::grow_pixels the shadow pages were drawn with (-1: none yet)
     rhi::PipelineHandle m_shadow_clear_pages;
     rhi::PipelineHandle m_shadow_clear_words;
     std::vector<u8> m_casts; // per frame instance: drawn as a mesh, so it casts

@@ -159,6 +159,9 @@ void set_bounds(float* out, const Vec3& center, float radius) { set4(out, center
 
 float wind_value(float v) { return std::isfinite(v) ? std::clamp(v, 0.0f, 4.0f) : 0.0f; }
 
+// RenderSettings::grow_pixels as used: 0 to 2, 0 if it is no number.
+float grow_of(const RenderSettings& s) { return std::isfinite(s.grow_pixels) ? std::clamp(s.grow_pixels, 0.0f, 2.0f) : 0.0f; }
+
 gpu::MaterialWind wind_of(const Material& m) { return {wind_value(m.sway), wind_value(m.flutter)}; }
 
 // How far an instance can sway past its bounds this frame (common.slang's
@@ -2521,6 +2524,7 @@ void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const 
         k.pixels_per_unit = float(double(k_far) / std::max(texel, 1e-4));
         k.occlusion = 0;
         k.camera_delta[3] = 0.0f;
+        std::fill_n(k.grow, 4, 0.0f); // (a lamp's shadows: as they are)
         return k;
     };
     for (u32 fi = 0; fi < faces.size() && data.instance_count > 0; ++fi) { // (no casters: left clear)
@@ -2628,6 +2632,12 @@ void Renderer::plan_shadows(const FrameInput& frame, bool on) {
         m_shadow_cut_outs = cut_outs;
         m_shadows->invalidate_all();
         m_local_shadows->invalidate_all();
+    }
+    // Casters grow by a share of a texel (grow_pixels): pages drawn with
+    // another share are drawn again (a setting changed: rare).
+    if (const float grow = grow_of(frame.settings); grow != m_shadow_grow) {
+        m_shadow_grow = grow;
+        m_shadows->invalidate_all();
     }
     // Only what is drawn as a mesh casts (not the instances left to the
     // voxel world, nor those whose mesh is not ready).
@@ -2798,6 +2808,10 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
         const double ox = double(wx) * page - camera_light.x;
         const double oy = double(wy) * page - camera_light.y;
         gpu::FrameConstants k = base;
+        // Casters grow by the same share of a texel as the view's of a
+        // pixel: a trunk thinner than a texel still casts onto one.
+        k.grow[0] = float(texel) * grow_of(frame.settings);
+        k.grow[1] = 0.0f;
         // Camera-relative world to the window's clip space: x right, y
         // down the texel rows, depth 0.5 - (z - anchor) / range (larger:
         // nearer the sun; from a fixed anchor, so cached pages stay right
@@ -3181,6 +3195,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     k.debug_view = static_cast<u32>(settings.debug_view);
     k.threshold = std::clamp(settings.lod_error_pixels, 0.01f, 1000.0f);
     k.pixels_per_unit = 0.5f * focal * static_cast<float>(height);
+    k.grow[1] = grow_of(settings) / k.pixels_per_unit; // (a pixel d metres off is d / pixels_per_unit metres)
     k.near_plane = near_plane;
     k.width = static_cast<float>(width);
     k.height = static_cast<float>(height);

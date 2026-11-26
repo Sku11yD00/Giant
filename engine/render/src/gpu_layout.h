@@ -50,8 +50,13 @@ struct FrameConstants {
     // The highest sea's level, camera-relative (k_no_sea: none): voxel
     // cones meet it where they cross it going down (voxel_gi.slang).
     float sea_level;
+    // Growing (common.slang's grow_by): metres every vertex grows by along
+    // the way it grows (x), and metres more for each metre it is in front
+    // of the eye (y: half a pixel there), so nothing drawn is thinner than
+    // a pixel.
+    float grow[4];
 };
-static_assert(sizeof(FrameConstants) == 512);
+static_assert(sizeof(FrameConstants) == 528);
 inline constexpr float k_no_sea = -1.0e30f;
 
 // 64 bytes, kept on the GPU from frame to frame (InstanceStore). The
@@ -178,7 +183,7 @@ inline constexpr u32 k_not_resident = 0xFFFF'FFFFu;
 static_assert(sizeof(MeshEntry) == 48);
 
 // A loaded group's geometry, in the pool: per cluster, its vertices
-// (geometry::PackedVertex, 28 bytes: position, octahedral normal and
+// (geometry::PackedVertex, 32 bytes: position, octahedral normal and
 // tangent, uv) at vertex_offset, then its triangles (u32: three
 // local indices, 8 bits apart) at triangle_offset; offsets are bytes from
 // the group's start.

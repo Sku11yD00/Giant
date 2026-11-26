@@ -49,9 +49,11 @@ struct Frame {
     uint wind_table_offset;
     uint wind_table_count;
     float sea_level;      // the highest sea's level, camera-relative (k_no_sea: none)
+    // Growing (grow_by below): x metres every vertex grows by, y metres more for each metre it is in front of the eye.
+    float4 grow;
 };
 static const float k_no_sea = -1.0e30;
-static const uint k_frame_bytes = 512;
+static const uint k_frame_bytes = 528;
 
 float4 load4(ByteAddressBuffer b, uint at) { return asfloat(b.Load4(at)); }
 
@@ -121,7 +123,8 @@ Frame load_frame(uint descriptor, uint offset) {
     f.wind = load4(b, at); at += 16;
     f.wind_clock = load4(b, at); at += 16;
     f.wind_camera = load4(b, at); at += 16;
-    const uint4 w = b.Load4(at);
+    const uint4 w = b.Load4(at); at += 16;
+    f.grow = load4(b, at);
     f.wind_table = w.x;
     f.wind_table_offset = w.y;
     f.wind_table_count = w.z;
@@ -243,7 +246,7 @@ float3 to_world_normal(Instance i, float3 n) {
 // A loaded group's geometry, in the pool: per cluster, its vertices
 // (k_mesh_vertex_bytes each: position as floats, normal and tangent as
 // octahedral snorm16 pairs, the tangent's lowest y bit the bitangent sign,
-// uv as floats: geometry::PackedVertex) at vertex_offset, and its triangles
+// uv as floats, the way it grows: geometry::PackedVertex) at vertex_offset, and its triangles
 // (u32 each: three cluster-local indices, 8 bits apart) at triangle_offset.
 
 static const uint k_not_resident = 0xFFFFFFFFu;
@@ -348,7 +351,7 @@ uint pack_vertex_tangent(float3 t, float sign) {
     return (u & ~0x10000u) | (sign < 0.0 ? 0x10000u : 0u);
 }
 
-static const uint k_mesh_vertex_bytes = 28;
+static const uint k_mesh_vertex_bytes = 32;
 
 // A cluster's geometry, from its group's place in the pool (`base`).
 uint cluster_vertex_at(uint base, Cluster c, uint local_vertex) {
@@ -365,6 +368,47 @@ float4 cluster_tangent(ByteAddressBuffer pool, uint base, Cluster c, uint local_
 }
 float2 cluster_uv(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
     return asfloat(pool.Load2(cluster_vertex_at(base, c, local_vertex) + 20));
+}
+// The way a vertex grows (geometry's pack_grow: two snorm12 octahedral
+// coordinates, the length in 64ths above them), in the mesh's space; zero
+// for one that does not.
+float3 cluster_grow(ByteAddressBuffer pool, uint base, Cluster c, uint local_vertex) {
+    const uint u = pool.Load(cluster_vertex_at(base, c, local_vertex) + 28);
+    const float2 oct = max(float2(int2(asint(u << 20) >> 20, asint(u << 8) >> 20)) / 2047.0, -1.0);
+    return octahedral_decode(oct) * (float(u >> 24) / 64.0);
+}
+// Growing: every vertex is drawn a little further out across the screen,
+// so that the thinnest thing is a pixel wide (a texel, in a shadow map) and
+// lands on one in every frame, not on one in this frame and between two in
+// the next. Drawing alone: shading finds its triangle where it is
+// (on_triangle keeps the half pixel round it on it).
+//
+// By how many metres a point `depth` metres in front of the eye grows for
+// each unit of the way it grows: Frame::grow's x, and its y for each of
+// those metres (half a pixel there). By the vertex's own depth, so two
+// vertices at one place move alike whatever they belong to (the parts of a
+// mesh, two pieces laid edge to edge). Not held at nothing behind the eye
+// (it is less than nothing there): the amount is then linear across a
+// triangle that crosses the eye's plane, as a floor one stands on does,
+// and every point of the triangle moves by its own depth's half pixel,
+// not by a share of a far corner's.
+static const float k_most_grow = 2.0; // geometry's: the longest way a vertex grows
+float grow_by(Frame f, float depth) { return f.grow.x + f.grow.y * depth; }
+// A camera-relative point's metres in front of the eye.
+float depth_ahead(Frame f, float3 at) { return -dot(f.view_rows[2].xyz, at); }
+// The furthest anything in a sphere is drawn from where it is (culling's
+// spheres are wider by it).
+float grow_reach(Frame f, float3 centre, float radius) {
+    return k_most_grow * (f.grow.x + f.grow.y * (abs(depth_ahead(f, centre)) + radius));
+}
+// Where to: the way the vertex grows (cluster_grow), turned as a normal
+// is, `by` metres for each of its units.
+float3 grown(Instance inst, float3 grow, float by) {
+    const float reach = dot(grow, grow);
+    if (!(reach > 0.0) || by == 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    return to_world_normal(inst, grow) * (sqrt(reach) * by);
 }
 
 struct Group {
