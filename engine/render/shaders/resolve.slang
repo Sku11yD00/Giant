@@ -1188,12 +1188,6 @@ Shaded shade_pixel(float4 position, bool spread) {
     if (extras.sample_groups != k_no_texture) {
         groups = read_texture_uint(extras.sample_groups).Load(int3(int2(pixel), 0));
     }
-    // (Skin on an edge keeps its light where it lands: a share of a pixel
-    // cannot be set aside and spread.)
-    Shaded o = shade_surface(f, extras, position, vis, s, variance, spread && groups == 0u, true, true);
-    if (groups == 0u) {
-        return o;
-    }
     // An edge: the pixel's other surface with the most samples (the first
     // of equals) is shaded once more, along one of its samples, and the two
     // share the pixel as their samples stand to each other. A third and
@@ -1204,7 +1198,47 @@ Shaded shade_pixel(float4 position, bool spread) {
         const uint group = (groups >> (4u + 4u * g)) & 0xFu;
         other = (group >> 2u) > (other >> 2u) ? group : other;
     }
-    Texture2DMS<uint2> samples = read_texture_ms_uint2(extras.sample_vis);
+    const float own_far = length(s.world);
+    // One surface a turn, the own one first. A loop, so that the shading is
+    // in the shader once: written out twice it doubled the pixel shaders,
+    // and with them the time a driver takes to make their pipelines.
+    // (Skin on an edge keeps its light where it lands: a share of a pixel
+    // cannot be set aside and spread.)
+    Shaded o = plain_output(float3(0.0, 0.0, 0.0));
+    float4 behind = float4(0.0, 0.0, 0.0, 0.0);
+    float4 through = position;
+    uint2 v = vis;
+    Hit h = s;
+    float change = variance;
+    bool beside = true; // right by the own surface: a crease, where the screen's images matter most
+    const uint surfaces = groups == 0u ? 1u : 2u;
+    [loop] for (uint turn = 0u; turn < surfaces; ++turn) {
+        if (turn == 1u) {
+            Texture2DMS<uint2> samples = read_texture_ms_uint2(extras.sample_vis);
+            const int at = int(other & 3u);
+            v = samples.Load(int2(pixel), at);
+            through = float4(float2(pixel) + 0.5 + samples.GetSamplePosition(at), position.zw);
+            h = no_hit();
+            beside = false;
+            if (v.x != 0u) {
+                h = surface_at(f, through, v);
+                h.shading_n = skin_detail(extras, h, bent_normal(h));
+                beside = vis.x != 0u && abs(length(h.world) - own_far) <= max(0.25, 0.01 * own_far);
+            }
+            // (The own surface's change of normal stands in on the same instance.)
+            change = v.x != 0u && h.instance == s.instance ? variance : 0.0;
+        }
+        const bool own = turn == 0u;
+        const Shaded shaded = shade_surface(f, extras, through, v, h, change, own && spread && groups == 0u, own, beside);
+        if (own) {
+            o = shaded;
+        } else {
+            behind = shaded.radiance;
+        }
+    }
+    if (groups == 0u) {
+        return o;
+    }
     Mixed m;
     m.lit = float3(0.0, 0.0, 0.0);
     m.lit_weight = 0.0;
@@ -1214,22 +1248,7 @@ Shaded shade_pixel(float4 position, bool spread) {
     m.plain = float3(0.0, 0.0, 0.0);
     const float own_share = float(groups & 7u) / float((groups & 7u) + (other >> 2u));
     const float own_weight = mix_in(m, f, o.radiance, own_share);
-    const float own_far = length(s.world);
-    {
-        const int at = int(other & 3u);
-        const uint2 v = samples.Load(int2(pixel), at);
-        const float4 through = float4(float2(pixel) + 0.5 + samples.GetSamplePosition(at), position.zw);
-        Hit h = no_hit();
-        bool beside = false; // right by the own surface: a crease, where the screen's images matter most
-        if (v.x != 0u) {
-            h = surface_at(f, through, v);
-            h.shading_n = skin_detail(extras, h, bent_normal(h));
-            beside = vis.x != 0u && abs(length(h.world) - own_far) <= max(0.25, 0.01 * own_far);
-        }
-        // (The own surface's change of normal stands in on the same instance.)
-        const float change = v.x != 0u && h.instance == s.instance ? variance : 0.0;
-        mix_in(m, f, shade_surface(f, extras, through, v, h, change, false, false, beside).radiance, 1.0 - own_share);
-    }
+    mix_in(m, f, behind, 1.0 - own_share);
     const float plainly = saturate((m.brightest - k_mix_bright_from) / k_mix_bright_span);
     float3 light = float3(0.0, 0.0, 0.0);
     if (m.lit_weight > 0.0) {
