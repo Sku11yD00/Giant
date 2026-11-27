@@ -754,6 +754,14 @@ struct RenderSettings {
     // Where the GPU cannot make the four-sample targets, drawn as without.
     // (docs/architecture.md, "Multisampling".)
     bool multisampling = true;
+    // Of the surfaces an edge pixel's four samples see, how many are shaded
+    // (2 to 4, its own with them; the ones with the most samples first).
+    // 2: an edge between two things is smooth; where a pixel holds three or
+    // four (the inside of a far forest's crowns, trunks before crowns
+    // before ground) the ones left out still come and go as the camera
+    // moves. More: those are shaded too, and such a pixel costs as many
+    // shadings.
+    u32 multisampling_surfaces = 2;
 };
 
 // Water (lit views; water plan W2): the surfaces of lakes, rivers and the
@@ -1585,6 +1593,7 @@ private:
     rhi::TextureHandle m_depth_samples;
     rhi::TextureHandle m_sample_groups; // r32_uint (samples.slang)
     bool m_multisampled = false;        // this frame draws into them
+    u32 m_sample_surfaces = 2;          // RenderSettings::multisampling_surfaces this frame
     bool m_samples_failed = false;      // they could not be made at this size (not tried again until it or the setting changes)
     rhi::TextureHandle m_edges;   // SMAA edges (rgba8_unorm)
     rhi::TextureHandle m_weights; // SMAA blend weights (rgba8_unorm)

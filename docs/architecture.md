@@ -864,8 +864,10 @@ an offline cooker can use it without a device.
   word a pixel (`m_sample_groups`), and `resolve.slang` shades the one
   with the most samples once more, along one of its samples, and mixes
   the two as their samples stand to each other (a third and fourth
-  surface, the inside of a far crown mostly, are left out: a pixel is
-  shaded twice at the most), each lit one weighed by 1 over 1 + its exposed brightness so
+  surface, the inside of a far crown mostly, are left out as it comes: a
+  pixel is shaded twice at the most; `multisampling_surfaces` 3 or 4
+  lists and shades those too, in one loop over the pixel's surfaces so
+  that the shading is in the shader once), each lit one weighed by 1 over 1 + its exposed brightness so
   that one bright sample does not leave the edge jagged (giving way to
   the plain mean where something is many times white, a lamp, so that
   bloom gets a small bright thing's whole light wherever it sits in the
@@ -888,7 +890,8 @@ an offline cooker can use it without a device.
   mixed in (likewise smoke or hair behind an edge is missing from that
   share); ground behind a ground edge (a crest against a farther slope)
   is shaded with the crest's layers, since there is one terrain texel a
-  pixel; skin on an edge pixel keeps its light where it lands (not
+  pixel (more often with three or four surfaces shaded: two grounds
+  behind one crown's edge); skin on an edge pixel keeps its light where it lands (not
   spread); a mirror-like surface behind an edge shows the sky's and the
   ground's colours in that share, not its reflection (no voxel cone, no
   screen reflection there), a pixel's rim round things standing on a

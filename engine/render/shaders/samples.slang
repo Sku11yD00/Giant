@@ -14,14 +14,16 @@
 // shading there, never a wrong picture. The surface with the most samples is the
 // pixel's own: its triangle and depth go to the one-sample visibility
 // buffer and depth that every later pass reads, so the rest of the frame is
-// as it was. The other surfaces (at most three) are listed in `groups` for
-// resolve.slang, which shades the largest of them once more and mixes the
-// two as their samples stand to each other: an edge is as smooth as four samples make it, and a pixel
-// inside a surface is shaded once, as before.
+// as it was. The other surfaces (at most three; the ones with the most
+// samples first, as many as RenderSettings::multisampling_surfaces allows)
+// are listed in `groups` for resolve.slang, which shades each once more and
+// mixes them as their samples stand to each other: an edge is as smooth as
+// four samples make it, and a pixel inside a surface is shaded once, as
+// before.
 //
 // `groups`, a word a pixel: 0 where all four samples see one surface. Else
 // bits 0 to 2 the pixel's own surface's samples (1 to 3), then a nibble for
-// each other surface from bit 4 (low two bits: one of its samples; high
+// each other surface listed, from bit 4 (low two bits: one of its samples; high
 // two: how many it has, 0 ends the list).
 #include "common.slang"
 
@@ -30,6 +32,7 @@ struct SamplesPush {
     uint depth;          // read: its depth, four samples
     uint visible;        // read: the visible list ((instance, cluster) entries)
     uint visible_offset;
+    uint surfaces;       // of a pixel that are listed to be shaded, its own with them (2 to 4)
 };
 ConstantBuffer<SamplesPush> push : register(b0);
 
@@ -134,12 +137,24 @@ Sorted ps_main(float4 position : SV_Position) {
     o.depth = sum / float(count[own]);
     o.groups = 0u;
     if (count[own] < 4u) {
+        // The others, the one with the most samples first (the earliest of
+        // equals), as many as are to be shaded.
         uint word = count[own];
         uint shift = 4u;
-        [unroll] for (uint i = 0; i < 4; ++i) {
-            if (i != own && count[i] != 0u) {
-                word |= (i | (count[i] << 2u)) << shift;
+        uint taken = 1u << own;
+        [unroll] for (uint k = 1u; k < 4u; ++k) {
+            uint best = 0u;
+            uint best_count = 0u;
+            [unroll] for (uint i = 0; i < 4; ++i) {
+                if ((taken & (1u << i)) == 0u && count[i] > best_count) {
+                    best = i;
+                    best_count = count[i];
+                }
+            }
+            if (best_count != 0u && k < push.surfaces) {
+                word |= (best | (best_count << 2u)) << shift;
                 shift += 4u;
+                taken |= 1u << best;
             }
         }
         o.groups = word;

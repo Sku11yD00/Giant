@@ -1818,6 +1818,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (ImGui::Checkbox("Multisampling (4 samples on edges)", &multisampling)) {
             run("set_render_settings", {{"multisampling", multisampling}});
         }
+        int surfaces = static_cast<int>(r.multisampling_surfaces);
+        if (ImGui::SliderInt("Surfaces shaded on an edge", &surfaces, 2, 4)) {
+            run("set_render_settings", {{"multisampling_surfaces", surfaces}});
+        }
         bool gpu = r.gpu_culling;
         if (ImGui::Checkbox("GPU culling", &gpu)) {
             run("set_render_settings", {{"gpu_culling", gpu}});

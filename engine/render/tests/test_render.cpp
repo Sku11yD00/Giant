@@ -2766,6 +2766,132 @@ GIANT_TEST("render: d3d12 multisampled, an edge crossing a pixel fades in by qua
     device->destroy(target);
 }
 
+GIANT_TEST("render: d3d12 multisampled, a pixel that holds three surfaces shows the third only when it is shaded too") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 96, k_h = 96;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // From 10 m straight above: a pale sheet whose long edge runs down the
+    // middle of a column of pixels, a second pale sheet half a metre under
+    // it whose edge runs along the middle of a row, and a dark floor under
+    // both. In the pixel where the edges cross, the upper sheet has two of
+    // the four samples (the pixel's own surface), the lower sheet one and
+    // the floor one (reviewed by hand: pixel 56, 48).
+    FrameInput frame;
+    const double pixel = 2.0 * 10.0 * std::tan(0.5 * double(frame.view.vertical_fov_degrees) * 3.14159265358979 / 180.0) / k_h;
+    std::vector<Instance> instances(3);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {1.0f, 1.0f, 4.0f};
+    instances[0].position = DVec3{300.0 + pixel * 8.5 - 0.5, 0.0, 0.0};
+    instances[1].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[1].scale = {4.0f, 1.0f, 4.0f};
+    instances[1].position = DVec3{301.0, -0.5, pixel * 0.5 + 2.0};
+    instances[2].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[2].scale = {200.0f, 1.0f, 200.0f};
+    instances[2].position = {300.0, -1.0, 0.0};
+    instances[2].material = 1;
+    std::vector<Material> materials(2);
+    materials[0].base_color = {0.5f, 0.5f, 0.5f};
+    materials[0].roughness = 0.9f;
+    materials[1].base_color = {0.05f, 0.05f, 0.05f};
+    materials[1].roughness = 0.9f;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.voxel_far_field = false;
+    frame.settings.grow_pixels = 0.0f;
+    frame.view.position = {300.0, 10.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.materials = materials;
+    frame.instances = instances;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {1.0f, 1.0f, 1.0f};
+    frame.lighting.sky_light = {0.5f, 0.5f, 0.5f};
+    frame.lighting.ground_light = {0.5f, 0.5f, 0.5f};
+    // The picture's green, with so many of an edge pixel's surfaces shaded.
+    const auto draw = [&](u32 surfaces) {
+        frame.settings.multisampling_surfaces = surfaces;
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        GIANT_CHECK(renderer->last_stats().multisampled);
+        const std::vector<u8> image = device->read_texture(target);
+        std::vector<int> green(usize{k_w} * k_h, 0);
+        GIANT_CHECK(image.size() == green.size() * 4);
+        if (image.size() != green.size() * 4) return green;
+        for (usize i = 0; i < green.size(); ++i) {
+            green[i] = image[i * 4 + 1];
+        }
+        return green;
+    };
+    const std::vector<int> two = draw(2);
+    const std::vector<int> three = draw(3);
+    const std::vector<int> four = draw(4);
+    // Where two and four differ: the pixels that hold three surfaces (the
+    // crossing, and the upper sheet's other long edge where it crosses the
+    // lower one's, if that edge parts a pixel's samples too).
+    u32 changed = 0;
+    int most = 0;
+    usize where = 0;
+    int apart = 0; // three against four: no pixel here holds four surfaces
+    int sheet = 0;
+    int floor_seen = 255;
+    for (usize i = 0; i < two.size(); ++i) {
+        const int differs = std::abs(two[i] - four[i]);
+        changed += differs > 3 ? 1u : 0u;
+        if (differs > most) {
+            most = differs;
+            where = i;
+        }
+        apart = std::max(apart, std::abs(three[i] - four[i]));
+        sheet = std::max(sheet, four[i]);
+        floor_seen = std::min(floor_seen, four[i]);
+    }
+    std::printf("    the sheets %d bright, the floor %d; %u pixels differ between two and four surfaces shaded, the most at %u, %u: %d against %d; three against four %d apart at most\n",
+                sheet, floor_seen, changed, static_cast<u32>(where % k_w), static_cast<u32>(where / k_w), two[where], four[where], apart);
+    GIANT_CHECK(sheet > 60 && floor_seen < sheet / 2);
+    // Two shaded: the lower sheet's sample or the floor's is left out
+    // (whichever comes later among the pixel's samples), and the pixel is
+    // the upper sheet with a third of the other. All shaded: half the
+    // upper sheet, a quarter of each of the others, which is another
+    // brightness, between the floor's and the sheets'.
+    GIANT_CHECK(changed >= 1 && changed <= 6);
+    GIANT_CHECK(most >= 5);
+    GIANT_CHECK(four[where] > floor_seen + 5 && four[where] < sheet - 5);
+    GIANT_CHECK(apart <= 2);
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: lamp shadows are drawn once, again when a caster near moves, a few faces a frame (null device)") {
     NullScene s;
     if (s.renderer == nullptr) return;
