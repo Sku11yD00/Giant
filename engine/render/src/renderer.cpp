@@ -3009,16 +3009,21 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // Supersampling: the frame is drawn larger than the target and averaged
     // down into it at the end (shrink).
     const float super_asked = supersampling_of(settings);
+    // (No side past what a texture may be, 16384: both sides by the same, so the frame's pixels stay square.)
+    const float longest = static_cast<float>(std::max({target_desc->width, target_desc->height, 1u}));
+    const float super = std::max(std::min(super_asked, 16384.0f / longest), 1.0f);
     const auto scaled = [&](u32 side) {
-        // (No side past what a texture may be: 16384.)
-        const long larger = std::lround(static_cast<float>(side) * super_asked);
-        return static_cast<u32>(std::clamp(larger, static_cast<long>(side), std::max(static_cast<long>(side), 16384L)));
+        return std::clamp(static_cast<u32>(std::lround(static_cast<float>(side) * super)), side, std::max(side, 16384u));
     };
     u32 width = scaled(target_desc->width);
     u32 height = scaled(target_desc->height);
     bool shrinks = width != target_desc->width || height != target_desc->height;
-    if (shrinks && m_super_failed == std::pair<u32, u32>{width, height}) {
-        // The larger frame could not be made at this size: as the target is, until the size asked for changes.
+    if (super_asked != m_super_asked) {
+        m_super_asked = super_asked; // a new setting: tried again
+        m_super_failed = ~u64{0};
+    }
+    if (shrinks && u64{width} * height >= m_super_failed) {
+        // A larger frame no bigger than this could not be made: as the target is, until the setting changes.
         width = target_desc->width;
         height = target_desc->height;
         shrinks = false;
@@ -3027,7 +3032,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         if (!shrinks) {
             return;
         }
-        m_super_failed = {width, height};
+        m_super_failed = u64{width} * height;
         log_error("render", "supersampling: no room for the larger frame; drawing at the target's size");
         width = target_desc->width;
         height = target_desc->height;
@@ -5442,8 +5447,9 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
     };
     p.place[0] = wrap_place(cam.x);
     p.place[1] = wrap_place(cam.z);
+    // (A pixel of the target's: supersampling draws the streaks no thinner.)
     p.pixel_angle = 2.0f * std::tan(degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f)) * 0.5f) /
-                    static_cast<float>(std::max(m_height, 1u));
+                    static_cast<float>(std::max(m_height, 1u)) * m_super_scale;
     const bool falling = settings.precipitation && (p.rain > 0.0f || p.snow > 0.0f);
     const bool surfaces = settings.wet_surfaces && (p.wetness > 0.0f || p.snow_cover > 0.0f);
     const bool voxels = m_voxels != nullptr && data.voxel_levels.data != nullptr && m_voxels->levels() > 0;

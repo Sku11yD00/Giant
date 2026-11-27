@@ -835,13 +835,15 @@ an offline cooker can use it without a device.
   What goes by pixels on screen stays by the target's (`Frame::grow.z`,
   `shown_pixels`, the frame's pixels down one of the target's): the LOD
   error, hair's strands, the sun's shadow level for the scene, water and
-  particles, and the caps on ambient occlusion's, contact shadows' and
-  skin light's reach. A shadow's own LOD is by its texels as before.
+  particles, the caps on ambient occlusion's, contact shadows' and
+  skin light's reach, and how thin rain and snow are drawn. A shadow's own LOD is by its texels as before.
   Texture detail and growing follow the larger frame, and bloom's six
   halvings start from it, so its glow is narrower on screen (left open).
-  The view keeps the target's shape (the two sides round apart). Where
-  the larger frame cannot be made (no memory, or a side past 16384) the
-  frame is drawn at the target's size and that size is not tried again.
+  The view keeps the target's shape (the two sides round apart). A
+  side that would pass 16384 holds both sides to the most that fits.
+  Where the larger frame cannot be made (no memory) the frame is drawn at
+  the target's size, and no larger frame as big is tried until the
+  setting changes.
 - **Growing (nothing thinner than a pixel).** A trunk, railing or mast
   thinner than a pixel covers a pixel's centre in one frame and falls
   between two in the next, so far forests blinked as the camera moved, and

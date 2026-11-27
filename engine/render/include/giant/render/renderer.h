@@ -1544,7 +1544,8 @@ private:
     rhi::TextureHandle m_super;   // supersampling: the finished frame before it is averaged down (rgba8_srgb; else invalid)
     float m_super_scale = 1.0f;   // this frame: its pixels down one of the target's (1: not supersampled)
     float m_aspect = 1.0f;        // this frame: the target's width over its height (the view's shape)
-    std::pair<u32, u32> m_super_failed{0, 0}; // the larger frame's size that could not be made (not tried again)
+    u64 m_super_failed = ~u64{0}; // pixels of the smallest larger frame that could not be made (none as big is tried until the setting changes)
+    float m_super_asked = 1.0f;   // the setting m_super_failed is for
     rhi::TextureHandle m_edges;   // SMAA edges (rgba8_unorm)
     rhi::TextureHandle m_weights; // SMAA blend weights (rgba8_unorm)
     // Shading's output, before exposure (resolve.slang), which the screen

@@ -2391,6 +2391,10 @@ GIANT_TEST("render: supersampling adds one pass and keeps the detail the target'
     };
     const RenderStats plain = settle();
     GIANT_CHECK(plain.triangles > 0 && plain.post_draws > 0);
+    // (The cut does follow the error allowed here: twice it is coarser.)
+    frame.settings.lod_error_pixels = 2.0f;
+    GIANT_CHECK(settle().triangles < plain.triangles);
+    frame.settings.lod_error_pixels = 1.0f;
     frame.settings.supersampling = 2.0f;
     const RenderStats twice = settle();
     GIANT_CHECK(twice.post_draws == plain.post_draws + 1); // the averaging down
@@ -2409,6 +2413,20 @@ GIANT_TEST("render: supersampling adds one pass and keeps the detail the target'
     const RenderStats again = settle();
     GIANT_CHECK(again.post_draws == plain.post_draws && again.triangles == plain.triangles);
     s.device->destroy(target);
+    // A target so wide that twice it is past what a texture may be: both sides by the most that fits, still drawn.
+    t.width = 10000;
+    t.height = 8;
+    const rhi::TextureHandle wide = s.device->create_texture(t);
+    frame.settings.supersampling = 2.0f;
+    RenderStats st;
+    for (int i = 0; i < 4; ++i) {
+        rhi::CommandList* cmd = s.device->begin_frame(nullptr);
+        s.renderer->render(*cmd, wide, frame);
+        s.device->end_frame();
+        st = s.renderer->last_stats();
+    }
+    GIANT_CHECK(st.post_draws == plain.post_draws + 1);
+    s.device->destroy(wide);
 }
 
 GIANT_TEST("render: d3d12 supersampled, an edge crossing a pixel fades in by steps; as it is, it jumps") {
