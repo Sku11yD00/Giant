@@ -322,10 +322,22 @@ uint2 ps_cut(PsCutIn i) : SV_Target {
 // card does not cover is drawn for the samples it does, and the uv at its
 // middle would be past the card's edge (in an atlas, in the next leaf).
 [shader("pixel")]
-uint2 ps_cut_samples(PsCutIn i, out uint coverage : SV_Coverage) : SV_Target {
+uint2 ps_cut_samples(PsCutIn i, in uint covered : SV_Coverage, out uint coverage : SV_Coverage) : SV_Target {
     coverage = 0xFu;
     if (i.cut.x != 0xFFFFFFFFu) {
-        const float2 inside = EvaluateAttributeCentroid(i.uv);
+        // The middle of the samples the card covers, from the pixel's
+        // middle, and the uv there (uv is linear across the screen as far
+        // as a pixel goes).
+        float2 middle = float2(0.0, 0.0);
+        float samples = 0.0;
+        [unroll] for (uint s = 0; s < 4; ++s) {
+            if ((covered & (1u << s)) != 0u) {
+                middle += GetRenderTargetSamplePosition(int(s));
+                samples += 1.0;
+            }
+        }
+        middle /= max(samples, 1.0);
+        const float2 inside = i.uv + ddx(i.uv) * middle.x + ddy(i.uv) * middle.y;
         const float alpha = read_texture_nonuniform(i.cut.x)
                                 .SampleGrad(get_sampler(k_sampler_anisotropic_wrap), inside, ddx(i.uv), ddy(i.uv))
                                 .a;
