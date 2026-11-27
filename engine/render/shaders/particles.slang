@@ -329,7 +329,7 @@ void cs_prepare(uint3 id : SV_DispatchThreadID) {
         // on its far side too.
         const float3 l = f.sun_direction.xyz;
         const float pixel_size = distance * 2.0 / max(f.p11 * f.height, 1e-6);
-        float sun = have ? sun_visibility(e.shadows, center, l, l, max(pixel_size, size)) : 1.0;
+        float sun = have ? sun_visibility(e.shadows, center, l, l, max(pixel_size * shown_pixels(f), size)) : 1.0;
         if (sky_on) {
             sun *= cloud_shadow(sky, center);
         }

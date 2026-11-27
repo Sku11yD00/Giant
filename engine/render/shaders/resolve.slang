@@ -888,7 +888,7 @@ Shaded shade_pixel(float4 position, bool spread) {
                 const float3 world = dir * t;
                 const float3 vn = unpack_normal(packed);
                 const float far_pixel = t * 2.0 / max(f.p11 * f.height, 1e-6);
-                float sun = sun_visibility(extras.shadows, world, vn, f.sun_direction.xyz, far_pixel);
+                float sun = sun_visibility(extras.shadows, world, vn, f.sun_direction.xyz, far_pixel * shown_pixels(f));
                 if (sky_on) {
                     sun *= cloud_shadow(sky, world);
                 }
@@ -1037,7 +1037,7 @@ Shaded shade_pixel(float4 position, bool spread) {
         metal = 0.0;
         emissive = float3(0.0, 0.0, 0.0);
     }
-    float sun = sun_visibility(extras.shadows, world, surface_n, f.sun_direction.xyz, pixel_size);
+    float sun = sun_visibility(extras.shadows, world, surface_n, f.sun_direction.xyz, pixel_size * shown_pixels(f));
     if (sun > 0.0) {
         sun *= hair_shade(extras, f.sun_direction.xyz, world); // a head's own hair on its face, on the ground
     }
@@ -1093,7 +1093,7 @@ Shaded shade_pixel(float4 position, bool spread) {
         any(f.sun_light.rgb > float3(0.0, 0.0, 0.0))) {
         // The sun through skin's thin parts (dimmed by the clouds; the
         // pages say how much is in the way, the skin's own and any other).
-        const float thickness = sun_thickness(extras.shadows, world, surface_n, pixel_size);
+        const float thickness = sun_thickness(extras.shadows, world, surface_n, pixel_size * shown_pixels(f));
         const float3 t = through_skin(base * (1.0 - saturate(metal)), n, f.sun_direction.xyz, f.sun_light.rgb,
                                       thickness, skin_through.y) *
                          (skin_through.x * clouds);
@@ -1111,7 +1111,7 @@ Shaded shade_pixel(float4 position, bool spread) {
         // does not shade its own back).
         const float back = saturate(-dot(n, f.sun_direction.xyz));
         if (back > 0.0) {
-            const float shine = sun_visibility(extras.shadows, world, -surface_n, f.sun_direction.xyz, pixel_size) * clouds;
+            const float shine = sun_visibility(extras.shadows, world, -surface_n, f.sun_direction.xyz, pixel_size * shown_pixels(f)) * clouds;
             color += base * ((1.0 - saturate(metal)) * translucency * back * shine / k_pi) * f.sun_light.rgb;
         }
     }

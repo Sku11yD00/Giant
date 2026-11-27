@@ -794,6 +794,15 @@ struct SmaaPush {
 };
 static_assert(sizeof(SmaaPush) == 48);
 
+// shrink.slang's ShrinkPush.
+struct ShrinkPush {
+    float scale[2]; // source texels a target pixel spans, each way
+    float size[2];  // the source, texels
+    u32 color;
+    u32 pad[3];
+};
+static_assert(sizeof(ShrinkPush) == 32);
+
 // voxels.slang: one clipmap level, in the frame's levels upload.
 struct VoxelLevel {
     float origin[4];   // xyz: the window's minimum corner, camera-relative; w: brick size (m)

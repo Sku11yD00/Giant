@@ -162,6 +162,14 @@ float wind_value(float v) { return std::isfinite(v) ? std::clamp(v, 0.0f, 4.0f) 
 // RenderSettings::grow_pixels as used: 0 to 2, 0 if it is no number.
 float grow_of(const RenderSettings& s) { return std::isfinite(s.grow_pixels) ? std::clamp(s.grow_pixels, 0.0f, 2.0f) : 0.0f; }
 
+// RenderSettings::supersampling as used: 1 to 2, 1 if it is no number.
+float supersampling_of(const RenderSettings& s) {
+    return std::isfinite(s.supersampling) ? std::clamp(s.supersampling, 1.0f, 2.0f) : 1.0f;
+}
+
+// The LOD error allowed, in the target's pixels (and a shadow's texels).
+float lod_error_of(const RenderSettings& s) { return std::clamp(s.lod_error_pixels, 0.01f, 1000.0f); }
+
 gpu::MaterialWind wind_of(const Material& m) { return {wind_value(m.sway), wind_value(m.flutter)}; }
 
 // How far an instance can sway past its bounds this frame (common.slang's
@@ -295,7 +303,7 @@ Renderer::~Renderer() {
           m_raster_vertex[1], m_raster_vertex[2], m_raster_vertex[3], m_shadow_mesh_cut, m_shadow_vertex_cut,
           m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
-          m_smaa_blend, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
+          m_smaa_blend, m_shrink, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
           m_shadow_clear_pages, m_shadow_clear_words, m_light_clear, m_light_voxels, m_sky_view_pass,
           m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass, m_sky_multi_pass, m_sky_aerial_pass,
           m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram, m_bloom_down, m_bloom_up, m_post,
@@ -357,6 +365,7 @@ Renderer::~Renderer() {
     m_device.destroy(m_vis);
     m_device.destroy(m_hzb);
     m_device.destroy(m_color);
+    m_device.destroy(m_super);
     m_device.destroy(m_edges);
     m_device.destroy(m_weights);
     m_device.destroy(m_radiance);
@@ -668,6 +677,13 @@ bool Renderer::init() {
     smaa.color_formats[0] = rhi::Format::rgba8_srgb;
     smaa.name = "SMAA: blend";
     m_smaa_blend = m_device.create_pipeline(smaa);
+    rhi::GraphicsPipelineDesc shrink;
+    shrink.vertex = shaders::shrink_vs();
+    shrink.pixel = shaders::shrink_ps();
+    shrink.cull = rhi::CullMode::none;
+    shrink.color_formats[0] = rhi::Format::rgba8_srgb;
+    shrink.name = "supersampling: shrink";
+    m_shrink = m_device.create_pipeline(shrink);
     rhi::GraphicsPipelineDesc voxels;
     voxels.vertex = shaders::voxels_vs();
     voxels.pixel = shaders::voxels_ps();
@@ -678,7 +694,7 @@ bool Renderer::init() {
     for (const rhi::PipelineHandle p :
          {m_cull_reset, m_cull_prepare, m_cull_instances, m_cull_traverse, m_cull_retest, m_hzb_first,
           m_hzb_down, m_raster_vertex[0], m_raster_vertex[1], m_raster_vertex[2], m_raster_vertex[3],
-          m_shadow_vertex_cut, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_voxel_view,
+          m_shadow_vertex_cut, m_resolve, m_smaa_edges, m_smaa_weights, m_smaa_blend, m_shrink, m_voxel_view,
           m_reflect, m_resolve_direct, m_shadow_vertex, m_shadow_clear_pages, m_shadow_clear_words, m_light_clear,
           m_light_voxels, m_sky_view_pass, m_cloud_map_pass, m_cloud_shadow_pass, m_clouds_pass, m_cover_pass,
           m_sky_multi_pass, m_sky_aerial_pass, m_sky_ambient_pass, m_skin, m_histogram_clear, m_histogram,
@@ -1593,8 +1609,8 @@ Mat4 Renderer::view_projection(const View& view, float aspect) {
     return perspective_reverse_z(fov, aspect, near_plane) * view_from_orientation(view.orientation);
 }
 
-bool Renderer::ensure_targets(u32 width, u32 height) {
-    if (m_depth.valid() && m_vis.valid() && m_hzb.valid() && m_color.valid() && m_edges.valid() &&
+bool Renderer::ensure_targets(u32 width, u32 height, bool super) {
+    if (m_super.valid() == super && m_depth.valid() && m_vis.valid() && m_hzb.valid() && m_color.valid() && m_edges.valid() &&
         m_weights.valid() && m_radiance.valid() && m_gloss.valid() && m_fallback.valid() && m_scene.valid() &&
         m_width == width && m_height == height) {
         return true;
@@ -1609,6 +1625,8 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_device.destroy(m_gloss);
     m_device.destroy(m_fallback);
     m_device.destroy(m_scene);
+    m_device.destroy(m_super);
+    m_super = {};
     for (rhi::TextureHandle& t : m_bloom_downs) { // sized to the frame: made again below
         m_device.destroy(t);
         t = {};
@@ -1669,6 +1687,11 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     desc.format = rhi::Format::rgba8_srgb;
     desc.name = "shaded image";
     m_color = m_device.create_texture(desc);
+    if (super) {
+        // Supersampling: the finished frame, before it is averaged down.
+        desc.name = "supersampled image";
+        m_super = m_device.create_texture(desc);
+    }
     desc.format = rhi::Format::rgba8_unorm;
     desc.name = "SMAA edges";
     m_edges = m_device.create_texture(desc);
@@ -1701,7 +1724,7 @@ bool Renderer::ensure_targets(u32 width, u32 height) {
     m_hzb_valid = false;
     m_width = width;
     m_height = height;
-    if (!m_depth.valid() || !m_vis.valid() || !m_hzb.valid() || !m_color.valid() || !m_edges.valid() ||
+    if (m_super.valid() != super || !m_depth.valid() || !m_vis.valid() || !m_hzb.valid() || !m_color.valid() || !m_edges.valid() ||
         !m_weights.valid() || !m_radiance.valid() || !m_gloss.valid() || !m_fallback.valid() || !m_scene.valid()) {
         // Half-made targets are not reused: the next frame tries again.
         m_width = 0;
@@ -2076,7 +2099,7 @@ void Renderer::track_skin_shadows(const FrameInput& frame) {
     }
 }
 
-void Renderer::aim_skin_floors(const FrameInput& frame, u32 width, u32 height) {
+void Renderer::aim_skin_floors(const FrameInput& frame, u32 height) {
     if (m_skinned.empty()) {
         return;
     }
@@ -2087,11 +2110,11 @@ void Renderer::aim_skin_floors(const FrameInput& frame, u32 width, u32 height) {
     // they reach hidden: the streamer's usage marks).
     const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
     const geometry::Frustum frustum = geometry::frustum_from_view_projection(
-        view_projection(frame.view, static_cast<float>(width) / static_cast<float>(std::max(height, 1u))));
+        view_projection(frame.view, m_aspect));
     geometry::LodView lod;
     lod.pixels_per_unit = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(height);
     lod.near_plane = std::max(frame.view.near_plane, 1e-4f);
-    lod.threshold_pixels = std::clamp(frame.settings.lod_error_pixels, 0.01f, 1000.0f);
+    lod.threshold_pixels = lod_error_of(frame.settings) * m_super_scale; // (in the frame's pixels)
     m_skin_aims.assign(m_meshes.size(), ~0u);
     const usize count = std::min<usize>(frame.instances.size(), k_max_instances);
     for (usize i = 0; i < count; ++i) {
@@ -2125,7 +2148,7 @@ void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32
     geometry::LodView lod;
     lod.pixels_per_unit = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(height);
     lod.near_plane = std::max(frame.view.near_plane, 1e-4f);
-    lod.threshold_pixels = std::clamp(frame.settings.lod_error_pixels, 0.01f, 1000.0f);
+    lod.threshold_pixels = lod_error_of(frame.settings) * m_super_scale; // (in the frame's pixels)
     lod.frustum = &frustum;
     m_entries.clear();
     for (u32 slot = 0; slot < m_valid.size(); ++slot) {
@@ -2514,6 +2537,7 @@ void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const 
     };
     const auto constants = [&](const LocalShadows::Face& f) {
         gpu::FrameConstants k = base;
+        k.threshold = lod_error_of(frame.settings); // (texels: supersampling is the view's alone)
         const Mat4 m = LocalShadows::face_matrix(f, frame.view.position);
         std::memcpy(k.view_proj, m.m, sizeof(k.view_proj));
         LocalShadows::face_planes(f, frame.view.position, k.planes);
@@ -2812,6 +2836,8 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
         // pixel: a trunk thinner than a texel still casts onto one.
         k.grow[0] = float(texel) * grow_of(frame.settings);
         k.grow[1] = 0.0f;
+        k.grow[2] = 0.0f;
+        k.threshold = lod_error_of(frame.settings); // (texels: supersampling is the view's alone)
         // Camera-relative world to the window's clip space: x right, y
         // down the texel rows, depth 0.5 - (z - anchor) / range (larger:
         // nearer the sun; from a fixed anchor, so cached pages stay right
@@ -2979,12 +3005,55 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     if (target_desc == nullptr) {
         return;
     }
-    const u32 width = target_desc->width;
-    const u32 height = target_desc->height;
-    if (!ensure_targets(width, height)) {
-        return;
-    }
     const RenderSettings& settings = frame.settings;
+    // Supersampling: the frame is drawn larger than the target and averaged
+    // down into it at the end (shrink).
+    // (Copied: making targets may move the device's descriptions.)
+    const u32 target_width = target_desc->width;
+    const u32 target_height = target_desc->height;
+    const float super_asked = supersampling_of(settings);
+    // (No side past what a texture may be, 16384: both sides by the same, so the frame's pixels stay square.)
+    const float longest = static_cast<float>(std::max({target_width, target_height, 1u}));
+    const float super = std::max(std::min(super_asked, 16384.0f / longest), 1.0f);
+    const auto scaled = [&](u32 side) {
+        return std::clamp(static_cast<u32>(std::lround(static_cast<float>(side) * super)), side, std::max(side, 16384u));
+    };
+    u32 width = scaled(target_width);
+    u32 height = scaled(target_height);
+    bool shrinks = width != target_width || height != target_height;
+    if (super_asked != m_super_asked) {
+        m_super_asked = super_asked; // a new setting: tried again
+        m_super_failed = ~u64{0};
+    }
+    if (shrinks && u64{width} * height >= m_super_failed) {
+        // A larger frame no bigger than this could not be made: as the target is, until the setting changes.
+        width = target_width;
+        height = target_height;
+        shrinks = false;
+    }
+    if (!ensure_targets(width, height, shrinks)) {
+        if (!shrinks) {
+            return;
+        }
+        m_super_failed = u64{width} * height;
+        log_error("render", "supersampling: no room for the larger frame; drawing at the target's size");
+        width = target_width;
+        height = target_height;
+        shrinks = false;
+        if (!ensure_targets(width, height, false)) {
+            return;
+        }
+    }
+    // The frame's pixels down one of the target's, and the view's shape:
+    // the target's own (the two sides round apart, so the frame's pixels
+    // may be a hair off square; what the caller lays over the target with
+    // its shape still lines up).
+    m_super_scale = static_cast<float>(height) / static_cast<float>(std::max(target_height, 1u));
+    m_aspect = static_cast<float>(target_width) / static_cast<float>(std::max(target_height, 1u));
+    const rhi::TextureHandle shown = target; // what the caller sees
+    if (shrinks) {
+        target = m_super;
+    }
     bool gpu = settings.gpu_culling;
     // The cells (for the stats: the voxel world and shadows keep their own).
     m_cells_count = static_cast<u32>(frame.cells.size());
@@ -3017,7 +3086,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // before anything reads the geometry.
     const u32 frame_number = static_cast<u32>(m_device.frames_completed() + 1); // 0 means never
     cmd.begin_timing("streaming");
-    aim_skin_floors(frame, width, height);
+    aim_skin_floors(frame, height);
     m_streamer->update(cmd, frame_number);
     cmd.end_timing();
     pose_skins(cmd);
@@ -3145,7 +3214,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
 
     // Frame constants.
     const Lighting& light = frame.lighting;
-    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const float aspect = m_aspect;
     const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
     const float near_plane = std::max(frame.view.near_plane, 1e-4f);
     const float focal = 1.0f / std::tan(fov * 0.5f);
@@ -3193,9 +3262,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     k.tone_mapper = settings.tone_mapper == ToneMapper::agx ? 1u : 0u;
     k.exposure = update_exposure(frame, lit_view);
     k.debug_view = static_cast<u32>(settings.debug_view);
-    k.threshold = std::clamp(settings.lod_error_pixels, 0.01f, 1000.0f);
+    k.threshold = lod_error_of(settings) * m_super_scale; // (in the frame's pixels)
     k.pixels_per_unit = 0.5f * focal * static_cast<float>(height);
     k.grow[1] = grow_of(settings) / k.pixels_per_unit; // (a pixel d metres off is d / pixels_per_unit metres)
+    k.grow[2] = m_super_scale; // (what goes by pixels on screen: by the target's, not the frame's)
     k.near_plane = near_plane;
     k.width = static_cast<float>(width);
     k.height = static_cast<float>(height);
@@ -3603,6 +3673,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const rhi::TextureHandle shaded = antialias ? m_color : target;
     if (settings.debug_view == DebugView::voxels) {
         draw_voxels(cmd, target, data, light.background);
+        if (shrinks) {
+            shrink(cmd, shown, light.background);
+        }
         finish_stats(data);
         mark(CpuSection::shading);
         return;
@@ -4109,6 +4182,9 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         smaa(cmd, target, bg);
         cmd.end_timing();
     }
+    if (shrinks) {
+        shrink(cmd, shown, bg);
+    }
     finish_stats(data);
     mark(CpuSection::shading);
 }
@@ -4129,7 +4205,7 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
         const gpu::WaterLook packed = pack_water_look(under.look);
         for (u32 i = 0; i < swell_count; ++i) under_reach += static_cast<double>(swell[i].amplitude) * packed.waves;
     }
-    const float aspect = static_cast<float>(m_width) / static_cast<float>(std::max(m_height, 1u));
+    const float aspect = m_aspect;
     const float tan_y = std::tan(degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f)) * 0.5f);
     const bool under_on = under.on && std::isfinite(under.level) &&
                           near_plane_under(frame.view.orientation, tan_y, aspect,
@@ -4489,13 +4565,14 @@ bool Renderer::ensure_hair_shadows() {
 
 void Renderer::prepare_hair(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame) {
     // What to draw: the nearest grooms in view, thinned by their size on screen.
-    const float aspect = static_cast<float>(m_width) / static_cast<float>(std::max(m_height, 1u));
+    const float aspect = m_aspect;
     const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
     const geometry::Frustum frustum = geometry::frustum_from_view_projection(view_projection(frame.view, aspect));
     HairView view;
     view.position = frame.view.position;
     for (u32 p = 0; p < 5; ++p) view.planes[p] = frustum.planes[p];
-    view.pixels_per_metre_at_one = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(m_height);
+    // (By the target's pixels: supersampling keeps no more strands.)
+    view.pixels_per_metre_at_one = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(m_height) / m_super_scale;
     view.detail = frame.settings.hair_detail;
     plan_hair(*m_grooms, frame.hair, view, *m_hair_plan);
     const HairPlan& plan = *m_hair_plan;
@@ -4938,6 +5015,32 @@ void Renderer::smaa(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3
     pass(m_smaa_blend, target, {background.x, background.y, background.z, 1.0f});
 }
 
+void Renderer::shrink(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3& background) {
+    const rhi::TextureDesc* to = m_device.describe(target);
+    if (to == nullptr || !m_super.valid()) {
+        return;
+    }
+    cmd.begin_timing("supersampling");
+    gpu::ShrinkPush push{};
+    push.scale[0] = static_cast<float>(m_width) / static_cast<float>(std::max(to->width, 1u));
+    push.scale[1] = static_cast<float>(m_height) / static_cast<float>(std::max(to->height, 1u));
+    push.size[0] = static_cast<float>(m_width);
+    push.size[1] = static_cast<float>(m_height);
+    push.color = m_device.read_descriptor(m_super);
+    cmd.barrier(m_super, rhi::ResourceState::shader_read);
+    rhi::RenderPassDesc desc;
+    // Every pixel is written; the clear keeps the target's contents defined
+    // where no draw is recorded, as on the null device.
+    desc.colors[0] = {target, rhi::LoadOp::clear, {background.x, background.y, background.z, 1.0f}};
+    cmd.begin_render_pass(desc);
+    cmd.set_pipeline(m_shrink);
+    cmd.push(push);
+    cmd.draw(3);
+    cmd.end_render_pass();
+    ++m_stats.post_draws;
+    cmd.end_timing();
+}
+
 void Renderer::copy_streaming_stats() {
     m_stats.textures = static_cast<u32>(m_textures.size() - m_free_textures.size());
     m_stats.texture_bytes = m_texture_bytes;
@@ -5347,8 +5450,9 @@ bool Renderer::draw_sky(rhi::CommandList& cmd, const FrameData& data, const Fram
     };
     p.place[0] = wrap_place(cam.x);
     p.place[1] = wrap_place(cam.z);
+    // (A pixel of the target's: supersampling draws the streaks no thinner.)
     p.pixel_angle = 2.0f * std::tan(degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f)) * 0.5f) /
-                    static_cast<float>(std::max(m_height, 1u));
+                    static_cast<float>(std::max(m_height, 1u)) * m_super_scale;
     const bool falling = settings.precipitation && (p.rain > 0.0f || p.snow > 0.0f);
     const bool surfaces = settings.wet_surfaces && (p.wetness > 0.0f || p.snow_cover > 0.0f);
     const bool voxels = m_voxels != nullptr && data.voxel_levels.data != nullptr && m_voxels->levels() > 0;

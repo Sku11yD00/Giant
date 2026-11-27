@@ -2358,6 +2358,195 @@ GIANT_TEST("render: d3d12 a rod a fifth of a pixel wide is on every row wherever
     device->destroy(target);
 }
 
+GIANT_TEST("render: supersampling adds one pass and keeps the detail the target's pixels ask for (null device)") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    // A small target of its own (the larger frame is up to four times it).
+    rhi::TextureDesc t;
+    t.width = 480;
+    t.height = 270;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = s.device->create_texture(t);
+    // Spheres at many distances: their LOD follows the pixels they cover.
+    std::vector<Instance> instances(24);
+    for (usize i = 0; i < instances.size(); ++i) {
+        instances[i].mesh = s.renderer->builtin(BuiltinMesh::sphere);
+        instances[i].position = {double(i % 6) * 0.5 - 1.25, 1.0, -1.5 - 1.5 * double(i)};
+    }
+    FrameInput frame;
+    frame.instances = instances;
+    frame.view.position = {0.0, 1.5, 0.0};
+    frame.settings.gpu_culling = false; // the counts are this frame's
+    const auto settle = [&] {
+        RenderStats st;
+        for (int i = 0; i < 20; ++i) {
+            rhi::CommandList* cmd = s.device->begin_frame(nullptr);
+            s.renderer->render(*cmd, target, frame);
+            s.device->end_frame();
+            st = s.renderer->last_stats();
+            if (i >= 2 && st.streamed_in == 0 && st.waiting == 0) break;
+        }
+        return st;
+    };
+    const RenderStats plain = settle();
+    GIANT_CHECK(plain.triangles > 0 && plain.post_draws > 0);
+    // (The cut does follow the error allowed here: twice it is coarser.)
+    frame.settings.lod_error_pixels = 2.0f;
+    GIANT_CHECK(settle().triangles < plain.triangles);
+    frame.settings.lod_error_pixels = 1.0f;
+    frame.settings.supersampling = 2.0f;
+    const RenderStats twice = settle();
+    GIANT_CHECK(twice.post_draws == plain.post_draws + 1); // the averaging down
+    // Twice the pixels down the frame and twice the error allowed, both exact: the same cut.
+    GIANT_CHECK(twice.clusters == plain.clusters && twice.triangles == plain.triangles);
+    GIANT_CHECK(s.device->last_frame_stats().draws == twice.draws + twice.post_draws + twice.shadow_draws);
+    frame.settings.supersampling = 1.5f;
+    const RenderStats half_more = settle();
+    GIANT_CHECK(half_more.post_draws == plain.post_draws + 1 && half_more.triangles > 0);
+    // No number, or out of range: held to 1 to 2.
+    frame.settings.supersampling = std::numeric_limits<float>::quiet_NaN();
+    GIANT_CHECK(settle().post_draws == plain.post_draws);
+    frame.settings.supersampling = 9.0f;
+    GIANT_CHECK(settle().post_draws == plain.post_draws + 1);
+    frame.settings.supersampling = 1.0f;
+    const RenderStats again = settle();
+    GIANT_CHECK(again.post_draws == plain.post_draws && again.triangles == plain.triangles);
+    s.device->destroy(target);
+    // A target so wide that twice it is past what a texture may be: both sides by the most that fits, still drawn.
+    t.width = 10000;
+    t.height = 8;
+    const rhi::TextureHandle wide = s.device->create_texture(t);
+    frame.settings.supersampling = 2.0f;
+    RenderStats st;
+    for (int i = 0; i < 4; ++i) {
+        rhi::CommandList* cmd = s.device->begin_frame(nullptr);
+        s.renderer->render(*cmd, wide, frame);
+        s.device->end_frame();
+        st = s.renderer->last_stats();
+    }
+    GIANT_CHECK(st.post_draws == plain.post_draws + 1);
+    s.device->destroy(wide);
+}
+
+GIANT_TEST("render: d3d12 supersampled, an edge crossing a pixel fades in by steps; as it is, it jumps") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 96, k_h = 96;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // The camera 10 m above a pale sheet on black, looking straight down
+    // (some 12 cm a pixel). The sheet is moved to the right across one
+    // pixel in sixteen steps: its two edges up the image each cross pixels.
+    std::vector<Instance> instances(1);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {1.0f, 1.0f, 4.0f};
+    std::vector<Material> materials(1);
+    materials[0].base_color = {0.9f, 0.9f, 0.9f};
+    materials[0].roughness = 0.9f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.voxel_far_field = false;
+    frame.settings.grow_pixels = 0.0f;
+    frame.view.position = {300.0, 10.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.instances = instances;
+    frame.materials = materials;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {2.0f, 2.0f, 2.0f};
+    frame.lighting.sky_light = {1.0f, 1.0f, 1.0f};
+    frame.lighting.ground_light = {1.0f, 1.0f, 1.0f};
+    // The middle row's pixels (green).
+    const auto draw = [&] {
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        const std::vector<u8> image = device->read_texture(target);
+        std::vector<int> row(k_w, 0);
+        GIANT_CHECK(image.size() == usize{k_w} * k_h * 4);
+        if (image.size() != usize{k_w} * k_h * 4) return row;
+        for (u32 x = 0; x < k_w; ++x) {
+            row[x] = image[(usize{k_h / 2} * k_w + x) * 4 + 1];
+        }
+        return row;
+    };
+    const double pixel = 2.0 * 10.0 * std::tan(0.5 * double(frame.view.vertical_fov_degrees) * 3.14159265358979 / 180.0) / k_h;
+    // For a scale: the sheet's own brightness, how many pixels over the
+    // steps were neither the sheet's nor black, and the most the row's
+    // summed brightness changed from one step to the next.
+    struct Seen {
+        int sheet = 0;
+        u32 between = 0;
+        int jump = 0;
+    };
+    const auto sweep = [&](float scale) {
+        frame.settings.supersampling = scale;
+        Seen seen;
+        int before = -1;
+        for (u32 step = 0; step < 16; ++step) {
+            // (A quarter of a step on: no edge sits on a look's place at a step, whichever scale.)
+            instances[0].position = DVec3{300.0 + pixel * (double(step) + 0.25) / 16.0, 0.0, 0.0};
+            const std::vector<int> row = draw();
+            seen.sheet = std::max(seen.sheet, row[k_w / 2]);
+            int sum = 0;
+            for (const int v : row) {
+                sum += v;
+                if (v > 16 && v < row[k_w / 2] - 16) ++seen.between;
+            }
+            if (before >= 0) seen.jump = std::max(seen.jump, std::abs(sum - before));
+            before = sum;
+        }
+        return seen;
+    };
+    const Seen plain = sweep(1.0f);
+    const Seen twice = sweep(2.0f);
+    const Seen half_more = sweep(1.5f);
+    std::printf("    the sheet %d, %d, %d bright; pixels in between %u, %u, %u; the row's biggest jump %d, %d, %d (as it is, twice, one and a half times)\n",
+                plain.sheet, twice.sheet, half_more.sheet, plain.between, twice.between, half_more.between, plain.jump,
+                twice.jump, half_more.jump);
+    // The sheet itself looks the same however it is drawn.
+    GIANT_CHECK(plain.sheet > 100 && std::abs(twice.sheet - plain.sheet) <= 2 && std::abs(half_more.sheet - plain.sheet) <= 2);
+    // As it is, a pixel is the sheet or it is not, and an edge crossing a pixel is one jump of a whole pixel.
+    GIANT_CHECK(plain.between == 0);
+    GIANT_CHECK(plain.jump >= plain.sheet - 2);
+    // Supersampled, edge pixels are part-way, and no step changes the row by a whole pixel.
+    GIANT_CHECK(twice.between > 0 && half_more.between > 0);
+    GIANT_CHECK(twice.jump > 0 && twice.jump <= plain.sheet * 17 / 20);
+    GIANT_CHECK(half_more.jump > 0 && half_more.jump <= plain.sheet * 9 / 10); // (two thirds of a pixel at the most)
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
 GIANT_TEST("render: lamp shadows are drawn once, again when a caster near moves, a few faces a frame (null device)") {
     NullScene s;
     if (s.renderer == nullptr) return;

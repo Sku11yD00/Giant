@@ -50,6 +50,7 @@ struct Frame {
     uint wind_table_count;
     float sea_level;      // the highest sea's level, camera-relative (k_no_sea: none)
     // Growing (grow_by below): x metres every vertex grows by, y metres more for each metre it is in front of the eye.
+    // z: supersampling, the frame's pixels down one of the target's (shown_pixels below; 0 in a shadow's frame).
     float4 grow;
 };
 static const float k_no_sea = -1.0e30;
@@ -394,6 +395,10 @@ float3 cluster_grow(ByteAddressBuffer pool, uint base, Cluster c, uint local_ver
 // not by a share of a far corner's.
 static const float k_most_grow = 2.0; // geometry's: the longest way a vertex grows
 float grow_by(Frame f, float depth) { return f.grow.x + f.grow.y * depth; }
+
+// Supersampling (RenderSettings::supersampling): how many of the frame's
+// pixels lie across one of the target's (1: none).
+float shown_pixels(Frame f) { return max(f.grow.z, 1.0); }
 // A camera-relative point's metres in front of the eye.
 float depth_ahead(Frame f, float3 at) { return -dot(f.view_rows[2].xyz, at); }
 // The furthest anything in a sphere is drawn from where it is (culling's

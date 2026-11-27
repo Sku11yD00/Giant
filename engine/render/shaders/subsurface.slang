@@ -54,7 +54,7 @@ void cs_spread(uint3 id : SV_DispatchThreadID) {
     const float d = depth.Load(int3(px, 0));
     const float z = d > 0.0 ? f.near_plane / d : 1.0e6;
     // The scatter's reach in pixels here.
-    const float reach = min(middle.a * f.p11 * float(f.height) / (2.0 * z), k_max_spread_pixels);
+    const float reach = min(middle.a * f.p11 * float(f.height) / (2.0 * z), k_max_spread_pixels * shown_pixels(f));
     const int2 axis = down ? int2(0, 1) : int2(1, 0);
     const int2 size = int2(int(push.width), int(push.height));
     ByteAddressBuffer kernel = read_buffer(push.kernel);

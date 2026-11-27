@@ -142,7 +142,7 @@ void cs_gtao(uint3 id : SV_DispatchThreadID) {
 
     // The radius on screen, in full-size pixels.
     const float radius = max(push.radius, 0.01);
-    const float pixels = min(radius * f.p00 * 0.5 * f.width / max(-p.z, 1e-3), k_ao_max_pixels);
+    const float pixels = min(radius * f.p00 * 0.5 * f.width / max(-p.z, 1e-3), k_ao_max_pixels * shown_pixels(f));
     if (pixels < 1.0) {
         target[id.xy] = float4(1.0, -p.z, encode_octahedral(n));
         return;
@@ -310,7 +310,7 @@ void cs_contact(uint3 id : SV_DispatchThreadID) {
         return;
     }
     if (d.z > 0.0) len = min(len, (-p.z - f.near_plane * 1.5) / d.z);
-    len = min(len, k_contact_pixels * pixel_size);
+    len = min(len, k_contact_pixels * shown_pixels(f) * pixel_size);
     if (len < pixel_size * 2.0) {
         target[id.xy] = 1.0;
         return;
