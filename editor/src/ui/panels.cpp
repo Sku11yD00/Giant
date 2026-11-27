@@ -1796,9 +1796,15 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (ImGui::SliderFloat("LOD error (px)", &error, 0.1f, 16.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
             run("set_render_settings", {{"lod_error_pixels", std::clamp(error, 0.1f, 64.0f)}});
         }
-        float super = r.supersampling;
-        if (ImGui::SliderFloat("Supersampling", &super, 1.0f, 2.0f, "%.2f x")) {
-            run("set_render_settings", {{"supersampling", std::clamp(super, 1.0f, 2.0f)}});
+        // A few steps, not a slider: each size makes the frame's targets anew.
+        const float scales[] = {1.0f, 1.25f, 1.5f, 2.0f};
+        const char* const scale_labels[] = {"Off", "1.25 x", "1.5 x", "2 x"};
+        int scale = 0;
+        for (int i = 1; i < IM_ARRAYSIZE(scales); ++i) {
+            if (r.supersampling >= (scales[i - 1] + scales[i]) * 0.5f) scale = i;
+        }
+        if (ImGui::Combo("Supersampling", &scale, scale_labels, IM_ARRAYSIZE(scale_labels))) {
+            run("set_render_settings", {{"supersampling", scales[scale]}});
         }
         bool gpu = r.gpu_culling;
         if (ImGui::Checkbox("GPU culling", &gpu)) {

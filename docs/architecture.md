@@ -826,13 +826,22 @@ an offline cooker can use it without a device.
   whole frame that many times the target's size each way and averages it
   down at the end (`shrink.slang`: a box over the texels each target
   pixel covers, by the share covered, in linear light), so a pixel is the
-  mean of up to four looks and an edge crossing it fades in by steps. It
-  costs GPU time with the pixels drawn (four times at 2), so it is an
-  extra for cards with room, not the answer for most: that is to be more
-  looks on edge pixels alone. The LOD error and the sun's shadow level
-  stay those the target's pixels ask for (`Frame::grow.z`,
-  `shown_pixels`); texture detail, growing and everything else follow the
-  larger frame.
+  mean of several looks (four at 2; up to nine unevenly weighted texels
+  at scales between) and an edge crossing it changes it in steps (half
+  the pixel at a time at 2, up to two thirds at 1.5): less shimmer, not
+  none, and not yet measured on the valley. It costs GPU time with the
+  pixels drawn (four times at 2), so it is an extra for cards with room,
+  not the answer for most: that is to be more looks on edge pixels alone.
+  What goes by pixels on screen stays by the target's (`Frame::grow.z`,
+  `shown_pixels`, the frame's pixels down one of the target's): the LOD
+  error, hair's strands, the sun's shadow level for the scene, water and
+  particles, and the caps on ambient occlusion's, contact shadows' and
+  skin light's reach. A shadow's own LOD is by its texels as before.
+  Texture detail and growing follow the larger frame, and bloom's six
+  halvings start from it, so its glow is narrower on screen (left open).
+  The view keeps the target's shape (the two sides round apart). Where
+  the larger frame cannot be made (no memory, or a side past 16384) the
+  frame is drawn at the target's size and that size is not tried again.
 - **Growing (nothing thinner than a pixel).** A trunk, railing or mast
   thinner than a pixel covers a pixel's centre in one frame and falls
   between two in the next, so far forests blinked as the camera moved, and

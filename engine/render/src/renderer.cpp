@@ -167,11 +167,8 @@ float supersampling_of(const RenderSettings& s) {
     return std::isfinite(s.supersampling) ? std::clamp(s.supersampling, 1.0f, 2.0f) : 1.0f;
 }
 
-// The LOD error allowed, in the pixels the frame is drawn at: the setting
-// is in the target's pixels, whatever the supersampling.
-float lod_error_of(const RenderSettings& s) {
-    return std::clamp(s.lod_error_pixels, 0.01f, 1000.0f) * supersampling_of(s);
-}
+// The LOD error allowed, in the target's pixels (and a shadow's texels).
+float lod_error_of(const RenderSettings& s) { return std::clamp(s.lod_error_pixels, 0.01f, 1000.0f); }
 
 gpu::MaterialWind wind_of(const Material& m) { return {wind_value(m.sway), wind_value(m.flutter)}; }
 
@@ -368,6 +365,7 @@ Renderer::~Renderer() {
     m_device.destroy(m_vis);
     m_device.destroy(m_hzb);
     m_device.destroy(m_color);
+    m_device.destroy(m_super);
     m_device.destroy(m_edges);
     m_device.destroy(m_weights);
     m_device.destroy(m_radiance);
@@ -2101,7 +2099,7 @@ void Renderer::track_skin_shadows(const FrameInput& frame) {
     }
 }
 
-void Renderer::aim_skin_floors(const FrameInput& frame, u32 width, u32 height) {
+void Renderer::aim_skin_floors(const FrameInput& frame, u32 height) {
     if (m_skinned.empty()) {
         return;
     }
@@ -2112,11 +2110,11 @@ void Renderer::aim_skin_floors(const FrameInput& frame, u32 width, u32 height) {
     // they reach hidden: the streamer's usage marks).
     const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
     const geometry::Frustum frustum = geometry::frustum_from_view_projection(
-        view_projection(frame.view, static_cast<float>(width) / static_cast<float>(std::max(height, 1u))));
+        view_projection(frame.view, m_aspect));
     geometry::LodView lod;
     lod.pixels_per_unit = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(height);
     lod.near_plane = std::max(frame.view.near_plane, 1e-4f);
-    lod.threshold_pixels = lod_error_of(frame.settings);
+    lod.threshold_pixels = lod_error_of(frame.settings) * m_super_scale; // (in the frame's pixels)
     m_skin_aims.assign(m_meshes.size(), ~0u);
     const usize count = std::min<usize>(frame.instances.size(), k_max_instances);
     for (usize i = 0; i < count; ++i) {
@@ -2150,7 +2148,7 @@ void Renderer::select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32
     geometry::LodView lod;
     lod.pixels_per_unit = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(height);
     lod.near_plane = std::max(frame.view.near_plane, 1e-4f);
-    lod.threshold_pixels = lod_error_of(frame.settings);
+    lod.threshold_pixels = lod_error_of(frame.settings) * m_super_scale; // (in the frame's pixels)
     lod.frustum = &frustum;
     m_entries.clear();
     for (u32 slot = 0; slot < m_valid.size(); ++slot) {
@@ -2539,6 +2537,7 @@ void Renderer::draw_local_shadows(rhi::CommandList& cmd, FrameData& data, const 
     };
     const auto constants = [&](const LocalShadows::Face& f) {
         gpu::FrameConstants k = base;
+        k.threshold = lod_error_of(frame.settings); // (texels: supersampling is the view's alone)
         const Mat4 m = LocalShadows::face_matrix(f, frame.view.position);
         std::memcpy(k.view_proj, m.m, sizeof(k.view_proj));
         LocalShadows::face_planes(f, frame.view.position, k.planes);
@@ -2837,6 +2836,8 @@ void Renderer::draw_shadows(rhi::CommandList& cmd, FrameData& data, const FrameI
         // pixel: a trunk thinner than a texel still casts onto one.
         k.grow[0] = float(texel) * grow_of(frame.settings);
         k.grow[1] = 0.0f;
+        k.grow[2] = 0.0f;
+        k.threshold = lod_error_of(frame.settings); // (texels: supersampling is the view's alone)
         // Camera-relative world to the window's clip space: x right, y
         // down the texel rows, depth 0.5 - (z - anchor) / range (larger:
         // nearer the sun; from a fixed anchor, so cached pages stay right
@@ -3007,13 +3008,40 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const RenderSettings& settings = frame.settings;
     // Supersampling: the frame is drawn larger than the target and averaged
     // down into it at the end (shrink).
-    const float super = supersampling_of(settings);
-    const u32 width = super > 1.0f ? std::max(static_cast<u32>(std::lround(static_cast<float>(target_desc->width) * super)), target_desc->width) : target_desc->width;
-    const u32 height = super > 1.0f ? std::max(static_cast<u32>(std::lround(static_cast<float>(target_desc->height) * super)), target_desc->height) : target_desc->height;
-    const bool shrinks = width != target_desc->width || height != target_desc->height;
-    if (!ensure_targets(width, height, shrinks)) {
-        return;
+    const float super_asked = supersampling_of(settings);
+    const auto scaled = [&](u32 side) {
+        // (No side past what a texture may be: 16384.)
+        const long larger = std::lround(static_cast<float>(side) * super_asked);
+        return static_cast<u32>(std::clamp(larger, static_cast<long>(side), std::max(static_cast<long>(side), 16384L)));
+    };
+    u32 width = scaled(target_desc->width);
+    u32 height = scaled(target_desc->height);
+    bool shrinks = width != target_desc->width || height != target_desc->height;
+    if (shrinks && m_super_failed == std::pair<u32, u32>{width, height}) {
+        // The larger frame could not be made at this size: as the target is, until the size asked for changes.
+        width = target_desc->width;
+        height = target_desc->height;
+        shrinks = false;
     }
+    if (!ensure_targets(width, height, shrinks)) {
+        if (!shrinks) {
+            return;
+        }
+        m_super_failed = {width, height};
+        log_error("render", "supersampling: no room for the larger frame; drawing at the target's size");
+        width = target_desc->width;
+        height = target_desc->height;
+        shrinks = false;
+        if (!ensure_targets(width, height, false)) {
+            return;
+        }
+    }
+    // The frame's pixels down one of the target's, and the view's shape:
+    // the target's own (the two sides round apart, so the frame's pixels
+    // may be a hair off square; what the caller lays over the target with
+    // its shape still lines up).
+    m_super_scale = static_cast<float>(height) / static_cast<float>(std::max(target_desc->height, 1u));
+    m_aspect = static_cast<float>(target_desc->width) / static_cast<float>(std::max(target_desc->height, 1u));
     const rhi::TextureHandle shown = target; // what the caller sees
     if (shrinks) {
         target = m_super;
@@ -3050,7 +3078,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // before anything reads the geometry.
     const u32 frame_number = static_cast<u32>(m_device.frames_completed() + 1); // 0 means never
     cmd.begin_timing("streaming");
-    aim_skin_floors(frame, width, height);
+    aim_skin_floors(frame, height);
     m_streamer->update(cmd, frame_number);
     cmd.end_timing();
     pose_skins(cmd);
@@ -3178,7 +3206,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
 
     // Frame constants.
     const Lighting& light = frame.lighting;
-    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const float aspect = m_aspect;
     const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
     const float near_plane = std::max(frame.view.near_plane, 1e-4f);
     const float focal = 1.0f / std::tan(fov * 0.5f);
@@ -3226,10 +3254,10 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     k.tone_mapper = settings.tone_mapper == ToneMapper::agx ? 1u : 0u;
     k.exposure = update_exposure(frame, lit_view);
     k.debug_view = static_cast<u32>(settings.debug_view);
-    k.threshold = lod_error_of(settings);
+    k.threshold = lod_error_of(settings) * m_super_scale; // (in the frame's pixels)
     k.pixels_per_unit = 0.5f * focal * static_cast<float>(height);
     k.grow[1] = grow_of(settings) / k.pixels_per_unit; // (a pixel d metres off is d / pixels_per_unit metres)
-    k.grow[2] = supersampling_of(settings); // (the sun's shadows: as fine as the target's pixels, not the frame's)
+    k.grow[2] = m_super_scale; // (what goes by pixels on screen: by the target's, not the frame's)
     k.near_plane = near_plane;
     k.width = static_cast<float>(width);
     k.height = static_cast<float>(height);
@@ -4169,7 +4197,7 @@ rhi::TextureHandle Renderer::draw_water(rhi::CommandList& cmd, const FrameData& 
         const gpu::WaterLook packed = pack_water_look(under.look);
         for (u32 i = 0; i < swell_count; ++i) under_reach += static_cast<double>(swell[i].amplitude) * packed.waves;
     }
-    const float aspect = static_cast<float>(m_width) / static_cast<float>(std::max(m_height, 1u));
+    const float aspect = m_aspect;
     const float tan_y = std::tan(degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f)) * 0.5f);
     const bool under_on = under.on && std::isfinite(under.level) &&
                           near_plane_under(frame.view.orientation, tan_y, aspect,
@@ -4529,13 +4557,14 @@ bool Renderer::ensure_hair_shadows() {
 
 void Renderer::prepare_hair(rhi::CommandList& cmd, FrameData& data, const FrameInput& frame) {
     // What to draw: the nearest grooms in view, thinned by their size on screen.
-    const float aspect = static_cast<float>(m_width) / static_cast<float>(std::max(m_height, 1u));
+    const float aspect = m_aspect;
     const float fov = degrees_to_radians(std::clamp(frame.view.vertical_fov_degrees, 1.0f, 170.0f));
     const geometry::Frustum frustum = geometry::frustum_from_view_projection(view_projection(frame.view, aspect));
     HairView view;
     view.position = frame.view.position;
     for (u32 p = 0; p < 5; ++p) view.planes[p] = frustum.planes[p];
-    view.pixels_per_metre_at_one = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(m_height);
+    // (By the target's pixels: supersampling keeps no more strands.)
+    view.pixels_per_metre_at_one = 0.5f / std::tan(fov * 0.5f) * static_cast<float>(m_height) / m_super_scale;
     view.detail = frame.settings.hair_detail;
     plan_hair(*m_grooms, frame.hair, view, *m_hair_plan);
     const HairPlan& plan = *m_hair_plan;

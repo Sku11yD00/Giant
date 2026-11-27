@@ -2281,9 +2281,9 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                                              "trunks, railings and their shadows do not blink in and out as "
                                              "the camera moves. 0: off. Default 0.5.")},
                 {"supersampling", number(1, 2, "The frame is drawn this many times the viewport's size each way and "
-                                               "averaged down, so each pixel is the mean of up to four looks at the "
-                                               "scene: the edges of small far things (a forest's trees and their "
-                                               "shadows) stop shimmering as the camera moves. Costs GPU time with "
+                                               "averaged down, so each pixel is the mean of several looks at the "
+                                               "scene (four at 2): the edges of small far things (a forest's trees "
+                                               "and their shadows) shimmer less as the camera moves. Costs GPU time with "
                                                "the pixels drawn (its square). 1: off. Default 1.")},
                 {"wind_shadow_pages_per_frame",
                  {{"type", "integer"}, {"minimum", 0}, {"maximum", 4096},

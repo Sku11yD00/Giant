@@ -725,12 +725,16 @@ struct RenderSettings {
     float grow_pixels = 0.5f;
     // Supersampling: the frame is drawn this many times the target's size
     // each way (1 to 2; 1: off) and averaged down into it, so a pixel is
-    // the mean of up to four looks at the scene, not one. Edges of small
-    // far things (a forest's crowns and their shadows) then slide from
-    // pixel to pixel as the camera moves where with one look they jump,
-    // which shows as shimmer (nothing here blends frames to hide it). Costs
-    // GPU time with the pixels drawn (the square of this). Detail (LOD
-    // error) and the sun's shadows stay as fine as the target's pixels ask.
+    // the mean of several looks at the scene (four at 2), not one. An edge
+    // of a small far thing (a forest's crowns and their shadows) crossing
+    // a pixel then changes it in steps where with one look it flips it
+    // outright: the shimmer as the camera moves is less, not gone
+    // (nothing here blends frames to hide it). Costs
+    // GPU time with the pixels drawn (the square of this). What goes by
+    // pixels on screen stays by the target's: the LOD error, hair's
+    // strands, the sun's shadow level, how far ambient occlusion, contact
+    // shadows and skin's light reach. Shadows' own detail is untouched.
+    // Where the larger frame cannot be made, the frame is drawn as without.
     float supersampling = 1.0f;
 };
 
@@ -908,7 +912,7 @@ struct FrameInput {
 struct RenderStats {
     u32 instances = 0; // with at least one cluster drawn (GPU culling: passing instance culling)
     u32 draws = 0;     // draw calls this frame (raster passes and shading)
-    u32 post_draws = 0; // full-screen passes after shading (screen reflections when on, anti-aliasing): fixed, not per object
+    u32 post_draws = 0; // full-screen passes after shading (screen reflections when on, anti-aliasing, supersampling's averaging down): fixed, not per object
     u32 clusters = 0;
     u32 triangles = 0;
     // GPU culling: the counts above come from the GPU, from a frame or two
@@ -1361,7 +1365,7 @@ private:
     static void fit_pose(Skin& skin, const geometry::Sphere& bounds);
     void pose_skins(rhi::CommandList& cmd);           // after streaming, before anything reads the geometry
     void track_skin_shadows(const FrameInput& frame); // after the shadows' own tracking
-    void aim_skin_floors(const FrameInput& frame, u32 width, u32 height); // before the streamer's update: the camera's aims
+    void aim_skin_floors(const FrameInput& frame, u32 height); // before the streamer's update: the camera's aims
     void draw_voxels(rhi::CommandList& cmd, rhi::TextureHandle target, const FrameData& data,
                      const Vec3& background); // the voxel debug view, in place of shading
     void select_on_cpu(const FrameInput& frame, const Mat4& view_proj, u32 height, u32 frame_number);
@@ -1538,6 +1542,9 @@ private:
     rhi::BufferHandle m_hzb;  // depth pyramid
     rhi::TextureHandle m_color;   // shaded image before anti-aliasing (rgba8_srgb)
     rhi::TextureHandle m_super;   // supersampling: the finished frame before it is averaged down (rgba8_srgb; else invalid)
+    float m_super_scale = 1.0f;   // this frame: its pixels down one of the target's (1: not supersampled)
+    float m_aspect = 1.0f;        // this frame: the target's width over its height (the view's shape)
+    std::pair<u32, u32> m_super_failed{0, 0}; // the larger frame's size that could not be made (not tried again)
     rhi::TextureHandle m_edges;   // SMAA edges (rgba8_unorm)
     rhi::TextureHandle m_weights; // SMAA blend weights (rgba8_unorm)
     // Shading's output, before exposure (resolve.slang), which the screen

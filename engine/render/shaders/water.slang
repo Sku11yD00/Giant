@@ -790,7 +790,7 @@ float4 ps_main(WaterVaryings i) : SV_Target {
     const float3 seen = light.Load(int3(bent_px, 0)).rgb;
     // The sun (or the moon) here: its shadows and the clouds'.
     const float3 l = f.sun_direction.xyz;
-    float sun = have ? sun_visibility(e.shadows, p, float3(0.0, 1.0, 0.0), l, footprint) : 1.0;
+    float sun = have ? sun_visibility(e.shadows, p, float3(0.0, 1.0, 0.0), l, footprint * shown_pixels(f)) : 1.0;
     if (sky_on) {
         sun *= cloud_shadow(sky, p);
     }
@@ -945,7 +945,7 @@ float4 ps_copy(float4 position : SV_Position) : SV_Target {
             float sun = 1.0;
             if (push.extras_on != 0u) {
                 const Extras e = load_extras(push.extras, push.extras_offset);
-                sun = sun_visibility(e.shadows, p, float3(0.0, 1.0, 0.0), l, footprint);
+                sun = sun_visibility(e.shadows, p, float3(0.0, 1.0, 0.0), l, footprint * shown_pixels(f));
                 if (e.sky_on != 0u) {
                     sun *= cloud_shadow(load_sky(e.sky_params, e.sky_params_offset), p);
                 }

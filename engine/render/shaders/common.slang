@@ -50,7 +50,7 @@ struct Frame {
     uint wind_table_count;
     float sea_level;      // the highest sea's level, camera-relative (k_no_sea: none)
     // Growing (grow_by below): x metres every vertex grows by, y metres more for each metre it is in front of the eye.
-    // z: supersampling, the frame's pixels across one of the target's (shown_pixels below; 0 in a shadow's frame).
+    // z: supersampling, the frame's pixels down one of the target's (shown_pixels below; 0 in a shadow's frame).
     float4 grow;
 };
 static const float k_no_sea = -1.0e30;

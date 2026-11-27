@@ -2361,33 +2361,54 @@ GIANT_TEST("render: d3d12 a rod a fifth of a pixel wide is on every row wherever
 GIANT_TEST("render: supersampling adds one pass and keeps the detail the target's pixels ask for (null device)") {
     NullScene s;
     if (s.renderer == nullptr) return;
+    // A small target of its own (the larger frame is up to four times it).
+    rhi::TextureDesc t;
+    t.width = 480;
+    t.height = 270;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = s.device->create_texture(t);
     // Spheres at many distances: their LOD follows the pixels they cover.
     std::vector<Instance> instances(24);
     for (usize i = 0; i < instances.size(); ++i) {
         instances[i].mesh = s.renderer->builtin(BuiltinMesh::sphere);
-        instances[i].position = {double(i % 6) * 3.0 - 7.5, 1.0, -4.0 - 9.0 * double(i)};
+        instances[i].position = {double(i % 6) * 0.5 - 1.25, 1.0, -1.5 - 1.5 * double(i)};
     }
     FrameInput frame;
     frame.instances = instances;
     frame.view.position = {0.0, 1.5, 0.0};
     frame.settings.gpu_culling = false; // the counts are this frame's
-    const RenderStats plain = s.settle(frame);
+    const auto settle = [&] {
+        RenderStats st;
+        for (int i = 0; i < 20; ++i) {
+            rhi::CommandList* cmd = s.device->begin_frame(nullptr);
+            s.renderer->render(*cmd, target, frame);
+            s.device->end_frame();
+            st = s.renderer->last_stats();
+            if (i >= 2 && st.streamed_in == 0 && st.waiting == 0) break;
+        }
+        return st;
+    };
+    const RenderStats plain = settle();
     GIANT_CHECK(plain.triangles > 0 && plain.post_draws > 0);
-    for (const float scale : {1.5f, 2.0f}) {
-        frame.settings.supersampling = scale;
-        const RenderStats super = s.settle(frame);
-        GIANT_CHECK(super.post_draws == plain.post_draws + 1); // the averaging down
-        GIANT_CHECK(super.clusters == plain.clusters && super.triangles == plain.triangles);
-        GIANT_CHECK(s.device->last_frame_stats().draws == super.draws + super.post_draws + super.shadow_draws);
-    }
+    frame.settings.supersampling = 2.0f;
+    const RenderStats twice = settle();
+    GIANT_CHECK(twice.post_draws == plain.post_draws + 1); // the averaging down
+    // Twice the pixels down the frame and twice the error allowed, both exact: the same cut.
+    GIANT_CHECK(twice.clusters == plain.clusters && twice.triangles == plain.triangles);
+    GIANT_CHECK(s.device->last_frame_stats().draws == twice.draws + twice.post_draws + twice.shadow_draws);
+    frame.settings.supersampling = 1.5f;
+    const RenderStats half_more = settle();
+    GIANT_CHECK(half_more.post_draws == plain.post_draws + 1 && half_more.triangles > 0);
     // No number, or out of range: held to 1 to 2.
     frame.settings.supersampling = std::numeric_limits<float>::quiet_NaN();
-    GIANT_CHECK(s.settle(frame).post_draws == plain.post_draws);
+    GIANT_CHECK(settle().post_draws == plain.post_draws);
     frame.settings.supersampling = 9.0f;
-    GIANT_CHECK(s.settle(frame).post_draws == plain.post_draws + 1);
+    GIANT_CHECK(settle().post_draws == plain.post_draws + 1);
     frame.settings.supersampling = 1.0f;
-    const RenderStats again = s.settle(frame);
+    const RenderStats again = settle();
     GIANT_CHECK(again.post_draws == plain.post_draws && again.triangles == plain.triangles);
+    s.device->destroy(target);
 }
 
 GIANT_TEST("render: d3d12 supersampled, an edge crossing a pixel fades in by steps; as it is, it jumps") {
@@ -2475,7 +2496,8 @@ GIANT_TEST("render: d3d12 supersampled, an edge crossing a pixel fades in by ste
         Seen seen;
         int before = -1;
         for (u32 step = 0; step < 16; ++step) {
-            instances[0].position = DVec3{300.0 + pixel * (double(step) + 0.5) / 16.0, 0.0, 0.0};
+            // (A quarter of a step on: no edge sits on a look's place at a step, whichever scale.)
+            instances[0].position = DVec3{300.0 + pixel * (double(step) + 0.25) / 16.0, 0.0, 0.0};
             const std::vector<int> row = draw();
             seen.sheet = std::max(seen.sheet, row[k_w / 2]);
             int sum = 0;
