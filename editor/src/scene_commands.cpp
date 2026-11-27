@@ -841,10 +841,11 @@ Json render_settings_json(const EditorState& state) {
             {"wind_distance", state.render_settings.wind_distance},
             {"grow_pixels", state.render_settings.grow_pixels},
             {"supersampling", state.render_settings.supersampling},
+            {"multisampling", state.render_settings.multisampling},
             {"wind_shadow_pages_per_frame", state.render_settings.wind_shadow_pages_per_frame},
             {"weather_cover", state.render_settings.weather_cover},
             {"last_frame",
-             {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws},
+             {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws}, {"multisampled", s.multisampled},
               {"clusters", s.clusters},
               {"triangles", s.triangles}, {"from_gpu", s.from_gpu},
               {"occluded_instances", s.occluded_instances},
@@ -2285,6 +2286,12 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                                                "scene (four at 2): the edges of small far things (a forest's trees "
                                                "and their shadows) shimmer less as the camera moves. Costs GPU time with "
                                                "the pixels drawn (its square). 1: off. Default 1.")},
+                {"multisampling",
+                 {{"type", "boolean"},
+                  {"description", "Edges drawn with four samples a pixel: a pixel an edge crosses is shaded for "
+                                  "its two main surfaces, mixed by their shares, so edges are smooth and small "
+                                  "far things (a forest's crowns) shimmer much less as the camera moves, without "
+                                  "blending frames. Pixels inside a surface are shaded once, as without. Default on."}}},
                 {"wind_shadow_pages_per_frame",
                  {{"type", "integer"}, {"minimum", 0}, {"maximum", 4096},
                   {"description", "Shadow pages under swaying things drawn again a frame at most, so their "
@@ -2346,6 +2353,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.wind_distance = args.value("wind_distance", r.wind_distance);
              r.grow_pixels = args.value("grow_pixels", r.grow_pixels);
              r.supersampling = args.value("supersampling", r.supersampling);
+             r.multisampling = args.value("multisampling", r.multisampling);
              r.wind_shadow_pages_per_frame = args.value("wind_shadow_pages_per_frame", r.wind_shadow_pages_per_frame);
              return CommandResult::success(render_settings_json(state));
          }});

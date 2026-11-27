@@ -301,6 +301,9 @@ Renderer::~Renderer() {
     for (const rhi::PipelineHandle p :
          {m_raster_mesh[0], m_raster_mesh[1], m_raster_mesh[2], m_raster_mesh[3], m_raster_vertex[0],
           m_raster_vertex[1], m_raster_vertex[2], m_raster_vertex[3], m_shadow_mesh_cut, m_shadow_vertex_cut,
+          m_raster_mesh_samples[0], m_raster_mesh_samples[1], m_raster_mesh_samples[2], m_raster_mesh_samples[3],
+          m_raster_vertex_samples[0], m_raster_vertex_samples[1], m_raster_vertex_samples[2],
+          m_raster_vertex_samples[3], m_sort_samples, m_hzb_first_samples,
           m_resolve, m_cull_reset, m_cull_prepare, m_cull_instances,
           m_cull_traverse, m_cull_retest, m_hzb_first, m_hzb_down, m_smaa_edges, m_smaa_weights,
           m_smaa_blend, m_shrink, m_voxel_view, m_reflect, m_resolve_direct, m_shadow_mesh, m_shadow_vertex,
@@ -363,6 +366,9 @@ Renderer::~Renderer() {
     }
     m_device.destroy(m_depth);
     m_device.destroy(m_vis);
+    m_device.destroy(m_vis_samples);
+    m_device.destroy(m_depth_samples);
+    m_device.destroy(m_sample_groups);
     m_device.destroy(m_hzb);
     m_device.destroy(m_color);
     m_device.destroy(m_super);
@@ -506,6 +512,50 @@ bool Renderer::init() {
             if (p.valid()) m_device.destroy(p);
             p = {};
         }
+    }
+    // Multisampling: the same into four samples a pixel; cut-out materials
+    // keep a share of them (ps_cut_samples). With its sorting pass and the
+    // depth pyramid's start from four samples. All made here (rule 9); a
+    // GPU that refuses any draws without multisampling.
+    m_samples_ready = true;
+    for (u32 kind = 0; kind < gpu::k_material_kinds; ++kind) {
+        const bool cut = (kind & 2u) != 0u;
+        rhi::GraphicsPipelineDesc d = raster;
+        d.samples = 4;
+        d.cull = (kind & 1u) != 0u ? rhi::CullMode::none : rhi::CullMode::back;
+        d.vertex = cut ? shaders::raster_cut_vs() : shaders::raster_vs();
+        d.pixel = cut ? shaders::raster_cut_samples_ps() : shaders::raster_ps();
+        d.name = "clusters to visibility, four samples (vertex)";
+        m_raster_vertex_samples[kind] = m_device.create_pipeline(d);
+        m_samples_ready = m_samples_ready && m_raster_vertex_samples[kind].valid();
+        if (m_raster_mesh[0].valid()) {
+            d.geometry = rhi::GeometryStage::mesh;
+            d.mesh = cut ? shaders::raster_cut_ms() : shaders::raster_ms();
+            d.name = "clusters to visibility, four samples (mesh)";
+            m_raster_mesh_samples[kind] = m_device.create_pipeline(d);
+            m_samples_ready = m_samples_ready && m_raster_mesh_samples[kind].valid();
+        }
+    }
+    {
+        rhi::GraphicsPipelineDesc sort;
+        sort.vertex = shaders::samples_vs();
+        sort.pixel = shaders::samples_ps();
+        sort.cull = rhi::CullMode::none;
+        sort.color_count = 2;
+        sort.color_formats[0] = rhi::Format::rg32_uint;
+        sort.color_formats[1] = rhi::Format::r32_uint;
+        sort.depth_format = rhi::Format::depth32_float;
+        sort.depth = rhi::DepthMode::write;
+        sort.name = "multisampling: sort samples";
+        m_sort_samples = m_device.create_pipeline(sort);
+        rhi::ComputePipelineDesc first;
+        first.compute = shaders::hzb_first_samples_cs();
+        first.name = "HZB: from four-sample depth";
+        m_hzb_first_samples = m_device.create_pipeline(first);
+        m_samples_ready = m_samples_ready && m_sort_samples.valid() && m_hzb_first_samples.valid();
+    }
+    if (!m_samples_ready) {
+        log_warning("render", "multisampling's pipelines failed; drawing without it");
     }
     // Shadow pages: the same geometry stages, no targets (the pixel shader
     // writes the atlas), both faces (thin and open meshes cast too).
@@ -1627,6 +1677,11 @@ bool Renderer::ensure_targets(u32 width, u32 height, bool super) {
     m_device.destroy(m_scene);
     m_device.destroy(m_super);
     m_super = {};
+    for (rhi::TextureHandle* t : {&m_vis_samples, &m_depth_samples, &m_sample_groups}) {
+        m_device.destroy(*t); // the frame's size: made again by ensure_sample_targets
+        *t = {};
+    }
+    m_samples_failed = false;
     for (rhi::TextureHandle& t : m_bloom_downs) { // sized to the frame: made again below
         m_device.destroy(t);
         t = {};
@@ -2220,9 +2275,12 @@ void Renderer::raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bo
     cmd.begin_timing("raster");
     rhi::RenderPassDesc desc;
     const rhi::LoadOp load = pass == 0 ? rhi::LoadOp::clear : rhi::LoadOp::load;
-    desc.colors[0] = {m_vis, load, {0.0f, 0.0f, 0.0f, 0.0f}};
-    desc.depth = {m_depth, load, 0.0f};
+    desc.colors[0] = {m_multisampled ? m_vis_samples : m_vis, load, {0.0f, 0.0f, 0.0f, 0.0f}};
+    desc.depth = {m_multisampled ? m_depth_samples : m_depth, load, 0.0f};
     cmd.begin_render_pass(desc);
+    const std::array<rhi::PipelineHandle, 4>& pipelines =
+        data.use_mesh_shaders ? (m_multisampled ? m_raster_mesh_samples : m_raster_mesh)
+                              : (m_multisampled ? m_raster_vertex_samples : m_raster_vertex);
     const bool drawing = gpu || data.entry_count > 0;
     // A draw for each kind of material in the frame (opaque one-sided
     // first; each draw skips the other kinds' clusters). With one kind only,
@@ -2230,7 +2288,7 @@ void Renderer::raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bo
     const bool one_kind = (data.kinds & (data.kinds - 1u)) == 0u;
     for (u32 kind = 0; drawing && kind < gpu::k_material_kinds; ++kind) {
         if ((data.kinds & (1u << kind)) == 0u) continue;
-        cmd.set_pipeline(data.use_mesh_shaders ? m_raster_mesh[kind] : m_raster_vertex[kind]);
+        cmd.set_pipeline(pipelines[kind]);
         gpu::RasterPush push{};
         push.kinds = one_kind ? 0u : 1u << kind;
         push.materials = data.materials.descriptor;
@@ -2272,16 +2330,18 @@ void Renderer::raster(rhi::CommandList& cmd, const FrameData& data, u32 pass, bo
 
 void Renderer::build_hzb(rhi::CommandList& cmd) {
     cmd.begin_timing("HZB");
-    cmd.barrier(m_depth, rhi::ResourceState::shader_read);
+    // (Multisampled: from every sample, before they are sorted.)
+    const rhi::TextureHandle depth = m_multisampled ? m_depth_samples : m_depth;
+    cmd.barrier(depth, rhi::ResourceState::shader_read);
     cmd.barrier(m_hzb, rhi::ResourceState::shader_write);
     gpu::HzbPush push{};
-    push.depth = m_device.read_descriptor(m_depth);
+    push.depth = m_device.read_descriptor(depth);
     push.hzb = m_device.write_descriptor(m_hzb);
     push.width = m_width;
     push.height = m_height;
     push.hzb_width = m_hzb_width;
     push.hzb_height = m_hzb_height;
-    cmd.set_pipeline(m_hzb_first);
+    cmd.set_pipeline(m_multisampled ? m_hzb_first_samples : m_hzb_first);
     cmd.push(push);
     cmd.dispatch(groups_of(m_hzb_width, 8), groups_of(m_hzb_height, 8));
     cmd.set_pipeline(m_hzb_down);
@@ -2293,6 +2353,85 @@ void Renderer::build_hzb(rhi::CommandList& cmd) {
                      groups_of(std::max(m_hzb_height >> mip, 1u), 8));
     }
     cmd.barrier(m_hzb, rhi::ResourceState::shader_read);
+    cmd.end_timing();
+}
+
+bool Renderer::ensure_sample_targets(bool wanted) {
+    if (!wanted || !m_samples_ready) {
+        if (m_vis_samples.valid() || m_depth_samples.valid() || m_sample_groups.valid() || m_samples_failed) {
+            for (rhi::TextureHandle* t : {&m_vis_samples, &m_depth_samples, &m_sample_groups}) {
+                m_device.destroy(*t);
+                *t = {};
+            }
+            m_samples_failed = false; // tried again when next asked for
+        }
+        return false;
+    }
+    if (m_vis_samples.valid() && m_depth_samples.valid() && m_sample_groups.valid()) {
+        return true; // (ensure_targets drops them when the frame's size changes)
+    }
+    if (m_samples_failed) {
+        return false;
+    }
+    rhi::TextureDesc desc;
+    desc.width = m_width;
+    desc.height = m_height;
+    desc.samples = 4;
+    desc.format = rhi::Format::depth32_float;
+    desc.usage = rhi::TextureUsage::depth_target | rhi::TextureUsage::sampled;
+    desc.name = "scene depth, four samples";
+    m_depth_samples = m_device.create_texture(desc);
+    desc.format = rhi::Format::rg32_uint;
+    desc.usage = rhi::TextureUsage::render_target | rhi::TextureUsage::sampled;
+    desc.name = "visibility buffer, four samples";
+    m_vis_samples = m_device.create_texture(desc);
+    desc.samples = 1;
+    desc.format = rhi::Format::r32_uint;
+    desc.name = "multisampling: other surfaces";
+    m_sample_groups = m_device.create_texture(desc);
+    if (m_vis_samples.valid() && m_depth_samples.valid() && m_sample_groups.valid()) {
+        return true;
+    }
+    for (rhi::TextureHandle* t : {&m_vis_samples, &m_depth_samples, &m_sample_groups}) {
+        m_device.destroy(*t);
+        *t = {};
+    }
+    m_samples_failed = true;
+    log_error("render", "multisampling: no room for the four-sample targets; drawing without it");
+    return false;
+}
+
+void Renderer::sort_samples(rhi::CommandList& cmd, const FrameData& data, bool gpu) {
+    cmd.begin_timing("multisampling");
+    cmd.barrier(m_vis_samples, rhi::ResourceState::shader_read);
+    cmd.barrier(m_depth_samples, rhi::ResourceState::shader_read);
+    gpu::SamplesPush push{};
+    push.vis = m_device.read_descriptor(m_vis_samples);
+    push.depth = m_device.read_descriptor(m_depth_samples);
+    if (gpu && m_cull.visible.valid()) {
+        cmd.barrier(m_cull.visible, rhi::ResourceState::shader_read);
+        push.visible = m_device.read_descriptor(m_cull.visible);
+        push.visible_offset = 0;
+    } else {
+        // (Nothing drawn: every sample is empty and the list is not read.)
+        push.visible = data.entries.data != nullptr ? data.entries.descriptor : data.frame.descriptor;
+        push.visible_offset = data.entries.offset;
+    }
+    rhi::RenderPassDesc pass;
+    pass.color_count = 2;
+    // Every pixel is written; the clears keep the targets' contents defined
+    // where no draw is recorded, as on the null device.
+    pass.colors[0] = {m_vis, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
+    pass.colors[1] = {m_sample_groups, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
+    pass.depth = {m_depth, rhi::LoadOp::clear, 0.0f};
+    cmd.begin_render_pass(pass);
+    cmd.set_pipeline(m_sort_samples);
+    cmd.push(push);
+    cmd.draw(3);
+    cmd.end_render_pass();
+    cmd.barrier(m_sample_groups, rhi::ResourceState::shader_read);
+    ++m_stats.draws;
+    m_stats.multisampled = true;
     cmd.end_timing();
 }
 
@@ -3044,6 +3183,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
             return;
         }
     }
+    m_multisampled = ensure_sample_targets(settings.multisampling);
     // The frame's pixels down one of the target's, and the view's shape:
     // the target's own (the two sides round apart, so the frame's pixels
     // may be a hair off square; what the caller lays over the target with
@@ -3680,6 +3820,11 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         mark(CpuSection::shading);
         return;
     }
+    if (m_multisampled) {
+        // The one-sample visibility buffer and depth every later pass reads.
+        sort_samples(cmd, data, gpu);
+        cmd.barrier(m_vis, rhi::ResourceState::shader_read);
+    }
     if (m_shadows_on) {
         cmd.barrier(m_shadow_atlas, rhi::ResourceState::shader_read);
         cmd.barrier(m_shadow_requests, rhi::ResourceState::shader_write);
@@ -3845,8 +3990,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         tp.layer_count = data.terrain_count;
         tp.surface = m_device.write_descriptor(m_terrain_surface);
         tp.normal = m_device.write_descriptor(m_terrain_normal);
-        tp.width = m_width;
-        tp.height = m_height;
+        tp.sample_groups = m_multisampled ? m_device.read_descriptor(m_sample_groups) : rhi::k_no_descriptor;
+        tp.sample_vis = m_multisampled ? m_device.read_descriptor(m_vis_samples) : rhi::k_no_descriptor;
         tp.camera_y = static_cast<float>(frame.view.position.y);
         const auto period = [](double v) {
             constexpr double k_period = 4096.0; // terrain.slang's k_macro_period
@@ -4070,6 +4215,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     extras.terrain_surface = terrain ? m_device.read_descriptor(m_terrain_surface) : data.frame.descriptor;
     extras.terrain_normal = terrain ? m_device.read_descriptor(m_terrain_normal) : data.frame.descriptor;
     extras.terrain_on = terrain ? 1u : 0u;
+    extras.sample_groups = m_multisampled ? m_device.read_descriptor(m_sample_groups) : rhi::k_no_descriptor;
+    extras.sample_vis = m_multisampled ? m_device.read_descriptor(m_vis_samples) : data.frame.descriptor;
     extras.lights = data.light_count != 0 ? data.lights.descriptor : data.frame.descriptor;
     extras.light_count = data.light_count;
     extras.light_offset = data.light_offset;

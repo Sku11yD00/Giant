@@ -31,6 +31,7 @@ giant_shaders(render
     shaders/cull.slang:cs_retest:compute:cull_retest_cs
     shaders/skin.slang:cs_skin:compute:skin_cs
     shaders/hzb.slang:cs_first:compute:hzb_first_cs
+    shaders/hzb.slang:cs_first_samples:compute:hzb_first_samples_cs
     shaders/hzb.slang:cs_down:compute:hzb_down_cs
     shaders/raster.slang:ms_main:mesh:raster_ms
     shaders/raster.slang:vs_main:vertex:raster_vs
@@ -39,6 +40,7 @@ giant_shaders(render
     shaders/raster.slang:ms_cut:mesh:raster_cut_ms
     shaders/raster.slang:vs_cut:vertex:raster_cut_vs
     shaders/raster.slang:ps_cut:pixel:raster_cut_ps
+    shaders/raster.slang:ps_cut_samples:pixel:raster_cut_samples_ps
     shaders/raster.slang:ps_shadow_cut:pixel:raster_shadow_cut_ps
     shaders/shadow_clear.slang:cs_pages:compute:shadow_clear_pages_cs
     shaders/shadow_clear.slang:cs_words:compute:shadow_clear_words_cs
@@ -73,6 +75,8 @@ giant_shaders(render
     shaders/smaa.slang:ps_edges:pixel:smaa_edges_ps
     shaders/smaa.slang:ps_weights:pixel:smaa_weights_ps
     shaders/smaa.slang:ps_blend:pixel:smaa_blend_ps
+    shaders/samples.slang:vs_main:vertex:samples_vs
+    shaders/samples.slang:ps_main:pixel:samples_ps
     shaders/shrink.slang:vs_main:vertex:shrink_vs
     shaders/shrink.slang:ps_main:pixel:shrink_ps
     shaders/voxels.slang:vs_main:vertex:voxels_vs

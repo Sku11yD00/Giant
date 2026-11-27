@@ -44,6 +44,7 @@ struct NullPipeline {
     std::array<Format, k_max_color_targets> color_formats{};
     u32 color_count = 0;
     Format depth_format = Format::unknown;
+    u32 samples = 1;
 };
 
 u8 to_unorm8(float v) { return static_cast<u8>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); }
@@ -163,6 +164,7 @@ private:
     bool m_in_pass = false;
     std::array<Format, k_max_color_targets> m_pass_colors{};
     u32 m_pass_color_count = 0;
+    u32 m_pass_samples = 1;
     Format m_pass_depth = Format::unknown;
     u32 m_pass_width = 0;
     u32 m_pass_height = 0;
@@ -296,7 +298,9 @@ public:
         pipeline.mesh = desc.geometry == GeometryStage::mesh;
         pipeline.color_formats = desc.color_formats;
         pipeline.color_count = desc.color_count;
+        GIANT_ASSERT(desc.samples == 1 || desc.samples == 4, "a pipeline draws 1 or 4 samples a pixel");
         pipeline.depth_format = desc.depth_format;
+        pipeline.samples = desc.samples;
         return m_pipelines.add(pipeline);
     }
 
@@ -398,8 +402,8 @@ public:
         if (t == nullptr) {
             return {};
         }
-        if (is_block_compressed(t->desc.format)) {
-            log_error("rhi", "read_texture cannot read block-compressed textures");
+        if (is_block_compressed(t->desc.format) || t->desc.samples != 1) {
+            log_error("rhi", "read_texture cannot read block-compressed or multisampled textures");
             return {};
         }
         // The first layer's largest level.
@@ -573,13 +577,16 @@ void NullCommandList::begin_render_pass(const RenderPassDesc& desc) {
                  "a render pass without targets needs a size (at most 16384)");
     m_pass_width = 0;
     m_pass_height = 0;
+    m_pass_samples = 1;
     const auto size_check = [this](const TextureDesc& d) {
         if (m_pass_width == 0) {
             m_pass_width = d.width;
             m_pass_height = d.height;
+            m_pass_samples = d.samples;
         }
         GIANT_ASSERT(d.width == m_pass_width && d.height == m_pass_height,
                      "render pass targets differ in size");
+        GIANT_ASSERT(d.samples == m_pass_samples, "render pass targets differ in samples a pixel");
     };
     m_pass_colors = {};
     for (u32 i = 0; i < desc.color_count; ++i) {
@@ -656,6 +663,7 @@ void NullCommandList::check_draw(bool mesh) {
                                        : "draws need a vertex shader pipeline (mesh pipelines use dispatch_mesh)");
     GIANT_ASSERT(p->color_count == m_pass_color_count && p->depth_format == m_pass_depth,
                  "pipeline targets do not match the render pass");
+    GIANT_ASSERT(p->samples == m_pass_samples, "pipeline samples a pixel do not match the render pass");
     for (u32 i = 0; i < p->color_count; ++i) {
         GIANT_ASSERT(p->color_formats[i] == m_pass_colors[i],
                      "pipeline colour format does not match the render pass");

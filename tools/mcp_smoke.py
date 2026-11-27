@@ -110,7 +110,7 @@ def build_scene(tool, call, check):
         call("ping")  # let a frame render the scene
     info = tool("get_engine_info")
     check(info["last_frame"]["scene_instances"] == 3, f"3 instances drawn, got {info['last_frame']}")
-    check(info["last_frame"]["scene_draws"] == 2, "one raster pass and one shading pass")
+    check(info["last_frame"]["scene_draws"] == 3, "one raster pass, multisampling's sorting and one shading pass")
     gpu_passes = [p["name"] for p in info["gpu"]["passes"]]
     check(all(name in gpu_passes for name in ("raster", "shading", "UI")),
           f"GPU passes timed, got {info['gpu']}")
@@ -441,7 +441,7 @@ def kit_gate(tool, call, check):
     for _ in range(4):
         call("ping")
     frame = tool("get_render_settings")["last_frame"]
-    check(frame["draws"] == 2, f"600 cubes still take one raster and one shading pass, got {frame}")
+    check(frame["draws"] == 3, f"600 cubes still take one raster pass, multisampling's sorting and one shading pass, got {frame}")
     check(frame["materials"] == 4, f"the town shares 4 materials, got {frame['materials']}")
     check(frame["decals"] >= 2 and not frame["decal_overflow"], f"decals in view, got {frame}")
     tool("set_render_settings", {"gpu_culling": True})
@@ -1130,8 +1130,8 @@ def n1_gate(tool, call, check):
     for position, look_at in flight_path(6):
         tool("set_camera", {"position": position, "look_at": look_at})
         frame = settle()
-        check(frame["draws"] == 2 and frame["post_draws"] == 4,
-              f"20,000 pieces still take one raster pass, one shading pass, tone mapping and 3 anti-aliasing passes, got {frame}")
+        check(frame["draws"] == 3 and frame["post_draws"] == 4,
+              f"20,000 pieces still take one raster pass, multisampling's sorting, one shading pass, tone mapping and 3 anti-aliasing passes, got {frame}")
         check(frame["materials"] == materials, f"{materials} shared materials, got {frame['materials']}")
         check(not frame["overflow"], f"nothing dropped, got {frame}")
         check(frame["streaming"]["waiting"] == 0, f"all detail in view loaded (no late sharpening), got {frame}")

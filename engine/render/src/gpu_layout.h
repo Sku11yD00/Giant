@@ -354,6 +354,15 @@ struct HzbPush {
 };
 static_assert(sizeof(HzbPush) == 32);
 
+// samples.slang's SamplesPush.
+struct SamplesPush {
+    u32 vis;
+    u32 depth;
+    u32 visible;
+    u32 visible_offset;
+};
+static_assert(sizeof(SamplesPush) == 16);
+
 struct RasterPush {
     u32 frame;
     u32 frame_offset;
@@ -485,7 +494,10 @@ struct ResolveExtras {
     u32 terrain_surface;
     u32 terrain_normal;
     u32 terrain_on;
-    u32 pad_terrain;
+    // Multisampling (samples.slang): each pixel's other surfaces (r32_uint;
+    // rhi::k_no_descriptor: off); the four-sample visibility buffer they
+    // are read from is sample_vis below.
+    u32 sample_groups;
     // The sun shadows' previous view (ShadowPages::has_previous), standing
     // in where the new one's pages are not drawn yet: its axes, prev_x.w 1
     // while there is one (0: none), prev_z.w its depth offset. Its table
@@ -532,7 +544,7 @@ struct ResolveExtras {
     u32 hair_casters;
     u32 hair_depth;
     u32 hair_opacity;
-    u32 hair_pad;
+    u32 sample_vis;
 };
 static_assert(sizeof(ResolveExtras) == 352);
 
@@ -764,8 +776,8 @@ struct TerrainPush {
     u32 layer_count;
     u32 surface; // write descriptors
     u32 normal;
-    u32 width;
-    u32 height;
+    u32 sample_groups; // multisampling: each pixel's other surfaces (k_no_descriptor: off)
+    u32 sample_vis;    // and the four-sample visibility buffer
     float camera_y;
     float camera_xz[2]; // modulo 4096 m (terrain.slang's k_macro_period)
     // Painted layers (TerrainPaintStore): the table (a 16-byte header of

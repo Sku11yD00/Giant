@@ -145,9 +145,9 @@ GIANT_TEST("decals: materials and decals reach the frame; draw calls stay the sa
     frame.settings.gpu_culling = false;
     RenderStats s = draw(frame);
     GIANT_CHECK(s.materials == 3 && s.decals == 1 && !s.decal_overflow);
-    GIANT_CHECK(s.draws == 2);
+    GIANT_CHECK(s.draws == 3); // clusters, multisampling's sorting, shading
     frame.instances = std::span<const Instance>(instances).first(10);
-    GIANT_CHECK(draw(frame).draws == 2); // fewer instances, same passes
+    GIANT_CHECK(draw(frame).draws == 3); // fewer instances, same passes
     frame.settings.debug_view = DebugView::clusters;
     GIANT_CHECK(draw(frame).decals == 0); // debug views show geometry only
     device->destroy(target);

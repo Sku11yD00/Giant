@@ -1967,6 +1967,91 @@ GIANT_TEST("rhi: small buffers' heap ranges fit best, join when freed, and never
     GIANT_CHECK(r.allocate(16).valid());
 }
 
+GIANT_TEST("rhi: multisampled targets: four samples, targets only, drawn by pipelines of the same count") {
+    TextureDesc d;
+    d.width = 64;
+    d.height = 32;
+    d.format = Format::rg32_uint;
+    d.usage = TextureUsage::render_target | TextureUsage::sampled;
+    d.samples = 4;
+    GIANT_CHECK(texture_desc_problem(d) == nullptr);
+    GIANT_CHECK(texture_contents_problem(d, 0) == nullptr);
+    GIANT_CHECK(texture_contents_problem(d, texture_bytes(d)) != nullptr); // made without contents
+    TextureDesc bad = d;
+    bad.samples = 2;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // 1 or 4
+    bad.samples = 0;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.usage = TextureUsage::sampled;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // a target
+    bad = d;
+    bad.usage = TextureUsage::render_target | TextureUsage::shader_write;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // never shader-written
+    bad = d;
+    bad.array = true;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad = d;
+    bad.width = 16384; // 16384 x 16384 x 8 bytes is 2 GiB: four samples of it are past 4 GiB
+    bad.height = 16384;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
+    bad.samples = 1;
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr);
+
+    DeviceDesc desc;
+    desc.backend = Backend::null;
+    auto device = create_device(desc);
+    const TextureHandle color = device->create_texture(d);
+    TextureDesc dd = d;
+    dd.format = Format::depth32_float;
+    dd.usage = TextureUsage::depth_target | TextureUsage::sampled;
+    const TextureHandle depth = device->create_texture(dd);
+    GIANT_CHECK(color.valid() && depth.valid());
+    GIANT_CHECK(device->read_descriptor(color) != k_no_descriptor && device->describe(color)->samples == 4);
+    GIANT_CHECK(!device->create_texture(bad = [&] { TextureDesc b = d; b.samples = 3; return b; }()).valid());
+    GraphicsPipelineDesc pd;
+    pd.color_formats[0] = Format::rg32_uint;
+    pd.depth_format = Format::depth32_float;
+    pd.depth = DepthMode::test_write;
+    pd.samples = 4;
+    const PipelineHandle pipeline = device->create_pipeline(pd);
+    // A pass that fills depth itself: written without a test.
+    TextureDesc one = dd;
+    one.samples = 1;
+    const TextureHandle depth_one = device->create_texture(one);
+    GraphicsPipelineDesc fill;
+    fill.color_count = 0;
+    fill.depth_format = Format::depth32_float;
+    fill.depth = DepthMode::write;
+    const PipelineHandle filler = device->create_pipeline(fill);
+    GIANT_CHECK(pipeline.valid() && filler.valid() && depth_one.valid());
+    CommandList* cmd = device->begin_frame(nullptr);
+    RenderPassDesc pass;
+    pass.colors[0] = {color, LoadOp::clear, {}};
+    pass.depth = {depth, LoadOp::clear, 0.0f};
+    cmd->begin_render_pass(pass);
+    cmd->set_pipeline(pipeline);
+    cmd->draw(3);
+    cmd->end_render_pass();
+    cmd->barrier(color, ResourceState::shader_read);
+    cmd->barrier(depth, ResourceState::shader_read);
+    RenderPassDesc fill_pass;
+    fill_pass.color_count = 0;
+    fill_pass.depth = {depth_one, LoadOp::clear, 0.0f};
+    cmd->begin_render_pass(fill_pass);
+    cmd->set_pipeline(filler);
+    cmd->draw(3);
+    cmd->end_render_pass();
+    device->end_frame();
+    GIANT_CHECK(device->last_frame_stats().draws == 2);
+    GIANT_CHECK(device->read_texture(color).empty()); // samples are not read back
+    device->destroy(color);
+    device->destroy(depth);
+    device->destroy(depth_one);
+    device->destroy(pipeline);
+    device->destroy(filler);
+}
+
 GIANT_TEST("rhi: texture sizes count blocks, mips and layers; unsound descriptions are refused") {
     GIANT_CHECK(is_block_compressed(Format::bc7_srgb) && !is_block_compressed(Format::rgba8_srgb));
     GIANT_CHECK(block_bytes(Format::bc1_unorm) == 8 && block_bytes(Format::bc4_unorm) == 8 &&
