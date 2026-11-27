@@ -3008,24 +3008,27 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     const RenderSettings& settings = frame.settings;
     // Supersampling: the frame is drawn larger than the target and averaged
     // down into it at the end (shrink).
+    // (Copied: making targets may move the device's descriptions.)
+    const u32 target_width = target_desc->width;
+    const u32 target_height = target_desc->height;
     const float super_asked = supersampling_of(settings);
     // (No side past what a texture may be, 16384: both sides by the same, so the frame's pixels stay square.)
-    const float longest = static_cast<float>(std::max({target_desc->width, target_desc->height, 1u}));
+    const float longest = static_cast<float>(std::max({target_width, target_height, 1u}));
     const float super = std::max(std::min(super_asked, 16384.0f / longest), 1.0f);
     const auto scaled = [&](u32 side) {
         return std::clamp(static_cast<u32>(std::lround(static_cast<float>(side) * super)), side, std::max(side, 16384u));
     };
-    u32 width = scaled(target_desc->width);
-    u32 height = scaled(target_desc->height);
-    bool shrinks = width != target_desc->width || height != target_desc->height;
+    u32 width = scaled(target_width);
+    u32 height = scaled(target_height);
+    bool shrinks = width != target_width || height != target_height;
     if (super_asked != m_super_asked) {
         m_super_asked = super_asked; // a new setting: tried again
         m_super_failed = ~u64{0};
     }
     if (shrinks && u64{width} * height >= m_super_failed) {
         // A larger frame no bigger than this could not be made: as the target is, until the setting changes.
-        width = target_desc->width;
-        height = target_desc->height;
+        width = target_width;
+        height = target_height;
         shrinks = false;
     }
     if (!ensure_targets(width, height, shrinks)) {
@@ -3034,8 +3037,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
         m_super_failed = u64{width} * height;
         log_error("render", "supersampling: no room for the larger frame; drawing at the target's size");
-        width = target_desc->width;
-        height = target_desc->height;
+        width = target_width;
+        height = target_height;
         shrinks = false;
         if (!ensure_targets(width, height, false)) {
             return;
@@ -3045,8 +3048,8 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
     // the target's own (the two sides round apart, so the frame's pixels
     // may be a hair off square; what the caller lays over the target with
     // its shape still lines up).
-    m_super_scale = static_cast<float>(height) / static_cast<float>(std::max(target_desc->height, 1u));
-    m_aspect = static_cast<float>(target_desc->width) / static_cast<float>(std::max(target_desc->height, 1u));
+    m_super_scale = static_cast<float>(height) / static_cast<float>(std::max(target_height, 1u));
+    m_aspect = static_cast<float>(target_width) / static_cast<float>(std::max(target_height, 1u));
     const rhi::TextureHandle shown = target; // what the caller sees
     if (shrinks) {
         target = m_super;
