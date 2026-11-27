@@ -15,6 +15,10 @@
 // into `normal` (rgba16_float: xyz, w 1). Other pixels are left as they
 // are: resolve reads these only where the material is terrain.
 //
+// With multisampling a pixel whose own surface is not the ground, but one
+// of whose other surfaces is (the ground behind a tree's edge), gets that
+// one's, along its sample: resolve shades it with them.
+//
 // Layout: TerrainPush in src/gpu_layout.h. Fixed loops, unrolled (WARP),
 // but the paint table's probe (short: the table is at most half full).
 #include "common.slang"
@@ -37,8 +41,10 @@ struct TerrainPush {
     uint layer_count;
     uint surface;        // write: rgba16_float, full size
     uint normal;         // write: rgba16_float, full size
-    uint width;
-    uint height;
+    // Multisampling (samples.slang): each pixel's other surfaces (r32_uint;
+    // 0xFFFFFFFF: off) and the four-sample visibility buffer they are in.
+    uint sample_groups;
+    uint sample_vis;
     float camera_y;      // the camera's height (metres above y = 0)
     float2 camera_xz;    // the camera's x and z modulo k_macro_period
     // Painted layers (TerrainPaintStore): a table, a 16-byte header (the
@@ -214,23 +220,50 @@ float4 terrain_sample(uint descriptor, float2 uv, float2 gx, float2 gy) {
     return read_texture_nonuniform(descriptor).SampleGrad(get_sampler(k_sampler_anisotropic_wrap), uv, gx, gy);
 }
 
+// Whether a visibility buffer entry (x 0: nothing drawn) is of an instance
+// with a terrain material.
+bool is_ground(uint2 vis) {
+    if (vis.x == 0u) {
+        return false;
+    }
+    const uint instance = read_buffer(push.visible).Load(push.visible_offset + (vis.x - 1) * 8);
+    const uint material = read_buffer(push.instances).Load(push.instance_offset + instance * k_instance_bytes + 52);
+    const uint material_at = push.material_offset + min(material & 0x7FFFFFFFu, push.material_count) * k_material_bytes;
+    return (read_buffer(push.materials).Load(material_at + 48) & k_material_terrain) != 0u;
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cs_terrain(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= push.width || id.y >= push.height) {
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    if (float(id.x) >= f.width || float(id.y) >= f.height) {
         return;
     }
-    const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(id.xy), 0));
-    if (vis.x == 0u) {
-        return; // nothing drawn
+    uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(id.xy), 0));
+    float2 position = float2(id.xy) + 0.5;
+    bool ground = is_ground(vis);
+    if (!ground && push.sample_groups != k_no_texture) {
+        const uint groups = read_texture_uint(push.sample_groups).Load(int3(int2(id.xy), 0));
+        Texture2DMS<uint2> samples = read_texture_ms_uint2(push.sample_vis);
+        [loop] for (uint g = 0u; g < 3u && !ground; ++g) {
+            const uint group = (groups >> (4u + 4u * g)) & 0xFu;
+            if ((group >> 2u) == 0u) {
+                break;
+            }
+            const int at = int(group & 3u);
+            const uint2 v = samples.Load(int2(id.xy), at);
+            if (is_ground(v)) {
+                vis = v;
+                position += samples.GetSamplePosition(at);
+                ground = true;
+            }
+        }
+    }
+    if (!ground) {
+        return; // nothing drawn, or not the ground
     }
     const uint2 entry = read_buffer(push.visible).Load2(push.visible_offset + (vis.x - 1) * 8);
     const Instance inst = load_instance(read_buffer(push.instances), push.instance_offset + entry.x * k_instance_bytes);
-    const uint material_at = push.material_offset + min(inst.material, push.material_count) * k_material_bytes;
-    if ((read_buffer(push.materials).Load(material_at + 48) & k_material_terrain) == 0u) {
-        return; // not the ground
-    }
-    const Frame f = load_frame(push.frame, push.frame_offset);
     // The triangle (resolve.slang's surface_at; the ground does not sway).
     const MeshEntry mesh = load_mesh(read_buffer(push.meshes), push.mesh_offset + inst.mesh * k_mesh_bytes);
     const Cluster cluster = load_cluster(read_buffer_nonuniform(mesh.clusters), entry.y);
@@ -240,7 +273,6 @@ void cs_terrain(uint3 id : SV_DispatchThreadID) {
     const float3 a = to_world(inst, cluster_position(pool, geometry, cluster, corners.x));
     const float3 b3 = to_world(inst, cluster_position(pool, geometry, cluster, corners.y));
     const float3 c3 = to_world(inst, cluster_position(pool, geometry, cluster, corners.z));
-    const float2 position = float2(id.xy) + 0.5;
     const float2 ndc = float2((position.x / f.width) * 2.0 - 1.0, 1.0 - (position.y / f.height) * 2.0);
     const float3 dir = f.ray_x.xyz * ndc.x + f.ray_y.xyz * ndc.y + f.ray_z.xyz;
     const float3 w3 = on_triangle(plane_barycentrics(dir, a, b3, c3).xyz);

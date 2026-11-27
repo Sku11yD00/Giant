@@ -44,6 +44,8 @@ struct Extras {
     uint terrain_surface;    // terrain.slang's colour and roughness, full size (terrain_on 0: off)
     uint terrain_normal;     // and its shading normal
     uint terrain_on;
+    uint sample_groups;      // multisampling (samples.slang): each pixel's other surfaces, r32_uint (0xFFFFFFFF: off)
+    uint sample_vis;         // and the visibility buffer with four samples a pixel
     LocalLights local;       // lamps (lights.slang; count 0: none)
     uint gi_lamps;           // the lamp words beside the voxel light pool (gi_lamps_on 0: none)
     uint gi_lamps_on;
@@ -119,10 +121,11 @@ Extras load_extras(uint descriptor, uint offset) {
     o.contact_on = c2.y;
     o.local.buffer = c2.z;
     o.local.count = c2.w;
-    const uint3 t3 = b.Load3(at + 192);
+    const uint4 t3 = b.Load4(at + 192);
     o.terrain_surface = t3.x;
     o.terrain_normal = t3.y;
     o.terrain_on = t3.z;
+    o.sample_groups = t3.w;
     const float4 px = asfloat(b.Load4(at + 208));
     const float4 py = asfloat(b.Load4(at + 224));
     const float4 pz = asfloat(b.Load4(at + 240));
@@ -157,10 +160,11 @@ Extras load_extras(uint descriptor, uint offset) {
     const uint2 hg = b.Load2(at + 328);
     o.hair_grooms = hg.x;
     o.hair_grooms_offset = hg.y;
-    const uint3 hc = b.Load3(at + 336);
+    const uint4 hc = b.Load4(at + 336);
     o.hair_casters = hc.x;
     o.hair_depth = hc.y;
     o.hair_opacity = hc.z;
+    o.sample_vis = hc.w;
     return o;
 }
 

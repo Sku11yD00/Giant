@@ -831,7 +831,7 @@ an offline cooker can use it without a device.
   the pixel at a time at 2, up to two thirds at 1.5): less shimmer, not
   none, and not yet measured on the valley. It costs GPU time with the
   pixels drawn (four times at 2), so it is an extra for cards with room,
-  not the answer for most: that is to be more looks on edge pixels alone.
+  not the answer for most: that is multisampling, below.
   What goes by pixels on screen stays by the target's (`Frame::grow.z`,
   `shown_pixels`, the frame's pixels down one of the target's): the LOD
   error, hair's strands, the sun's shadow level for the scene, water and
@@ -844,6 +844,67 @@ an offline cooker can use it without a device.
   Where the larger frame cannot be made (no memory) the frame is drawn at
   the target's size, and no larger frame as big is tried until the
   setting changes.
+- **Multisampling.** The answer to that shimmer for every card
+  (`RenderSettings::multisampling`, on as it comes): the visibility buffer
+  and depth are drawn with four samples a pixel (`TextureDesc::samples`,
+  the raster pipelines' four-sample twins; the pixel shader still runs
+  once a pixel and writes two ids), and only the pixels an edge crosses
+  are shaded more than once.
+  `samples.slang` sorts each pixel's samples into surfaces: samples are
+  of one surface when they show the same triangle, or the same instance
+  at depths that run on (a sample's depth within half a percent of where
+  the other's slope across the screen puts it, so ground at a low angle
+  is one surface; without this a mesh's inner triangle edges would make
+  every pixel of a dense mesh an edge). The surface with the most
+  samples is the pixel's own: its triangle and the mean of its samples'
+  depths go to the one-sample visibility buffer and depth that every
+  later pass reads, so ambient occlusion, contact shadows, water,
+  particles, hair and the screen's reflections work as before, on the
+  pixel's main surface. The other surfaces (at most three) go into a
+  word a pixel (`m_sample_groups`), and `resolve.slang` shades the one
+  with the most samples once more, along one of its samples, and mixes
+  the two as their samples stand to each other (a third and fourth
+  surface, the inside of a far crown mostly, are left out: a pixel is
+  shaded twice at the most), each lit one weighed by 1 over 1 + its exposed brightness so
+  that one bright sample does not leave the edge jagged (giving way to
+  the plain mean where something is many times white, a lamp, so that
+  bloom gets a small bright thing's whole light wherever it sits in the
+  pixel); where part of the pixel is the plain background or a debug
+  colour, the lit part is exposed and tone mapped there. A pixel's
+  other surface takes the screen's one-a-pixel images (ambient
+  occlusion, contact shadows, characters' occlusion) only where they
+  it lies right by the own surface (a crease), traces no voxel
+  reflection cone and asks for no texture detail; the ground behind an edge gets
+  its layers from `terrain.slang`, which fills the pixel's texel for it
+  when the pixel's own surface is not ground. Cut-out materials keep a
+  share of the samples by how far their alpha is over the cutoff against
+  how fast it changes across the pixel (`ps_cut_samples`; which samples,
+  by the triangle's place in its cluster), so a leaf's edge inside its card is smoothed like
+  the card's own. The depth pyramid takes the farthest of every sample.
+  Limits, left open: creases and inner edges of one instance, and
+  water's, particles' and hair's own edges, are left to SMAA; what is
+  behind an edge is shaded without the passes that come after shading,
+  so a thing standing in front of water has a pixel's rim of the dry bed
+  mixed in (likewise smoke or hair behind an edge is missing from that
+  share); ground behind a ground edge (a crest against a farther slope)
+  is shaded with the crest's layers, since there is one terrain texel a
+  pixel; skin on an edge pixel keeps its light where it lands (not
+  spread); a mirror-like surface behind an edge shows the sky's and the
+  ground's colours in that share, not its reflection (no voxel cone, no
+  screen reflection there), a pixel's rim round things standing on a
+  polished floor; sky seen through gaps in a crown takes the clouds as the
+  half-size cloud image has them for the crown's pixel.
+  Memory: 48 bytes a pixel for the four-sample targets and 4 for the
+  word (108 MB at 1920 x 1080, 192 MB at 2560 x 1440; times the square
+  of supersampling, and where they cannot be made the frame is drawn
+  without multisampling). Cost, not yet measured on the valley or on a
+  mainstream card: the raster passes write four samples, the sorting
+  pass and the depth pyramid read them, and each edge pixel is shaded
+  twice; in a far forest most crown pixels are edges, so shading there
+  may double (the second shading has no reflection cone, but all else:
+  shadows, bounce light, lamps, fog, and the far field's march for sky
+  and far samples). It has no line in the frame budget below yet: the
+  first numbers are to come from the gate and a probe on a real card.
 - **Growing (nothing thinner than a pixel).** A trunk, railing or mast
   thinner than a pixel covers a pixel's centre in one frame and falls
   between two in the next, so far forests blinked as the camera moved, and

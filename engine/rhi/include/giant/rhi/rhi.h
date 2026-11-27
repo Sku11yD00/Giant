@@ -189,9 +189,16 @@ struct TextureDesc {
     // count, so a one-layer array keeps its shader-side type. More than one
     // layer needs it.
     bool array = false;
+    // Samples a pixel: 1, or 4 for a multisampled target (a render or depth
+    // target, sampled as well if shaders read it: as a Texture2DMS, each
+    // sample on its own; one mip, one layer, never shader-written, made
+    // without contents and not read back). Drawn into only by pipelines of
+    // the same count, with targets of the same count beside it. A device
+    // that cannot make one gives an invalid handle (logged).
+    u32 samples = 1;
 };
 
-// The largest texture a device makes, all mips and layers counted.
+// The largest texture a device makes, all mips, layers and samples counted.
 inline constexpr u64 k_max_texture_bytes = u64{4} << 30;
 
 u32 full_mip_count(u32 width, u32 height);
@@ -241,6 +248,7 @@ enum class DepthMode {
     none,       // no depth test
     test_write, // nearer (greater, reverse-Z) wins and is written
     test_only,  // tested, not written (e.g. decals, transparents)
+    write,      // not tested, always written (a pass that fills the depth itself)
 };
 enum class BlendMode {
     opaque,
@@ -268,6 +276,10 @@ struct GraphicsPipelineDesc {
     DepthMode depth = DepthMode::none;
     CullMode cull = CullMode::back; // front faces wind counter-clockwise
     BlendMode blend = BlendMode::opaque;
+    // Samples a pixel of its targets (TextureDesc::samples): 1 or 4. With 4
+    // the pixel shader still runs once a pixel; each sample keeps what covers
+    // it (and the shader may narrow that with SV_Coverage).
+    u32 samples = 1;
     const char* name = "pipeline";
 };
 
@@ -420,7 +432,8 @@ public:
     virtual void barrier(TextureHandle texture, ResourceState state) = 0;
 
     // Targets are moved to render_target / depth_write. Viewport and scissor
-    // cover the first target. All targets must have the same size.
+    // cover the first target. All targets must have the same size and the
+    // same samples a pixel.
     virtual void begin_render_pass(const RenderPassDesc& desc) = 0;
     virtual void end_render_pass() = 0;
 
@@ -595,7 +608,7 @@ public:
 
     // Waits for the GPU, then returns the pixels of the first layer's largest
     // level (width * height * bytes_per_pixel, rows top to bottom), or empty
-    // on failure and for block-compressed textures. For tests and
+    // on failure and for block-compressed and multisampled textures. For tests and
     // screenshots; not inside a frame.
     virtual std::vector<u8> read_texture(TextureHandle texture) = 0;
     virtual std::vector<u8> read_buffer(BufferHandle buffer) = 0;

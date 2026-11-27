@@ -280,9 +280,10 @@ def main() -> int:
             leg["far"] = min(leg["far"], frame["far_field"]["culled"])
             if frame["overflow"] or frame["voxels"]["overflow"] or frame["decal_overflow"]:
                 overflow.append(stop)
-            # GPU culling with occlusion: two raster passes and shading, then
-            # screen reflections, tone mapping and SMAA's three.
-            if frame["draws"] != 3 or frame["post_draws"] != 5:
+            # GPU culling with occlusion: two raster passes, multisampling's
+            # sorting and shading, then screen reflections, tone mapping and
+            # SMAA's three.
+            if frame["draws"] != 4 or frame["post_draws"] != 5:
                 bad_draws.append((stop, frame["draws"], frame["post_draws"]))
             # (What the renderer ran, not what is on screen: that needs a look.)
             if not (frame["gi"]["on"] and frame["reflections"]["voxel"] and frame["reflections"]["screen"]):

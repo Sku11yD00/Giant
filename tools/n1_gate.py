@@ -120,9 +120,10 @@ def main() -> int:
             nonlocal waiting, overflow
             waiting = max(waiting, frame["streaming"]["waiting"])
             overflow = overflow or frame["overflow"]
-            # GPU culling with occlusion: two raster passes and shading, then
-            # screen reflections, tone mapping and SMAA's three.
-            if frame["draws"] != 3 or frame["post_draws"] != 5:
+            # GPU culling with occlusion: two raster passes, multisampling's
+            # sorting and shading, then screen reflections, tone mapping and
+            # SMAA's three.
+            if frame["draws"] != 4 or frame["post_draws"] != 5:
                 bad_draws.append((stop, frame["draws"], frame["post_draws"]))
 
         flown = editor.fly(path, each_stop)
@@ -145,8 +146,8 @@ def main() -> int:
         print(f"n1_gate: frame time over the flight ({times['frames']} frames sampled): {describe(times)}")
         if bad_draws:
             failures.append(f"the draw count changed during the flight (stop, draws, post): {bad_draws[:5]}")
-        if frame["draws"] != 2 or frame["post_draws"] != 5:
-            failures.append(f"on the CPU path the scene should take 2 draws and 5 full-screen passes, got {frame}")
+        if frame["draws"] != 3 or frame["post_draws"] != 5:
+            failures.append(f"on the CPU path the scene should take 3 draws and 5 full-screen passes, got {frame}")
         if left_waiting > 0:
             failures.append(f"{left_waiting} detail groups still waiting to load after the flight")
         if frame["materials"] != materials:

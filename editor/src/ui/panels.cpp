@@ -1814,6 +1814,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
             }
             ImGui::EndCombo();
         }
+        bool multisampling = r.multisampling;
+        if (ImGui::Checkbox("Multisampling (4 samples on edges)", &multisampling)) {
+            run("set_render_settings", {{"multisampling", multisampling}});
+        }
         bool gpu = r.gpu_culling;
         if (ImGui::Checkbox("GPU culling", &gpu)) {
             run("set_render_settings", {{"gpu_culling", gpu}});

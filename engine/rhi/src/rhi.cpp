@@ -169,7 +169,18 @@ const char* texture_desc_problem(const TextureDesc& desc) {
             return "a block-compressed texture's size is a multiple of 4";
         }
     }
-    if (texture_bytes(desc) > k_max_texture_bytes) {
+    if (desc.samples != 1) {
+        if (desc.samples != 4) {
+            return "a texture has 1 or 4 samples a pixel";
+        }
+        if (!has(desc.usage, TextureUsage::render_target) && !has(desc.usage, TextureUsage::depth_target)) {
+            return "a multisampled texture is a render or depth target";
+        }
+        if (has(desc.usage, TextureUsage::shader_write) || desc.array || desc.mips != 1 || desc.layers != 1) {
+            return "a multisampled texture is not shader-written and has one mip and one layer";
+        }
+    }
+    if (texture_bytes(desc) > k_max_texture_bytes / desc.samples) {
         return "a texture is at most 4 GiB";
     }
     return nullptr;
@@ -178,6 +189,9 @@ const char* texture_desc_problem(const TextureDesc& desc) {
 const char* texture_contents_problem(const TextureDesc& desc, u64 contents_bytes) {
     if (contents_bytes == 0) {
         return nullptr;
+    }
+    if (desc.samples != 1) {
+        return "a multisampled texture is made without contents";
     }
     return contents_bytes == texture_bytes(desc) ? nullptr : "a texture's contents do not fit its description";
 }

@@ -310,6 +310,50 @@ uint2 ps_cut(PsCutIn i) : SV_Target {
     return i.vis;
 }
 
+// Cut-out materials drawn with four samples a pixel (multisampling): how
+// many of the pixel's samples the cut-out keeps, from how far its alpha is
+// over the cutoff against how fast it changes across the pixel, so a leaf's
+// edge inside its card is as smooth as the card's own edge (cut whole
+// pixels at a time, it would crawl as the card moves). Which samples are
+// kept for a count goes by the triangle's place in its cluster (the same
+// from frame to frame, which its place in the frame's visible list is
+// not), so two cards one behind the other mostly do not keep the same ones
+// and hide each other wholly. The alpha is read inside the card: a pixel whose middle the
+// card does not cover is drawn for the samples it does, and the uv at its
+// middle would be past the card's edge (in an atlas, in the next leaf).
+[shader("pixel")]
+uint2 ps_cut_samples(PsCutIn i, in uint covered : SV_Coverage, out uint coverage : SV_Coverage) : SV_Target {
+    coverage = 0xFu;
+    if (i.cut.x != 0xFFFFFFFFu) {
+        // The middle of the samples the card covers, from the pixel's
+        // middle, and the uv there (uv is linear across the screen as far
+        // as a pixel goes).
+        float2 middle = float2(0.0, 0.0);
+        float samples = 0.0;
+        [unroll] for (uint s = 0; s < 4; ++s) {
+            if ((covered & (1u << s)) != 0u) {
+                middle += GetRenderTargetSamplePosition(int(s));
+                samples += 1.0;
+            }
+        }
+        middle /= max(samples, 1.0);
+        const float2 inside = i.uv + ddx(i.uv) * middle.x + ddy(i.uv) * middle.y;
+        const float alpha = read_texture_nonuniform(i.cut.x)
+                                .SampleGrad(get_sampler(k_sampler_anisotropic_wrap), inside, ddx(i.uv), ddy(i.uv))
+                                .a;
+        const float kept = saturate((alpha - asfloat(i.cut.y)) / max(fwidth(alpha), 1.0e-4) + 0.5);
+        const uint count = uint(round(kept * 4.0));
+        if (count == 0u) {
+            discard;
+        }
+        // 1: one sample; 2: two opposite ones; 3: all but one; 4: all.
+        const uint turn = (i.vis.y * 5u + (i.vis.y >> 2u)) & 3u;
+        coverage = count == 1u ? 1u << turn : count == 2u ? ((turn & 1u) != 0u ? 0x6u : 0x9u)
+                 : count == 3u ? 0xFu ^ (1u << turn) : 0xFu;
+    }
+    return i.vis;
+}
+
 // Sun shadow pages: the pass covers one level's window (16 x 16 pages of
 // 128 x 128 texels; no targets). Each texel keeps the depth nearest the sun
 // (larger is nearer), in the physical page its virtual page has, if that

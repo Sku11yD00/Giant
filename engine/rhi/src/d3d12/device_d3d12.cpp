@@ -282,6 +282,7 @@ struct DxPipeline {
     std::array<Format, k_max_color_targets> color_formats{};
     u32 color_count = 0;
     Format depth_format = Format::unknown;
+    u32 samples = 1;
 };
 
 // What a destroyed resource leaves behind until the GPU is done with it.
@@ -1789,8 +1790,20 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
     rd.DepthOrArraySize = static_cast<UINT16>(desc.layers);
     rd.MipLevels = static_cast<UINT16>(desc.mips);
     rd.Format = resource_format(desc.format);
-    rd.SampleDesc.Count = 1;
+    rd.SampleDesc.Count = desc.samples;
     rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    if (desc.samples > 1) {
+        // Asked first: a format this GPU cannot multisample is refused here,
+        // not by the debug layer.
+        D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS levels{};
+        levels.Format = is_depth(desc.format) ? DXGI_FORMAT_D32_FLOAT : target_format(desc.format);
+        levels.SampleCount = desc.samples;
+        if (FAILED(m_device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &levels, sizeof(levels))) ||
+            levels.NumQualityLevels == 0) {
+            log_error("rhi", std::string("d3d12: this GPU cannot multisample the format of '") + desc.name + "'");
+            return {};
+        }
+    }
     if (has(desc.usage, TextureUsage::render_target)) {
         rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     }
@@ -1903,7 +1916,9 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
             D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
             srv.Format = view_format(desc.format);
             srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            if (desc.array) {
+            if (desc.samples > 1) {
+                srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+            } else if (desc.array) {
                 srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
                 srv.Texture2DArray.MipLevels = desc.mips;
                 srv.Texture2DArray.ArraySize = desc.layers;
@@ -1931,7 +1946,7 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
         if (ok) {
             D3D12_RENDER_TARGET_VIEW_DESC rtv{};
             rtv.Format = target_format(desc.format);
-            rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+            rtv.ViewDimension = desc.samples > 1 ? D3D12_RTV_DIMENSION_TEXTURE2DMS : D3D12_RTV_DIMENSION_TEXTURE2D;
             m_device->CreateRenderTargetView(t.resource.Get(), &rtv, m_rtv_heap.cpu(t.rtv));
             if (desc.format == Format::rgba8_srgb) {
                 t.ui_rtv = m_rtv_heap.allocate();
@@ -1952,7 +1967,7 @@ TextureHandle D3D12Device::create_texture(const TextureDesc& desc, std::span<con
         if (ok) {
             D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
             dsv.Format = DXGI_FORMAT_D32_FLOAT;
-            dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+            dsv.ViewDimension = desc.samples > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
             m_device->CreateDepthStencilView(t.resource.Get(), &dsv, m_dsv_heap.cpu(t.dsv));
         }
     }
@@ -2055,6 +2070,7 @@ PipelineHandle D3D12Device::create_pipeline(const GraphicsPipelineDesc& desc) {
     GIANT_ASSERT(desc.color_count <= k_max_color_targets, "too many colour targets");
     GIANT_ASSERT(desc.depth == DepthMode::none || is_depth(desc.depth_format),
                  "depth testing needs a depth format");
+    GIANT_ASSERT(desc.samples == 1 || desc.samples == 4, "a pipeline draws 1 or 4 samples a pixel");
     const bool mesh = desc.geometry == GeometryStage::mesh;
     const ShaderCode geometry = mesh ? desc.mesh : desc.vertex;
     if (geometry.empty() || desc.pixel.empty()) {
@@ -2103,14 +2119,16 @@ PipelineHandle D3D12Device::create_pipeline(const GraphicsPipelineDesc& desc) {
     pso.RasterizerState.FrontCounterClockwise = TRUE;
     pso.RasterizerState.DepthClipEnable = TRUE;
     pso.DepthStencilState.DepthEnable = desc.depth != DepthMode::none;
-    pso.DepthStencilState.DepthWriteMask = desc.depth == DepthMode::test_write
+    pso.DepthStencilState.DepthWriteMask = desc.depth == DepthMode::test_write || desc.depth == DepthMode::write
                                                ? D3D12_DEPTH_WRITE_MASK_ALL
                                                : D3D12_DEPTH_WRITE_MASK_ZERO;
-    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER; // reverse-Z
+    pso.DepthStencilState.DepthFunc = desc.depth == DepthMode::write ? D3D12_COMPARISON_FUNC_ALWAYS
+                                                                     : D3D12_COMPARISON_FUNC_GREATER; // reverse-Z
     pso.DSVFormat = desc.depth_format != Format::unknown ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = desc.color_count;
-    pso.SampleDesc.Count = 1;
+    pso.SampleDesc.Count = desc.samples;
+    pso.RasterizerState.MultisampleEnable = desc.samples > 1 ? TRUE : FALSE;
     DxPipeline p;
     if (mesh) {
         ComPtr<ID3D12Device2> device2;
@@ -2145,6 +2163,7 @@ PipelineHandle D3D12Device::create_pipeline(const GraphicsPipelineDesc& desc) {
     p.color_formats = desc.color_formats;
     p.color_count = desc.color_count;
     p.depth_format = desc.depth_format;
+    p.samples = desc.samples;
     return m_pipelines.add(std::move(p));
 }
 
@@ -2407,8 +2426,8 @@ std::vector<u8> D3D12Device::read_texture(TextureHandle handle) {
     if (t == nullptr || m_lost) {
         return {};
     }
-    if (is_block_compressed(t->desc.format)) {
-        log_error("rhi", "read_texture cannot read block-compressed textures");
+    if (is_block_compressed(t->desc.format) || t->desc.samples != 1) {
+        log_error("rhi", "read_texture cannot read block-compressed or multisampled textures");
         return {};
     }
     wait_idle(); // the texture's last writes must be done

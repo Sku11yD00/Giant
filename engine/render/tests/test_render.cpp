@@ -4,11 +4,13 @@
 #include "giant_test.h"
 #include "shadow_pages.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <limits>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -47,7 +49,7 @@ GIANT_TEST("render: the camera projects reverse-Z with no far plane") {
     GIANT_CHECK_NEAR(left.z, 0.05, 1e-5);
 }
 
-GIANT_TEST("render: the scene is one raster draw and one shading pass on the null device") {
+GIANT_TEST("render: the scene is one raster draw, the samples sorted and one shading pass on the null device") {
     rhi::DeviceDesc desc;
     desc.backend = rhi::Backend::null;
     auto device = rhi::create_device(desc);
@@ -81,13 +83,14 @@ GIANT_TEST("render: the scene is one raster draw and one shading pass on the nul
         renderer->render(*cmd, target, frame);
         device->end_frame();
     }
-    GIANT_CHECK(renderer->last_stats().draws == 2); // clusters, then shading
+    GIANT_CHECK(renderer->last_stats().draws == 3); // clusters, multisampling's sorting, then shading
+    GIANT_CHECK(renderer->last_stats().multisampled);
     GIANT_CHECK(renderer->last_stats().instances == 3);
     GIANT_CHECK(renderer->last_stats().clusters >= 3);
     GIANT_CHECK(!renderer->last_stats().from_gpu);
     // Screen reflections; exposure and tone mapping; SMAA: edges, weights, blend.
     GIANT_CHECK(renderer->last_stats().post_draws == 5);
-    GIANT_CHECK(device->last_frame_stats().draws == 2 + 5);
+    GIANT_CHECK(device->last_frame_stats().draws == 3 + 5);
     // The background is cleared as linear colour: 0.5 is sRGB byte 188.
     const auto pixels = device->read_texture(target);
     GIANT_CHECK(pixels.size() == 64 * 32 * 4 && pixels[0] == 188 && pixels[1] == 0);
@@ -166,12 +169,12 @@ GIANT_TEST("render: detail follows distance, the error setting and the view") {
     const RenderStats mid = at(80.0);
     const RenderStats far = at(2000.0);
     GIANT_CHECK(near.triangles > mid.triangles && mid.triangles > far.triangles && far.triangles > 0);
-    GIANT_CHECK(near.draws == 2 && far.draws == 2 && near.instances == 1);
+    GIANT_CHECK(near.draws == 3 && far.draws == 3 && near.instances == 1);
     GIANT_CHECK(at(80.0, 8.0f).triangles < mid.triangles); // more error allowed: fewer triangles
     // Behind the camera: nothing drawn (only the shading pass runs).
     instances[0].position = {0.0, 0.0, 50.0};
     const RenderStats behind = s.draw(frame);
-    GIANT_CHECK(behind.draws == 1 && behind.clusters == 0 && behind.triangles == 0);
+    GIANT_CHECK(behind.draws == 2 && behind.clusters == 0 && behind.triangles == 0);
     // Debug views draw the same clusters.
     instances[0].position = {0.0, 0.0, -80.0};
     frame.settings.lod_error_pixels = 1.0f;
@@ -373,13 +376,13 @@ GIANT_TEST("render: meshes can be added and removed") {
     FrameInput frame;
     frame.instances = instances;
     frame.settings.gpu_culling = false;
-    GIANT_CHECK(s.draw(frame).draws == 2);
+    GIANT_CHECK(s.draw(frame).draws == 3);
     s.renderer->remove_mesh(id);
     GIANT_CHECK(s.renderer->mesh(id) == nullptr);
-    GIANT_CHECK(s.draw(frame).draws == 1); // a removed id draws nothing; shading still runs
+    GIANT_CHECK(s.draw(frame).draws == 2); // a removed id draws nothing; the sorting and shading still run
     const MeshId next = s.renderer->add_mesh(geometry::build_clusters(geometry::make_cube()));
     GIANT_CHECK(next == id && s.renderer->mesh(next) != nullptr); // the slot is reused
-    GIANT_CHECK(s.draw(frame).draws == 2);                       // so the old instance draws the new mesh
+    GIANT_CHECK(s.draw(frame).draws == 3);                       // so the old instance draws the new mesh
     // Built-in meshes cannot be removed.
     s.renderer->remove_mesh(s.renderer->builtin(BuiltinMesh::cube));
     GIANT_CHECK(s.renderer->mesh(s.renderer->builtin(BuiltinMesh::cube)) != nullptr);
@@ -406,8 +409,8 @@ GIANT_TEST("render: GPU culling records valid work on the null device") {
             for (int f = 0; f < 2; ++f) { // the second frame tests against the first's HZB
                 const RenderStats stats = s.draw(frame);
                 GIANT_CHECK(stats.from_gpu);
-                // A raster pass per culling pass, then shading.
-                GIANT_CHECK(stats.draws == (occlusion ? 3u : 2u));
+                // A raster pass per culling pass, multisampling's sorting, then shading.
+                GIANT_CHECK(stats.draws == (occlusion ? 4u : 3u));
                 GIANT_CHECK(s.device->last_frame_stats().draws == stats.draws + stats.post_draws);
                 GIANT_CHECK(s.device->last_frame_stats().dispatches > 4);
             }
@@ -420,9 +423,9 @@ GIANT_TEST("render: GPU culling records valid work on the null device") {
     GIANT_CHECK(s.draw(frame).from_gpu);
     // A removed mesh, an empty scene, and the GPU counts read after a wait.
     s.renderer->remove_mesh(instances[2].mesh);
-    GIANT_CHECK(s.draw(frame).draws == 2); // occlusion is off after the loop
+    GIANT_CHECK(s.draw(frame).draws == 3); // occlusion is off after the loop
     frame.instances = {};
-    GIANT_CHECK(s.draw(frame).draws == 1);
+    GIANT_CHECK(s.draw(frame).draws == 2);
     s.device->wait_idle();
     s.renderer->read_gpu_stats();
     GIANT_CHECK(s.renderer->last_stats().clusters == 0); // the null device ran no shaders
@@ -443,21 +446,21 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     };
     frame.settings.gpu_culling = false;
     s.draw(frame);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post",
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "multisampling", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post",
                                                      "anti-aliasing"}));
     frame.settings.gpu_culling = true;
     frame.settings.occlusion_culling = true;
     frame.settings.antialiasing = false;
     s.draw(frame);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
+                                                     "raster", "HZB", "shadows", "multisampling", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
     GIANT_CHECK(s.renderer->last_stats().ambient_occlusion);
     // Ambient occlusion off, or a debug view: no pass.
     frame.settings.ambient_occlusion = false;
     s.draw(frame);
     GIANT_CHECK(!s.renderer->last_stats().ambient_occlusion);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "contact shadows", "shading", "screen reflections", "post"}));
+                                                     "raster", "HZB", "shadows", "multisampling", "contact shadows", "shading", "screen reflections", "post"}));
     frame.settings.ambient_occlusion = true;
     frame.settings.ambient_occlusion_radius = NAN; // (kept in range)
     frame.settings.debug_view = DebugView::clusters;
@@ -475,13 +478,13 @@ GIANT_TEST("render: passes are timed on the GPU, in order") {
     s.draw(frame);
     GIANT_CHECK(!s.renderer->last_stats().contact_shadows);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "ambient occlusion", "shading", "screen reflections", "post"}));
+                                                     "raster", "HZB", "shadows", "multisampling", "ambient occlusion", "shading", "screen reflections", "post"}));
     frame.settings.contact_shadows = true;
     // Screen reflections: timed apart from shading, only when on.
     frame.settings.screen_space_reflections = false;
     s.draw(frame);
     GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "culling", "raster", "HZB", "culling",
-                                                     "raster", "HZB", "shadows", "ambient occlusion", "contact shadows",
+                                                     "raster", "HZB", "shadows", "multisampling", "ambient occlusion", "contact shadows",
                                                      "shading", "post"}));
     frame.settings.screen_space_reflections = true;
     frame.settings.debug_view = DebugView::clusters;
@@ -513,13 +516,13 @@ GIANT_TEST("render: skin spreads its light in a pass of its own after shading, w
     };
     s.draw(frame);
     GIANT_CHECK(s.renderer->last_stats().subsurface_scattering);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "ambient occlusion",
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "multisampling", "ambient occlusion",
                                                      "contact shadows", "shading", "subsurface scattering",
                                                      "screen reflections", "post"}));
     // Without screen reflections: straight on to post.
     frame.settings.screen_space_reflections = false;
     s.draw(frame);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "ambient occlusion",
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "multisampling", "ambient occlusion",
                                                      "contact shadows", "shading", "subsurface scattering", "post"}));
     frame.settings.screen_space_reflections = true;
     // The setting off, a debug view, no looks, or a look past them: no pass.
@@ -753,7 +756,7 @@ GIANT_TEST("render: shadow pages asked for are drawn, a pass per level, and cach
     st = s.draw(frame);
     GIANT_CHECK(st.shadow_pages == 3 && st.shadow_drawn == 3 && st.shadow_waiting == 0);
     GIANT_CHECK(st.shadow_draws == 2); // levels 0 and 4
-    GIANT_CHECK(st.draws == 3);        // the view's two raster passes and shading: shadows apart
+    GIANT_CHECK(st.draws == 4);        // the view's two raster passes, the sorting and shading: shadows apart
     GIANT_CHECK(s.device->last_frame_stats().draws == st.draws + st.post_draws + st.shadow_draws);
     // Cached: nothing to draw while nothing changes.
     st = s.draw(frame);
@@ -957,7 +960,7 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
     };
     const auto pixels = draw(false, false, false);
     const RenderStats cpu = renderer->last_stats();
-    GIANT_CHECK(cpu.draws == 2 && !cpu.from_gpu && cpu.instances == 2);
+    GIANT_CHECK(cpu.draws == 3 && !cpu.from_gpu && cpu.instances == 2); // clusters, multisampling's sorting, shading
     GIANT_CHECK(pixels.size() == k_w * k_h * 4);
     if (pixels.size() == k_w * k_h * 4) {
         const auto at = [&pixels](u32 x, u32 y) {
@@ -994,24 +997,25 @@ GIANT_TEST("render: d3d12 lights a scene on the software adapter") {
         // The same cut, give or take a group on a float rounding edge.
         GIANT_CHECK(std::abs(int(g.clusters) - int(cpu.clusters)) <= int(cpu.clusters / 20 + 1));
         GIANT_CHECK(std::abs(int(g.triangles) - int(cpu.triangles)) <= int(cpu.triangles / 20 + 1));
-        GIANT_CHECK(g.draws == 2);
+        GIANT_CHECK(g.draws == 3);
         GIANT_CHECK(differing(plain) <= pixels.size() / 200);
         const auto culled = draw(true, true, mesh);
         const RenderStats o = renderer->last_stats();
-        GIANT_CHECK(o.from_gpu && !o.overflow && o.draws == 3);
+        GIANT_CHECK(o.from_gpu && !o.overflow && o.draws == 4);
         GIANT_CHECK(o.clusters <= g.clusters && o.clusters > 0);
         GIANT_CHECK(differing(culled) <= pixels.size() / 200); // nothing visible lost
         // The GPU timed each pass of the newest frame (read after the wait).
         const auto timings = device->gpu_timings();
-        GIANT_CHECK(timings.size() == 14); // streaming, voxels, 2 x (culling, raster, HZB), AO, contact shadows, shading, screen reflections, post, AA
+        GIANT_CHECK(timings.size() == 15); // streaming, voxels, 2 x (culling, raster, HZB), multisampling, AO, contact shadows, shading, screen reflections, post, AA
         bool timed = true;
         for (const rhi::GpuTiming& t : timings) {
             timed = timed && t.ms >= 0.0f && t.ms <= device->gpu_frame_ms() + 1e-4f;
         }
         GIANT_CHECK(timed && device->gpu_frame_ms() > 0.0f);
-        GIANT_CHECK(timings.size() == 14 && timings[2].name == "culling" && timings[8].name == "ambient occlusion" &&
-                    timings[9].name == "contact shadows" && timings[10].name == "shading" &&
-                    timings[11].name == "screen reflections" && timings[12].name == "post");
+        GIANT_CHECK(timings.size() == 15 && timings[2].name == "culling" && timings[8].name == "multisampling" &&
+                    timings[9].name == "ambient occlusion" && timings[10].name == "contact shadows" &&
+                    timings[11].name == "shading" && timings[12].name == "screen reflections" &&
+                    timings[13].name == "post");
     }
     // A glowing red decal stamped on the sphere's front, facing the camera
     // (its +Y turned to +Z), on the CPU and GPU paths alike.
@@ -1641,12 +1645,12 @@ GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds
     frame.sky.on = true;
     st = s.draw(frame); // no cover: the air alone
     GIANT_CHECK(st.sky && st.physical_sky && !st.clouds && !st.cloud_shadows);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "multisampling", "sky", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
     // The physical sky's passes run inside "sky"; off, the single-scattered sky and the flat ambient colours.
     frame.settings.physical_sky = false;
     st = s.draw(frame);
     GIANT_CHECK(st.sky && !st.physical_sky);
-    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
+    GIANT_CHECK(names() == (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "multisampling", "sky", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
     frame.settings.physical_sky = true;
     frame.settings.aerial_distance = NAN; // (kept in range)
     st = s.draw(frame);
@@ -1656,7 +1660,7 @@ GIANT_TEST("render: the sky's passes run before shading in lit views, the clouds
     st = s.draw(frame);
     GIANT_CHECK(st.sky && st.clouds && st.cloud_shadows);
     GIANT_CHECK(names() ==
-                (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "sky", "clouds", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
+                (std::vector<std::string>{"streaming", "voxels", "gi", "raster", "multisampling", "sky", "clouds", "ambient occlusion", "contact shadows", "shading", "screen reflections", "post"}));
     // Settings turn them off; a sun below the horizon casts no cloud shadows.
     frame.settings.cloud_shadows = false;
     st = s.draw(frame);
@@ -2287,6 +2291,7 @@ GIANT_TEST("render: d3d12 a rod a fifth of a pixel wide is on every row wherever
     frame.settings.ambient_occlusion = false;
     frame.settings.contact_shadows = false;
     frame.settings.voxel_far_field = false;
+    frame.settings.multisampling = false; // growing on its own (one look a pixel)
     frame.view.position = {300.0, 10.0, 0.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
     frame.instances = instances;
@@ -2467,6 +2472,7 @@ GIANT_TEST("render: d3d12 supersampled, an edge crossing a pixel fades in by ste
     frame.settings.ambient_occlusion = false;
     frame.settings.contact_shadows = false;
     frame.settings.voxel_far_field = false;
+    frame.settings.multisampling = false; // supersampling on its own
     frame.settings.grow_pixels = 0.0f;
     frame.view.position = {300.0, 10.0, 0.0};
     frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
@@ -2543,6 +2549,219 @@ GIANT_TEST("render: d3d12 supersampled, an edge crossing a pixel fades in by ste
     GIANT_CHECK(twice.between > 0 && half_more.between > 0);
     GIANT_CHECK(twice.jump > 0 && twice.jump <= plain.sheet * 17 / 20);
     GIANT_CHECK(half_more.jump > 0 && half_more.jump <= plain.sheet * 9 / 10); // (two thirds of a pixel at the most)
+    GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
+    device->destroy(target);
+}
+
+GIANT_TEST("render: multisampling adds its sorting pass after the raster passes, and goes with the setting (null device)") {
+    NullScene s;
+    if (s.renderer == nullptr) return;
+    std::vector<Instance> instances(2);
+    instances[0].mesh = s.renderer->builtin(BuiltinMesh::sphere);
+    instances[0].position = {0.0, 0.0, -5.0};
+    instances[1].mesh = s.renderer->builtin(BuiltinMesh::plane);
+    instances[1].scale = {40.0f, 1.0f, 40.0f};
+    instances[1].position = {0.0, -1.0, 0.0};
+    FrameInput frame;
+    frame.instances = instances;
+    const auto names = [&s] {
+        std::vector<std::string> out;
+        for (const rhi::GpuTiming& t : s.device->gpu_timings()) out.push_back(t.name);
+        return out;
+    };
+    const auto count = [&](const char* name) {
+        const std::vector<std::string> all = names();
+        return std::count(all.begin(), all.end(), std::string(name));
+    };
+    // On as it comes, with either culling, mesh or vertex shaders, occlusion or not: one pass more.
+    for (const bool gpu : {true, false}) {
+        for (const bool mesh_shaders : {true, false}) {
+            for (const bool occlusion : {true, false}) {
+                frame.settings = RenderSettings{};
+                frame.settings.gpu_culling = gpu;
+                frame.settings.mesh_shaders = mesh_shaders;
+                frame.settings.occlusion_culling = occlusion;
+                const RenderStats on = s.settle(frame);
+                GIANT_CHECK(on.multisampled && count("multisampling") == 1);
+                GIANT_CHECK(s.device->last_frame_stats().draws == on.draws + on.post_draws + on.shadow_draws);
+                frame.settings.multisampling = false;
+                const RenderStats off = s.settle(frame);
+                GIANT_CHECK(!off.multisampled && count("multisampling") == 0);
+                GIANT_CHECK(off.draws + 1 == on.draws && off.post_draws == on.post_draws);
+                GIANT_CHECK(off.clusters == on.clusters && off.triangles == on.triangles); // the same cut
+            }
+        }
+    }
+    // After the last raster pass and the depth pyramid built from it, before anything reads the depth.
+    frame.settings = RenderSettings{};
+    s.settle(frame);
+    const std::vector<std::string> order = names();
+    const auto at = [&](const char* name) {
+        return std::find(order.rbegin(), order.rend(), std::string(name)).base() - order.begin(); // one past its last
+    };
+    GIANT_CHECK(at("multisampling") > at("raster") && at("multisampling") > at("HZB"));
+    GIANT_CHECK(at("multisampling") < at("ambient occlusion") && at("multisampling") < at("shading"));
+    // With supersampling too (the four-sample targets at the larger frame's size), and in debug views.
+    frame.settings.supersampling = 1.5f;
+    GIANT_CHECK(s.settle(frame).multisampled && count("multisampling") == 1);
+    frame.settings.supersampling = 1.0f;
+    frame.settings.debug_view = DebugView::clusters;
+    GIANT_CHECK(s.settle(frame).multisampled && count("multisampling") == 1);
+    // The voxel view shows no meshes: nothing to sort.
+    frame.settings.debug_view = DebugView::voxels;
+    s.settle(frame);
+    GIANT_CHECK(count("multisampling") == 0);
+    // Another target size: the targets are made again and it carries on.
+    frame.settings.debug_view = DebugView::lit;
+    rhi::TextureDesc t;
+    t.width = 320;
+    t.height = 200;
+    t.format = rhi::Format::rgba8_srgb;
+    t.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle small = s.device->create_texture(t);
+    for (int i = 0; i < 3; ++i) {
+        rhi::CommandList* cmd = s.device->begin_frame(nullptr);
+        s.renderer->render(*cmd, small, frame);
+        s.device->end_frame();
+        GIANT_CHECK(s.renderer->last_stats().multisampled);
+    }
+    s.device->destroy(small);
+}
+
+GIANT_TEST("render: d3d12 multisampled, an edge crossing a pixel fades in by quarter steps, lit or over the plain background") {
+    rhi::DeviceDesc desc;
+    desc.backend = rhi::Backend::d3d12;
+    desc.software_adapter = true;
+    desc.debug_layer = true;
+    auto device = rhi::create_device(desc);
+    if (device == nullptr) return; // not on Windows
+    auto renderer = Renderer::create(*device);
+    GIANT_CHECK(renderer != nullptr);
+    if (renderer == nullptr) return;
+    constexpr u32 k_w = 96, k_h = 96;
+    rhi::TextureDesc target_desc;
+    target_desc.width = k_w;
+    target_desc.height = k_h;
+    target_desc.format = rhi::Format::rgba8_srgb;
+    target_desc.usage = rhi::TextureUsage::render_target;
+    const rhi::TextureHandle target = device->create_texture(target_desc);
+    // As the supersampling test: the camera 10 m above a pale sheet,
+    // looking straight down, the sheet moved to the right across one pixel
+    // in sixteen steps. Over the plain background (shown as it is), and
+    // over a dark floor a metre under it (lit, as the sheet is).
+    std::vector<Instance> instances(2);
+    instances[0].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[0].scale = {1.0f, 1.0f, 4.0f};
+    instances[1].mesh = renderer->builtin(BuiltinMesh::plane);
+    instances[1].scale = {200.0f, 1.0f, 200.0f};
+    instances[1].position = {300.0, -1.0, 0.0};
+    instances[1].material = 1;
+    std::vector<Material> materials(2);
+    // (Dim enough that the tone mapper leaves the part-way brightnesses well apart.)
+    materials[0].base_color = {0.5f, 0.5f, 0.5f};
+    materials[0].roughness = 0.9f;
+    materials[1].base_color = {0.05f, 0.05f, 0.05f};
+    materials[1].roughness = 0.9f;
+    FrameInput frame;
+    frame.settings.auto_exposure = false;
+    frame.settings.bloom = false;
+    frame.settings.shadows = false;
+    frame.settings.gi = false;
+    frame.settings.physical_sky = false;
+    frame.settings.reflections = false;
+    frame.settings.screen_space_reflections = false;
+    frame.settings.antialiasing = false;
+    frame.settings.ambient_occlusion = false;
+    frame.settings.contact_shadows = false;
+    frame.settings.voxel_far_field = false;
+    frame.settings.grow_pixels = 0.0f;
+    frame.view.position = {300.0, 10.0, 0.0};
+    frame.view.orientation = quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    frame.materials = materials;
+    frame.lighting.background = {0.0f, 0.0f, 0.0f};
+    frame.lighting.sun_direction = {0.0f, 1.0f, 0.0f};
+    frame.lighting.sun_light = {1.0f, 1.0f, 1.0f};
+    frame.lighting.sky_light = {0.5f, 0.5f, 0.5f};
+    frame.lighting.ground_light = {0.5f, 0.5f, 0.5f};
+    // The middle row's pixels (green).
+    const auto draw = [&] {
+        int quiet = 0;
+        for (int i = 0; i < 64 && (i < 3 || quiet < 4); ++i) {
+            rhi::CommandList* cmd = device->begin_frame(nullptr);
+            GIANT_CHECK(cmd != nullptr);
+            if (cmd != nullptr) {
+                renderer->render(*cmd, target, frame);
+                device->end_frame();
+            }
+            const RenderStats& st = renderer->last_stats();
+            quiet = st.streamed_in == 0 && st.waiting == 0 ? quiet + 1 : 0;
+        }
+        device->wait_idle();
+        const std::vector<u8> image = device->read_texture(target);
+        std::vector<int> row(k_w, 0);
+        GIANT_CHECK(image.size() == usize{k_w} * k_h * 4);
+        if (image.size() != usize{k_w} * k_h * 4) return row;
+        for (u32 x = 0; x < k_w; ++x) {
+            row[x] = image[(usize{k_h / 2} * k_w + x) * 4 + 1];
+        }
+        return row;
+    };
+    const double pixel = 2.0 * 10.0 * std::tan(0.5 * double(frame.view.vertical_fov_degrees) * 3.14159265358979 / 180.0) / k_h;
+    // The sheet's own brightness and what is round it, how many different
+    // brightnesses in between were seen over the steps, and the most the
+    // row's summed brightness changed from one step to the next.
+    struct Seen {
+        int sheet = 0;
+        int round = 0;
+        std::set<int> between;
+        int jump = 0;
+    };
+    const auto sweep = [&](bool multisampled, bool floor, float grow) {
+        frame.settings.multisampling = multisampled;
+        frame.settings.grow_pixels = grow;
+        frame.instances = std::span<const Instance>(instances).first(floor ? 2 : 1);
+        Seen seen;
+        int before = -1;
+        for (u32 step = 0; step < 16; ++step) {
+            // (A quarter of a step on: no edge sits on a sample's place at a step.)
+            instances[0].position = DVec3{300.0 + pixel * (double(step) + 0.25) / 16.0, 0.0, 0.0};
+            const std::vector<int> row = draw();
+            GIANT_CHECK(renderer->last_stats().multisampled == multisampled);
+            seen.sheet = std::max(seen.sheet, row[k_w / 2]);
+            seen.round = row[2];
+            int sum = 0;
+            for (const int v : row) {
+                sum += v;
+                if (v > row[2] + 5 && v < row[k_w / 2] - 5) seen.between.insert(v / 4);
+            }
+            if (before >= 0) seen.jump = std::max(seen.jump, std::abs(sum - before));
+            before = sum;
+        }
+        return seen;
+    };
+    // (The last: with growing as it comes, every edge half a pixel further out.)
+    struct Case {
+        bool floor;
+        float grow;
+        const char* name;
+    };
+    for (const Case& c : {Case{false, 0.0f, "over the background"}, Case{true, 0.0f, "over a lit floor"},
+                          Case{true, RenderSettings{}.grow_pixels, "over a lit floor, grown"}}) {
+        const Seen plain = sweep(false, c.floor, c.grow);
+        const Seen smooth = sweep(true, c.floor, c.grow);
+        std::printf("    %s: the sheet %d, %d bright, round it %d, %d; brightnesses in between %u, %u; the row's biggest jump %d, %d (as it is, multisampled)\n",
+                    c.name, plain.sheet, smooth.sheet, plain.round, smooth.round,
+                    static_cast<u32>(plain.between.size()), static_cast<u32>(smooth.between.size()), plain.jump, smooth.jump);
+        // The sheet itself and what is round it look the same either way.
+        GIANT_CHECK(plain.sheet > 60 && std::abs(smooth.sheet - plain.sheet) <= 2);
+        GIANT_CHECK(std::abs(smooth.round - plain.round) <= 2 && plain.round < plain.sheet / 2);
+        // One look a pixel: the sheet or not, and an edge crossing a pixel is one jump of a whole pixel.
+        GIANT_CHECK(plain.between.empty());
+        GIANT_CHECK(plain.jump >= plain.sheet - plain.round - 2);
+        // Four samples: three brightnesses part-way, and no step changes the row by most of a pixel.
+        GIANT_CHECK(smooth.between.size() >= 3);
+        GIANT_CHECK(smooth.jump > 0 && smooth.jump <= (plain.sheet - plain.round) * 7 / 10);
+    }
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);
 }

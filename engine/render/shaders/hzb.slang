@@ -4,7 +4,7 @@
 #include "common.slang"
 
 struct HzbPush {
-    uint depth;      // read descriptor of the depth texture (cs_first)
+    uint depth;      // read descriptor of the depth texture (cs_first; cs_first_samples: the four-sample one)
     uint hzb;        // write descriptor
     uint width;      // depth texture size
     uint height;
@@ -32,6 +32,31 @@ void cs_first(uint3 id : SV_DispatchThreadID) {
     for (uint y = y0; y < y1; ++y) {
         for (uint x = x0; x < x1; ++x) {
             farthest = min(farthest, depth.Load(int3(int(x), int(y), 0)));
+        }
+    }
+    write_buffer(push.hzb).Store((id.y * push.hzb_width + id.x) * 4, asuint(farthest));
+}
+
+// The same from depth drawn with four samples a pixel (multisampling): the
+// farthest of every sample, so nothing seen through part of a pixel is
+// taken for hidden.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void cs_first_samples(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= push.hzb_width || id.y >= push.hzb_height) {
+        return;
+    }
+    const uint x0 = id.x * push.width / push.hzb_width;
+    const uint x1 = min(((id.x + 1) * push.width + push.hzb_width - 1) / push.hzb_width, push.width);
+    const uint y0 = id.y * push.height / push.hzb_height;
+    const uint y1 = min(((id.y + 1) * push.height + push.hzb_height - 1) / push.hzb_height, push.height);
+    Texture2DMS<float> depth = read_texture_ms_float(push.depth);
+    float farthest = 1.0;
+    for (uint y = y0; y < y1; ++y) {
+        for (uint x = x0; x < x1; ++x) {
+            [unroll] for (uint s = 0; s < 4; ++s) {
+                farthest = min(farthest, depth.Load(int2(int(x), int(y)), int(s)));
+            }
         }
     }
     write_buffer(push.hzb).Store((id.y * push.hzb_width + id.x) * 4, asuint(farthest));

@@ -835,21 +835,19 @@ void eye_colors(Eye o, inout float3 base, inout float rough, inout float metal) 
 
 // `spread`: skin's diffuse light goes to Shaded::subsurface (for
 // subsurface.slang to spread) instead of radiance.
-Shaded shade_pixel(float4 position, bool spread) {
+// What one surface in a pixel shows: `vis` its triangle (x 0: nothing
+// drawn) and `s` what surface_at made of it, seen along `position` (the
+// pixel's middle, or one of its samples). `own`: the pixel's own surface
+// (it asks for texture detail and traces the voxel reflection cone; with
+// multisampling a pixel's other surfaces, shade_pixel, reflect the
+// hemisphere's colours). `screen`: the screen's one-a-pixel images are of
+// it or of something right by it (ambient occlusion, contact shadows,
+// characters' occlusion).
+Shaded shade_surface(Frame f, Extras extras, float4 position, uint2 vis, Hit s, float normal_change, bool spread,
+                     bool own, bool screen) {
     const uint2 pixel = uint2(position.xy);
-    const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
-    const Frame f = load_frame(push.frame, push.frame_offset);
-    const Extras extras = load_extras(push.extras, push.extras_offset);
     const bool hit = vis.x != 0;
-    Hit s = no_hit();
-    if (hit) {
-        s = surface_at(f, position, vis);
-        s.shading_n = skin_detail(extras, s, bent_normal(s));
-    }
-    // Every pixel of the quad reaches this, drawn or not. The shading
-    // normal's change: a normal map's bumps widen the highlight too.
-    float variance = normal_variance(s.shading_n, s.instance);
-
+    float variance = normal_change;
     // The far field: past far_start the meshes are left out (the CPU drops
     // instances wholly beyond it) and the voxel world stands in, in front
     // of whatever mesh is drawn there (lit views only).
@@ -1018,7 +1016,9 @@ Shaded shade_pixel(float4 position, bool spread) {
         n = from_behind ? -n : n;
         metal = 0.0;
     }
-    texture_feedback(extras, f, s, pixel);
+    if (own) {
+        texture_feedback(extras, f, s, pixel);
+    }
     const float pixel_size = length(world) * 2.0 / max(f.p11 * f.height, 1e-6);
     float decal_wet;
     apply_decals(push.decals, push.decal_offset, push.tile_offset, push.entry_offset, push.tile_columns,
@@ -1046,7 +1046,7 @@ Shaded shade_pixel(float4 position, bool spread) {
         clouds = cloud_shadow(sky, world);
         sun *= clouds;
     }
-    if (extras.contact_on != 0u && sun > 0.0 && dot(surface_n, f.sun_direction.xyz) > 0.0) {
+    if (screen && extras.contact_on != 0u && sun > 0.0 && dot(surface_n, f.sun_direction.xyz) > 0.0) {
         sun *= read_texture_float(extras.contact).Load(int3(int2(pixel), 0));
     }
     float4 bounce = float4(0.0, 0.0, 0.0, 0.0);
@@ -1057,7 +1057,7 @@ Shaded shade_pixel(float4 position, bool spread) {
     // screen's weight for reflect.slang.
     float4 cone = float4(0.0, 0.0, 0.0, 0.0);
     float cone_weight = 0.0;
-    if ((extras.reflect_on & 1u) != 0u) {
+    if (own && (extras.reflect_on & 1u) != 0u) {
         cone_weight = saturate((k_voxel_reflection_rough - dry_rough) / k_reflection_fade);
         if (cone_weight > 0.0) {
             const float roughness = clamp(dry_rough, 0.045, 1.0);
@@ -1071,13 +1071,13 @@ Shaded shade_pixel(float4 position, bool spread) {
     float3 spec_weight;
     float3 spec_light;
     float3 bend = float3(0.0, 0.0, 0.0);
-    if (extras.ao_on != 0u) {
+    if (screen && extras.ao_on != 0u) {
         float ao;
         ambient_occlusion(extras, f, pixel, world, surface_n, ao, bend);
         occlusion *= ao;
     }
     float3 bounced = float3(0.0, 0.0, 0.0);
-    if (extras.occlusion_on != 0u) {
+    if (screen && extras.occlusion_on != 0u) {
         // Characters near: the light their bodies shut out, and give back.
         const float4 c = read_texture(extras.occlusion).Load(int3(int2(pixel), 0));
         bounced = c.rgb * occlusion;
@@ -1130,6 +1130,124 @@ Shaded shade_pixel(float4 position, bool spread) {
     o.gloss = uint2(q.x | (q.y << 10) | (q.z << 20), pack_octahedral(n));
     o.reflected = float4(min(spec_light, float3(60000.0, 60000.0, 60000.0)), 0.0);
     return o;
+}
+
+// Multisampling (samples.slang): the surfaces of a pixel mixed by their
+// shares of it. Lit ones are weighed as they will show (each by 1 over 1 +
+// its exposed brightness), so a bright surface with one sample of four
+// does not swamp the pixel and leave the edge as jagged as it was. Where
+// something in the pixel is far brighter than white (a lamp, the sun's
+// glint) that gives way to the plain mean by shares: such a pixel shows
+// white either way, and bloom, which reads this light before tone mapping,
+// must get all of a small bright thing's light wherever it sits in the
+// pixel, or its glow would come and go as the camera moves.
+struct Mixed {
+    float3 lit;       // the light, weighed as it shows
+    float lit_weight;
+    float3 sum;       // the light, by share
+    float lit_share;  // of the pixel
+    float brightest;  // the brightest lit surface, exposed
+    float3 plain;     // colours shown as they are (background, debug views), by share
+};
+// (A bright sky behind dark crowns, a few times white, stays weighed as it shows.)
+static const float k_mix_bright_from = 8.0;  // exposed brightness from which the plain mean comes in
+static const float k_mix_bright_span = 24.0; // and over which it takes over
+
+// The weight this call gave the surface among the lit ones (0: not lit).
+float mix_in(inout Mixed m, Frame f, float4 radiance, float share) {
+    if (radiance.a > 0.5) {
+        const float exposed = luminance(radiance.rgb) * max(f.exposure, 0.0);
+        const float w = share / (1.0 + exposed);
+        m.lit += radiance.rgb * w;
+        m.lit_weight += w;
+        m.sum += radiance.rgb * share;
+        m.lit_share += share;
+        m.brightest = max(m.brightest, exposed);
+        return w;
+    }
+    m.plain += radiance.rgb * share;
+    return 0.0;
+}
+
+Shaded shade_pixel(float4 position, bool spread) {
+    const uint2 pixel = uint2(position.xy);
+    const uint2 vis = read_texture_uint2(push.vis).Load(int3(int2(pixel), 0));
+    const Frame f = load_frame(push.frame, push.frame_offset);
+    const Extras extras = load_extras(push.extras, push.extras_offset);
+    Hit s = no_hit();
+    if (vis.x != 0u) {
+        s = surface_at(f, position, vis);
+        s.shading_n = skin_detail(extras, s, bent_normal(s));
+    }
+    // Every pixel of the quad reaches this, drawn or not. The shading
+    // normal's change: a normal map's bumps widen the highlight too.
+    const float variance = normal_variance(s.shading_n, s.instance);
+    // Multisampling: the pixel's other surfaces (0: one surface over the
+    // whole pixel, or no multisampling).
+    uint groups = 0u;
+    if (extras.sample_groups != k_no_texture) {
+        groups = read_texture_uint(extras.sample_groups).Load(int3(int2(pixel), 0));
+    }
+    // (Skin on an edge keeps its light where it lands: a share of a pixel
+    // cannot be set aside and spread.)
+    Shaded o = shade_surface(f, extras, position, vis, s, variance, spread && groups == 0u, true, true);
+    if (groups == 0u) {
+        return o;
+    }
+    // An edge: the pixel's other surface with the most samples (the first
+    // of equals) is shaded once more, along one of its samples, and the two
+    // share the pixel as their samples stand to each other. A third and
+    // fourth surface (the inside of a far crown, mostly) are left out: a
+    // pixel is shaded twice at the most, whatever is in it.
+    uint other = 0u;
+    [unroll] for (uint g = 0u; g < 3u; ++g) {
+        const uint group = (groups >> (4u + 4u * g)) & 0xFu;
+        other = (group >> 2u) > (other >> 2u) ? group : other;
+    }
+    Texture2DMS<uint2> samples = read_texture_ms_uint2(extras.sample_vis);
+    Mixed m;
+    m.lit = float3(0.0, 0.0, 0.0);
+    m.lit_weight = 0.0;
+    m.sum = float3(0.0, 0.0, 0.0);
+    m.lit_share = 0.0;
+    m.brightest = 0.0;
+    m.plain = float3(0.0, 0.0, 0.0);
+    const float own_share = float(groups & 7u) / float((groups & 7u) + (other >> 2u));
+    const float own_weight = mix_in(m, f, o.radiance, own_share);
+    const float own_far = length(s.world);
+    {
+        const int at = int(other & 3u);
+        const uint2 v = samples.Load(int2(pixel), at);
+        const float4 through = float4(float2(pixel) + 0.5 + samples.GetSamplePosition(at), position.zw);
+        Hit h = no_hit();
+        bool beside = false; // right by the own surface: a crease, where the screen's images matter most
+        if (v.x != 0u) {
+            h = surface_at(f, through, v);
+            h.shading_n = skin_detail(extras, h, bent_normal(h));
+            beside = vis.x != 0u && abs(length(h.world) - own_far) <= max(0.25, 0.01 * own_far);
+        }
+        // (The own surface's change of normal stands in on the same instance.)
+        const float change = v.x != 0u && h.instance == s.instance ? variance : 0.0;
+        mix_in(m, f, shade_surface(f, extras, through, v, h, change, false, false, beside).radiance, 1.0 - own_share);
+    }
+    const float plainly = saturate((m.brightest - k_mix_bright_from) / k_mix_bright_span);
+    float3 light = float3(0.0, 0.0, 0.0);
+    if (m.lit_weight > 0.0) {
+        light = lerp(m.lit / m.lit_weight, m.sum / max(m.lit_share, 1.0e-6), plainly);
+    }
+    if (m.lit_share >= 0.999) {
+        // The own surface's part of the whole: its screen reflection, which
+        // reflect.slang adds, counts for as much.
+        const float part = lerp(own_weight / max(m.lit_weight, 1.0e-6), own_share, plainly);
+        o.radiance = float4(light, 1.0);
+        const uint3 q = uint3(round(float3(o.gloss.x & 1023u, (o.gloss.x >> 10u) & 1023u, (o.gloss.x >> 20u) & 1023u) * part));
+        o.gloss.x = q.x | (q.y << 10u) | (q.z << 20u);
+        return o;
+    }
+    // Some of it shown as it is: the lit part exposed and tone mapped
+    // here, and the pixel left alone by what follows.
+    const float3 exposed = light * f.exposure;
+    return plain_output(m.plain + (f.tone_mapper == 1u ? tone_map_agx(exposed) : tone_map(exposed)) * m.lit_share);
 }
 
 struct Output {
