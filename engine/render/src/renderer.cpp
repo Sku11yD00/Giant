@@ -2408,6 +2408,7 @@ void Renderer::sort_samples(rhi::CommandList& cmd, const FrameData& data, bool g
     gpu::SamplesPush push{};
     push.vis = m_device.read_descriptor(m_vis_samples);
     push.depth = m_device.read_descriptor(m_depth_samples);
+    push.surfaces = std::clamp(m_sample_surfaces, 2u, 4u);
     if (gpu && m_cull.visible.valid()) {
         cmd.barrier(m_cull.visible, rhi::ResourceState::shader_read);
         push.visible = m_device.read_descriptor(m_cull.visible);
@@ -3184,6 +3185,7 @@ void Renderer::render(rhi::CommandList& cmd, rhi::TextureHandle target, const Fr
         }
     }
     m_multisampled = ensure_sample_targets(settings.multisampling);
+    m_sample_surfaces = settings.multisampling_surfaces;
     // The frame's pixels down one of the target's, and the view's shape:
     // the target's own (the two sides round apart, so the frame's pixels
     // may be a hair off square; what the caller lays over the target with

@@ -360,8 +360,9 @@ struct SamplesPush {
     u32 depth;
     u32 visible;
     u32 visible_offset;
+    u32 surfaces;
 };
-static_assert(sizeof(SamplesPush) == 16);
+static_assert(sizeof(SamplesPush) == 20);
 
 struct RasterPush {
     u32 frame;

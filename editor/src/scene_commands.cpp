@@ -842,6 +842,7 @@ Json render_settings_json(const EditorState& state) {
             {"grow_pixels", state.render_settings.grow_pixels},
             {"supersampling", state.render_settings.supersampling},
             {"multisampling", state.render_settings.multisampling},
+            {"multisampling_surfaces", state.render_settings.multisampling_surfaces},
             {"wind_shadow_pages_per_frame", state.render_settings.wind_shadow_pages_per_frame},
             {"weather_cover", state.render_settings.weather_cover},
             {"last_frame",
@@ -2292,6 +2293,12 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                                   "its two main surfaces, mixed by their shares, so edges are smooth and small "
                                   "far things (a forest's crowns) shimmer much less as the camera moves, without "
                                   "blending frames. Pixels inside a surface are shaded once, as without. Default on."}}},
+                {"multisampling_surfaces",
+                 {{"type", "integer"}, {"minimum", 2}, {"maximum", 4},
+                  {"description", "Of the surfaces an edge pixel's four samples see, how many are shaded (its "
+                                  "own with them, the ones with the most samples first). 2: an edge between "
+                                  "two things is smooth. 3 or 4: pixels that hold more (the inside of a far "
+                                  "forest) are smooth too, each costing as many shadings. Default 2."}}},
                 {"wind_shadow_pages_per_frame",
                  {{"type", "integer"}, {"minimum", 0}, {"maximum", 4096},
                   {"description", "Shadow pages under swaying things drawn again a frame at most, so their "
@@ -2354,6 +2361,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.grow_pixels = args.value("grow_pixels", r.grow_pixels);
              r.supersampling = args.value("supersampling", r.supersampling);
              r.multisampling = args.value("multisampling", r.multisampling);
+             r.multisampling_surfaces = args.value("multisampling_surfaces", r.multisampling_surfaces);
              r.wind_shadow_pages_per_frame = args.value("wind_shadow_pages_per_frame", r.wind_shadow_pages_per_frame);
              return CommandResult::success(render_settings_json(state));
          }});

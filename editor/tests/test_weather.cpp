@@ -277,4 +277,9 @@ GIANT_TEST("weather: the wind near the ground follows it, gusting harder in a st
     GIANT_CHECK(!f.run("get_render_settings").value["multisampling"].get<bool>());
     GIANT_CHECK(!f.run("set_render_settings", {{"multisampling", 4}}).ok);
     GIANT_CHECK(f.run("set_render_settings", {{"multisampling", true}}).ok);
+    GIANT_CHECK(f.run("get_render_settings").value["multisampling_surfaces"].get<int>() == 2);
+    GIANT_CHECK(f.run("set_render_settings", {{"multisampling_surfaces", 4}}).ok && f.state.render_settings.multisampling_surfaces == 4);
+    GIANT_CHECK(f.run("get_render_settings").value["multisampling_surfaces"].get<int>() == 4);
+    GIANT_CHECK(!f.run("set_render_settings", {{"multisampling_surfaces", 1}}).ok && !f.run("set_render_settings", {{"multisampling_surfaces", 5}}).ok);
+    GIANT_CHECK(f.run("set_render_settings", {{"multisampling_surfaces", 2}}).ok);
 }
