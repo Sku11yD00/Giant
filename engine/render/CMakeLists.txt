@@ -73,6 +73,8 @@ giant_shaders(render
     shaders/smaa.slang:ps_edges:pixel:smaa_edges_ps
     shaders/smaa.slang:ps_weights:pixel:smaa_weights_ps
     shaders/smaa.slang:ps_blend:pixel:smaa_blend_ps
+    shaders/shrink.slang:vs_main:vertex:shrink_vs
+    shaders/shrink.slang:ps_main:pixel:shrink_ps
     shaders/voxels.slang:vs_main:vertex:voxels_vs
     shaders/voxels.slang:ps_main:pixel:voxels_ps
     shaders/voxel_light.slang:cs_clear:compute:light_clear_cs

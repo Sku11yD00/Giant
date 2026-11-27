@@ -814,6 +814,25 @@ an offline cooker can use it without a device.
   shading pass, the change in normal across each 2x2 pixel quad (same
   instance only) widens the GGX roughness (Kaplanyan-Hoffman style, capped),
   so highlights on tight curves stay stable instead of flickering.
+- **Supersampling (optional).** What still shimmers in a far forest as
+  the camera moves, with growing on, is every edge: a pixel looks at the
+  scene at one point, so an edge that slides a fifth of a pixel flips one
+  pixel in five outright (measured on the valley at 0.25 m a frame: some
+  3% of the far forest's pixels changed by more than 30 of 255 each frame,
+  the same with shadows, wind, LOD changes and growing each switched off,
+  and none with the camera still). SMAA smooths a finished frame and
+  cannot hold such an edge steady, and no frames are blended (rule 2).
+  `RenderSettings::supersampling` (1 to 2; 1, off, as it comes) draws the
+  whole frame that many times the target's size each way and averages it
+  down at the end (`shrink.slang`: a box over the texels each target
+  pixel covers, by the share covered, in linear light), so a pixel is the
+  mean of up to four looks and an edge crossing it fades in by steps. It
+  costs GPU time with the pixels drawn (four times at 2), so it is an
+  extra for cards with room, not the answer for most: that is to be more
+  looks on edge pixels alone. The LOD error and the sun's shadow level
+  stay those the target's pixels ask for (`Frame::grow.z`,
+  `shown_pixels`); texture detail, growing and everything else follow the
+  larger frame.
 - **Growing (nothing thinner than a pixel).** A trunk, railing or mast
   thinner than a pixel covers a pixel's centre in one frame and falls
   between two in the next, so far forests blinked as the camera moved, and

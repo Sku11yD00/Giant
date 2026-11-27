@@ -1796,6 +1796,10 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
         if (ImGui::SliderFloat("LOD error (px)", &error, 0.1f, 16.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
             run("set_render_settings", {{"lod_error_pixels", std::clamp(error, 0.1f, 64.0f)}});
         }
+        float super = r.supersampling;
+        if (ImGui::SliderFloat("Supersampling", &super, 1.0f, 2.0f, "%.2f x")) {
+            run("set_render_settings", {{"supersampling", std::clamp(super, 1.0f, 2.0f)}});
+        }
         bool gpu = r.gpu_culling;
         if (ImGui::Checkbox("GPU culling", &gpu)) {
             run("set_render_settings", {{"gpu_culling", gpu}});

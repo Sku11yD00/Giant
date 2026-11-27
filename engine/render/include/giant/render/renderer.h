@@ -723,6 +723,15 @@ struct RenderSettings {
     // scale); depths are as they were. 0: off. Skinned meshes and the ground
     // do not grow. (docs/architecture.md, "Growing".)
     float grow_pixels = 0.5f;
+    // Supersampling: the frame is drawn this many times the target's size
+    // each way (1 to 2; 1: off) and averaged down into it, so a pixel is
+    // the mean of up to four looks at the scene, not one. Edges of small
+    // far things (a forest's crowns and their shadows) then slide from
+    // pixel to pixel as the camera moves where with one look they jump,
+    // which shows as shimmer (nothing here blends frames to hide it). Costs
+    // GPU time with the pixels drawn (the square of this). Detail (LOD
+    // error) and the sun's shadows stay as fine as the target's pixels ask.
+    float supersampling = 1.0f;
 };
 
 // Water (lit views; water plan W2): the surfaces of lakes, rivers and the
@@ -1335,7 +1344,8 @@ private:
     struct FrameData; // this frame's uploads and descriptors (renderer.cpp)
 
     bool init();
-    bool ensure_targets(u32 width, u32 height);
+    bool ensure_targets(u32 width, u32 height, bool super);
+    void shrink(rhi::CommandList& cmd, rhi::TextureHandle target, const Vec3& background);
     bool ensure_subsurface(); // skin's targets (false: none to be had)
     // Skin's light spread and added to the rest (m_subsurface[0] then
     // stands for the radiance), with the kernel uploaded.
@@ -1470,6 +1480,7 @@ private:
     rhi::PipelineHandle m_smaa_edges;
     rhi::PipelineHandle m_smaa_weights;
     rhi::PipelineHandle m_smaa_blend;
+    rhi::PipelineHandle m_shrink; // supersampling's last step
     rhi::PipelineHandle m_voxel_view;
     rhi::PipelineHandle m_reflect; // screen reflections, into m_scene
     rhi::PipelineHandle m_water_copy; // water (shaders/water.slang): the light under it, then
@@ -1526,6 +1537,7 @@ private:
     rhi::TextureHandle m_vis; // visibility buffer (rg32_uint)
     rhi::BufferHandle m_hzb;  // depth pyramid
     rhi::TextureHandle m_color;   // shaded image before anti-aliasing (rgba8_srgb)
+    rhi::TextureHandle m_super;   // supersampling: the finished frame before it is averaged down (rgba8_srgb; else invalid)
     rhi::TextureHandle m_edges;   // SMAA edges (rgba8_unorm)
     rhi::TextureHandle m_weights; // SMAA blend weights (rgba8_unorm)
     // Shading's output, before exposure (resolve.slang), which the screen
