@@ -846,7 +846,7 @@ an offline cooker can use it without a device.
   setting changes.
 - **Multisampling.** The answer to that shimmer for every card
   (`RenderSettings::multisampling`, on as it comes): the visibility buffer
-  and depth are drawn with four samples a pixel (`TextureDesc::samples`,
+  and depth are drawn with four samples a pixel, or eight (`TextureDesc::samples`,
   the raster pipelines' four-sample twins; the pixel shader still runs
   once a pixel and writes two ids), and only the pixels an edge crosses
   are shaded more than once.
@@ -897,17 +897,28 @@ an offline cooker can use it without a device.
   screen reflection there), a pixel's rim round things standing on a
   polished floor; sky seen through gaps in a crown takes the clouds as the
   half-size cloud image has them for the crown's pixel.
+  Eight samples (`multisampling_samples` 8; 4 as it comes): the same
+  with eight-sample twins of the raster pipelines, the sorting pass and
+  the depth pyramid's start told the count, and a cut-out's share in
+  eighths. An edge then fades in by eighths: with four, a trunk a pixel
+  wide against bright ground still changed by a quarter of their
+  difference from one frame to the next, which showed (the owner's
+  probes, 2026-11-27). The word a pixel is the same for both
+  (`sample_groups.slang`): four bits for the own surface's samples, six
+  for each other surface listed.
   Memory: 48 bytes a pixel for the four-sample targets and 4 for the
-  word (108 MB at 1920 x 1080, 192 MB at 2560 x 1440; times the square
-  of supersampling, and where they cannot be made the frame is drawn
-  without multisampling). Cost, not yet measured on the valley or on a
-  mainstream card: the raster passes write four samples, the sorting
-  pass and the depth pyramid read them, and each edge pixel is shaded
-  twice; in a far forest most crown pixels are edges, so shading there
-  may double (the second shading has no reflection cone, but all else:
-  shadows, bounce light, lamps, fog, and the far field's march for sky
-  and far samples). It has no line in the frame budget below yet: the
-  first numbers are to come from the gate and a probe on a real card.
+  word (108 MB at 1920 x 1080, 192 MB at 2560 x 1440), 96 and 4 with
+  eight (207 MB and 369 MB); times the square of supersampling. Where
+  eight cannot be made the frame is drawn with four, and where four
+  cannot, without multisampling. Cost, measured on an RTX 5090 at
+  2560 x 1440 on the valley's far tree line (the owner's probes,
+  2026-11-27; not on a mainstream card): 2.55 ms a frame without, 3.30
+  with four samples and two surfaces (shading 1.58 to 2.18, the raster
+  passes 0.08 to 0.13, the sorting pass 0.05), 3.56 with three surfaces,
+  3.76 with four. The other surfaces' shading has no reflection cone,
+  but all else: shadows, bounce light, lamps, fog, and the far field's
+  march for sky and far samples. Eight samples are not
+  measured yet. It has no line in the frame budget below yet.
 - **Growing (nothing thinner than a pixel).** A trunk, railing or mast
   thinner than a pixel covers a pixel's centre in one frame and falls
   between two in the next, so far forests blinked as the camera moved, and

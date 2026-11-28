@@ -1815,8 +1815,17 @@ void EditorPanels::draw_engine(const FrameInfo& frame) {
             ImGui::EndCombo();
         }
         bool multisampling = r.multisampling;
-        if (ImGui::Checkbox("Multisampling (4 samples on edges)", &multisampling)) {
+        if (ImGui::Checkbox("Multisampling (samples on edges)", &multisampling)) {
             run("set_render_settings", {{"multisampling", multisampling}});
+        }
+        if (ImGui::BeginCombo("Samples on an edge", r.multisampling_samples == 8 ? "8" : "4")) {
+            if (ImGui::Selectable("4", r.multisampling_samples != 8)) {
+                run("set_render_settings", {{"multisampling_samples", 4}});
+            }
+            if (ImGui::Selectable("8", r.multisampling_samples == 8)) {
+                run("set_render_settings", {{"multisampling_samples", 8}});
+            }
+            ImGui::EndCombo();
         }
         int surfaces = static_cast<int>(r.multisampling_surfaces);
         if (ImGui::SliderInt("Surfaces shaded on an edge", &surfaces, 2, 4)) {

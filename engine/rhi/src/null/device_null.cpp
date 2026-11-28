@@ -298,7 +298,8 @@ public:
         pipeline.mesh = desc.geometry == GeometryStage::mesh;
         pipeline.color_formats = desc.color_formats;
         pipeline.color_count = desc.color_count;
-        GIANT_ASSERT(desc.samples == 1 || desc.samples == 4, "a pipeline draws 1 or 4 samples a pixel");
+        GIANT_ASSERT(desc.samples == 1 || desc.samples == 4 || desc.samples == 8,
+                     "a pipeline draws 1, 4 or 8 samples a pixel");
         pipeline.depth_format = desc.depth_format;
         pipeline.samples = desc.samples;
         return m_pipelines.add(pipeline);

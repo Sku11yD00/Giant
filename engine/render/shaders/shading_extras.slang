@@ -45,7 +45,7 @@ struct Extras {
     uint terrain_normal;     // and its shading normal
     uint terrain_on;
     uint sample_groups;      // multisampling (samples.slang): each pixel's other surfaces, r32_uint (0xFFFFFFFF: off)
-    uint sample_vis;         // and the visibility buffer with four samples a pixel
+    uint sample_vis;         // and the visibility buffer with its samples (four or eight a pixel)
     LocalLights local;       // lamps (lights.slang; count 0: none)
     uint gi_lamps;           // the lamp words beside the voxel light pool (gi_lamps_on 0: none)
     uint gi_lamps_on;

@@ -22,6 +22,7 @@
 // Layout: TerrainPush in src/gpu_layout.h. Fixed loops, unrolled (WARP),
 // but the paint table's probe (short: the table is at most half full).
 #include "common.slang"
+#include "sample_groups.slang"
 
 struct TerrainPush {
     uint frame;
@@ -42,7 +43,7 @@ struct TerrainPush {
     uint surface;        // write: rgba16_float, full size
     uint normal;         // write: rgba16_float, full size
     // Multisampling (samples.slang): each pixel's other surfaces (r32_uint;
-    // 0xFFFFFFFF: off) and the four-sample visibility buffer they are in.
+    // 0xFFFFFFFF: off) and the multisampled visibility buffer they are in.
     uint sample_groups;
     uint sample_vis;
     float camera_y;      // the camera's height (metres above y = 0)
@@ -246,11 +247,10 @@ void cs_terrain(uint3 id : SV_DispatchThreadID) {
         const uint groups = read_texture_uint(push.sample_groups).Load(int3(int2(id.xy), 0));
         Texture2DMS<uint2> samples = read_texture_ms_uint2(push.sample_vis);
         [loop] for (uint g = 0u; g < 3u && !ground; ++g) {
-            const uint group = (groups >> (4u + 4u * g)) & 0xFu;
-            if ((group >> 2u) == 0u) {
+            if (group_samples(groups, g) == 0u) {
                 break;
             }
-            const int at = int(group & 3u);
+            const int at = int(group_sample(groups, g));
             const uint2 v = samples.Load(int2(id.xy), at);
             if (is_ground(v)) {
                 vis = v;

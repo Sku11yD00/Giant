@@ -2525,8 +2525,9 @@ GIANT_TEST("render: d3d12 supersampled, an edge crossing a pixel fades in by ste
             const std::vector<int> row = draw();
             seen.sheet = std::max(seen.sheet, row[k_w / 2]);
             int sum = 0;
-            for (const int v : row) {
-                sum += v;
+            for (u32 x = 0; x < k_w; ++x) {
+                const int v = row[x];
+                sum += x < k_w / 2 ? v : 0;
                 if (v > 16 && v < row[k_w / 2] - 16) ++seen.between;
             }
             if (before >= 0) seen.jump = std::max(seen.jump, std::abs(sum - before));
@@ -2582,11 +2583,17 @@ GIANT_TEST("render: multisampling adds its sorting pass after the raster passes,
                 frame.settings.mesh_shaders = mesh_shaders;
                 frame.settings.occlusion_culling = occlusion;
                 const RenderStats on = s.settle(frame);
-                GIANT_CHECK(on.multisampled && count("multisampling") == 1);
+                GIANT_CHECK(on.multisampled && on.samples == 4 && count("multisampling") == 1);
+                frame.settings.multisampling_samples = 8;
+                const RenderStats eight = s.settle(frame);
+                GIANT_CHECK(eight.multisampled && eight.samples == 8 && count("multisampling") == 1);
+                GIANT_CHECK(eight.draws == on.draws && eight.clusters == on.clusters);
+                frame.settings.multisampling_samples = 4;
+                GIANT_CHECK(s.settle(frame).samples == 4); // and back: the targets are made again
                 GIANT_CHECK(s.device->last_frame_stats().draws == on.draws + on.post_draws + on.shadow_draws);
                 frame.settings.multisampling = false;
                 const RenderStats off = s.settle(frame);
-                GIANT_CHECK(!off.multisampled && count("multisampling") == 0);
+                GIANT_CHECK(!off.multisampled && off.samples == 1 && count("multisampling") == 0);
                 GIANT_CHECK(off.draws + 1 == on.draws && off.post_draws == on.post_draws);
                 GIANT_CHECK(off.clusters == on.clusters && off.triangles == on.triangles); // the same cut
             }
@@ -2709,15 +2716,17 @@ GIANT_TEST("render: d3d12 multisampled, an edge crossing a pixel fades in by qua
     const double pixel = 2.0 * 10.0 * std::tan(0.5 * double(frame.view.vertical_fov_degrees) * 3.14159265358979 / 180.0) / k_h;
     // The sheet's own brightness and what is round it, how many different
     // brightnesses in between were seen over the steps, and the most the
-    // row's summed brightness changed from one step to the next.
+    // row's left half's summed brightness changed from one step to the next
+    // (one of the sheet's two edges: both together could cancel).
     struct Seen {
         int sheet = 0;
         int round = 0;
         std::set<int> between;
         int jump = 0;
     };
-    const auto sweep = [&](bool multisampled, bool floor, float grow) {
+    const auto sweep = [&](bool multisampled, bool floor, float grow, u32 samples = 4) {
         frame.settings.multisampling = multisampled;
+        frame.settings.multisampling_samples = samples;
         frame.settings.grow_pixels = grow;
         frame.instances = std::span<const Instance>(instances).first(floor ? 2 : 1);
         Seen seen;
@@ -2727,6 +2736,7 @@ GIANT_TEST("render: d3d12 multisampled, an edge crossing a pixel fades in by qua
             instances[0].position = DVec3{300.0 + pixel * (double(step) + 0.25) / 16.0, 0.0, 0.0};
             const std::vector<int> row = draw();
             GIANT_CHECK(renderer->last_stats().multisampled == multisampled);
+            GIANT_CHECK(renderer->last_stats().samples == (multisampled ? samples : 1u));
             seen.sheet = std::max(seen.sheet, row[k_w / 2]);
             seen.round = row[2];
             int sum = 0;
@@ -2761,6 +2771,13 @@ GIANT_TEST("render: d3d12 multisampled, an edge crossing a pixel fades in by qua
         // Four samples: three brightnesses part-way, and no step changes the row by most of a pixel.
         GIANT_CHECK(smooth.between.size() >= 3);
         GIANT_CHECK(smooth.jump > 0 && smooth.jump <= (plain.sheet - plain.round) * 7 / 10);
+        // Eight samples: more brightnesses part-way, and smaller steps.
+        const Seen finer = sweep(true, c.floor, c.grow, 8);
+        std::printf("    %s, eight samples: the sheet %d, round it %d; brightnesses in between %u; the row's biggest jump %d\n",
+                    c.name, finer.sheet, finer.round, static_cast<u32>(finer.between.size()), finer.jump);
+        GIANT_CHECK(std::abs(finer.sheet - plain.sheet) <= 2 && std::abs(finer.round - plain.round) <= 2);
+        GIANT_CHECK(finer.between.size() >= 5);
+        GIANT_CHECK(finer.jump > 0 && finer.jump < smooth.jump);
     }
     GIANT_CHECK(!device->device_lost() && device->validation_errors() == 0);
     device->destroy(target);

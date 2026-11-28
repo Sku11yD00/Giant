@@ -36,6 +36,7 @@
 #include "tone_map.slang"
 #include "sky_common.slang"
 #include "shading_extras.slang"
+#include "sample_groups.slang"
 
 struct ResolvePush {
     float4 background; // linear; where nothing was drawn
@@ -1194,9 +1195,9 @@ Shaded shade_pixel(float4 position, bool spread) {
     // along one of its samples, and they share the pixel as their samples
     // stand to each other.
     uint surfaces = 1u;
-    uint listed = groups & 7u; // samples of the surfaces shaded
-    [unroll] for (uint g = 1u; g < 4u; ++g) {
-        const uint samples_of = (groups >> (4u * g + 2u)) & 3u;
+    uint listed = group_own_samples(groups); // samples of the surfaces shaded
+    [unroll] for (uint g = 0u; g < 3u; ++g) {
+        const uint samples_of = group_samples(groups, g);
         surfaces += samples_of != 0u ? 1u : 0u;
         listed += samples_of;
     }
@@ -1221,12 +1222,11 @@ Shaded shade_pixel(float4 position, bool spread) {
     Hit h = s;
     float change = variance;
     bool beside = true; // right by the own surface: a crease, where the screen's images matter most
-    float share = float(groups & 7u) / float(max(listed, 1u));
+    float share = float(group_own_samples(groups)) / float(max(listed, 1u));
     [loop] for (uint turn = 0u; turn < surfaces; ++turn) {
         if (turn != 0u) {
-            const uint group = (groups >> (4u * turn)) & 0xFu;
             Texture2DMS<uint2> samples = read_texture_ms_uint2(extras.sample_vis);
-            const int at = int(group & 3u);
+            const int at = int(group_sample(groups, turn - 1u));
             v = samples.Load(int2(pixel), at);
             through = float4(float2(pixel) + 0.5 + samples.GetSamplePosition(at), position.zw);
             h = no_hit();
@@ -1238,7 +1238,7 @@ Shaded shade_pixel(float4 position, bool spread) {
             }
             // (The own surface's change of normal stands in on the same instance.)
             change = v.x != 0u && h.instance == s.instance ? variance : 0.0;
-            share = float(group >> 2u) / float(listed);
+            share = float(group_samples(groups, turn - 1u)) / float(listed);
         }
         const bool own = turn == 0u;
         const Shaded shaded = shade_surface(f, extras, through, v, h, change, own && spread && groups == 0u, own, beside);

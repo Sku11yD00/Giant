@@ -170,8 +170,8 @@ const char* texture_desc_problem(const TextureDesc& desc) {
         }
     }
     if (desc.samples != 1) {
-        if (desc.samples != 4) {
-            return "a texture has 1 or 4 samples a pixel";
+        if (desc.samples != 4 && desc.samples != 8) {
+            return "a texture has 1, 4 or 8 samples a pixel";
         }
         if (!has(desc.usage, TextureUsage::render_target) && !has(desc.usage, TextureUsage::depth_target)) {
             return "a multisampled texture is a render or depth target";

@@ -1979,7 +1979,11 @@ GIANT_TEST("rhi: multisampled targets: four samples, targets only, drawn by pipe
     GIANT_CHECK(texture_contents_problem(d, texture_bytes(d)) != nullptr); // made without contents
     TextureDesc bad = d;
     bad.samples = 2;
-    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // 1 or 4
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr); // 1, 4 or 8
+    bad.samples = 8;
+    GIANT_CHECK(texture_desc_problem(bad) == nullptr);
+    bad.samples = 16;
+    GIANT_CHECK(texture_desc_problem(bad) != nullptr);
     bad.samples = 0;
     GIANT_CHECK(texture_desc_problem(bad) != nullptr);
     bad = d;

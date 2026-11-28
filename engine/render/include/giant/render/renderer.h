@@ -751,10 +751,10 @@ struct RenderSettings {
     // left to `antialiasing`). The passes after shading that work a pixel
     // at a time (water, particles, hair, the screen's reflections, ambient
     // occlusion, contact shadows) see the pixel's main surface, as without.
-    // Where the GPU cannot make the four-sample targets, drawn as without.
+    // Where the GPU cannot make the multisampled targets, drawn as without.
     // (docs/architecture.md, "Multisampling".)
     bool multisampling = true;
-    // Of the surfaces an edge pixel's four samples see, how many are shaded
+    // Of the surfaces an edge pixel's samples see, how many are shaded
     // (2 to 4, its own with them; the ones with the most samples first).
     // 2: an edge between two things is smooth; where a pixel holds three or
     // four (the inside of a far forest's crowns, trunks before crowns
@@ -762,6 +762,14 @@ struct RenderSettings {
     // moves. More: those are shaded too, and such a pixel costs as many
     // shadings.
     u32 multisampling_surfaces = 2;
+    // Samples a pixel the visibility buffer and depth are drawn with: 4 or
+    // 8 (anything else: 4). An edge crossing a pixel fades in by that many
+    // steps, so with 8 thin far things (trunks, railings) against a bright
+    // ground change half as much from frame to frame. 8 doubles the
+    // multisampled targets' memory (96 bytes a pixel) and the work of the
+    // raster passes, the sorting pass and the depth pyramid's start; where
+    // the GPU cannot make them, 4.
+    u32 multisampling_samples = 4;
 };
 
 // Water (lit views; water plan W2): the surfaces of lakes, rivers and the
@@ -939,7 +947,8 @@ struct RenderStats {
     u32 instances = 0; // with at least one cluster drawn (GPU culling: passing instance culling)
     u32 draws = 0;     // draw calls this frame (raster passes, multisampling's sorting pass and shading)
     u32 post_draws = 0; // full-screen passes after shading (screen reflections when on, anti-aliasing, supersampling's averaging down): fixed, not per object
-    bool multisampled = false; // RenderSettings::multisampling drew this frame with four samples a pixel
+    bool multisampled = false; // RenderSettings::multisampling drew this frame with several samples a pixel
+    u32 samples = 1;           // how many (4 or 8; 1: without)
     u32 clusters = 0;
     u32 triangles = 0;
     // GPU culling: the counts above come from the GPU, from a frame or two
@@ -1381,7 +1390,8 @@ private:
     // the setting; whether this frame is multisampled. And the pass that
     // sorts the samples drawn into the one-sample visibility buffer and
     // depth and the pixels' other surfaces.
-    bool ensure_sample_targets(bool wanted);
+    // `samples`: 0 (none), 4 or 8. What the frame is drawn with (0: without).
+    u32 ensure_sample_targets(u32 samples);
     void sort_samples(rhi::CommandList& cmd, const FrameData& data, bool gpu);
     bool ensure_subsurface(); // skin's targets (false: none to be had)
     // Skin's light spread and added to the rest (m_subsurface[0] then
@@ -1494,11 +1504,15 @@ private:
     // cut-out ones drop pixels by alpha. Mesh ones invalid without mesh shaders.
     std::array<rhi::PipelineHandle, 4> m_raster_mesh;
     std::array<rhi::PipelineHandle, 4> m_raster_vertex;
-    // Multisampling: the same into four samples a pixel (cut-out ones
+    // Multisampling: the same into four or eight samples a pixel (cut-out ones
     // keeping a share of them), and the pass that sorts each pixel's
     // samples into surfaces (samples.slang). Any invalid: no multisampling.
     std::array<rhi::PipelineHandle, 4> m_raster_mesh_samples;
     std::array<rhi::PipelineHandle, 4> m_raster_vertex_samples;
+    // And into eight (RenderSettings::multisampling_samples). Any invalid: four.
+    std::array<rhi::PipelineHandle, 4> m_raster_mesh_samples8;
+    std::array<rhi::PipelineHandle, 4> m_raster_vertex_samples8;
+    bool m_samples8_ready = false;
     rhi::PipelineHandle m_sort_samples;
     rhi::PipelineHandle m_hzb_first_samples;
     bool m_samples_ready = false; // those pipelines were made
@@ -1588,13 +1602,14 @@ private:
     u64 m_super_failed = ~u64{0}; // pixels of the smallest larger frame that could not be made (none as big is tried until the setting changes)
     float m_super_asked = 1.0f;   // the setting m_super_failed is for
     // Multisampling (made while the setting is on): the visibility buffer
-    // and depth with four samples a pixel, and each pixel's other surfaces.
+    // and depth with four or eight samples a pixel, and each pixel's other surfaces.
     rhi::TextureHandle m_vis_samples;
     rhi::TextureHandle m_depth_samples;
     rhi::TextureHandle m_sample_groups; // r32_uint (samples.slang)
     bool m_multisampled = false;        // this frame draws into them
+    u32 m_sample_count = 0;             // samples a pixel they were made with (4 or 8; 0: not made)
     u32 m_sample_surfaces = 2;          // RenderSettings::multisampling_surfaces this frame
-    bool m_samples_failed = false;      // they could not be made at this size (not tried again until it or the setting changes)
+    u32 m_samples_failed = 0;           // the count they could not be made with at this size (not tried again until the size changes or multisampling is turned off and on)
     rhi::TextureHandle m_edges;   // SMAA edges (rgba8_unorm)
     rhi::TextureHandle m_weights; // SMAA blend weights (rgba8_unorm)
     // Shading's output, before exposure (resolve.slang), which the screen

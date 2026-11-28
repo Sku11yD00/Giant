@@ -843,10 +843,11 @@ Json render_settings_json(const EditorState& state) {
             {"supersampling", state.render_settings.supersampling},
             {"multisampling", state.render_settings.multisampling},
             {"multisampling_surfaces", state.render_settings.multisampling_surfaces},
+            {"multisampling_samples", state.render_settings.multisampling_samples},
             {"wind_shadow_pages_per_frame", state.render_settings.wind_shadow_pages_per_frame},
             {"weather_cover", state.render_settings.weather_cover},
             {"last_frame",
-             {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws}, {"multisampled", s.multisampled},
+             {{"instances", s.instances}, {"draws", s.draws}, {"post_draws", s.post_draws}, {"multisampled", s.multisampled}, {"samples", s.samples},
               {"clusters", s.clusters},
               {"triangles", s.triangles}, {"from_gpu", s.from_gpu},
               {"occluded_instances", s.occluded_instances},
@@ -2289,16 +2290,22 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                                                "the pixels drawn (its square). 1: off. Default 1.")},
                 {"multisampling",
                  {{"type", "boolean"},
-                  {"description", "Edges drawn with four samples a pixel: a pixel an edge crosses is shaded for "
+                  {"description", "Edges drawn with several samples a pixel (multisampling_samples): a pixel an edge crosses is shaded for "
                                   "its two main surfaces, mixed by their shares, so edges are smooth and small "
                                   "far things (a forest's crowns) shimmer much less as the camera moves, without "
                                   "blending frames. Pixels inside a surface are shaded once, as without. Default on."}}},
                 {"multisampling_surfaces",
                  {{"type", "integer"}, {"minimum", 2}, {"maximum", 4},
-                  {"description", "Of the surfaces an edge pixel's four samples see, how many are shaded (its "
+                  {"description", "Of the surfaces an edge pixel's samples see, how many are shaded (its "
                                   "own with them, the ones with the most samples first). 2: an edge between "
                                   "two things is smooth. 3 or 4: pixels that hold more (the inside of a far "
                                   "forest) are smooth too, each costing as many shadings. Default 2."}}},
+                {"multisampling_samples",
+                 {{"type", "integer"}, {"enum", Json::array({4, 8})},
+                  {"description", "Samples a pixel that multisampling draws edges with: 4 or 8. An edge "
+                                  "crossing a pixel fades in by that many steps, so with 8 thin far things "
+                                  "change half as much from frame to frame; 8 takes twice the memory and "
+                                  "raster work for the samples. Default 4."}}},
                 {"wind_shadow_pages_per_frame",
                  {{"type", "integer"}, {"minimum", 0}, {"maximum", 4096},
                   {"description", "Shadow pages under swaying things drawn again a frame at most, so their "
@@ -2362,6 +2369,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
              r.supersampling = args.value("supersampling", r.supersampling);
              r.multisampling = args.value("multisampling", r.multisampling);
              r.multisampling_surfaces = args.value("multisampling_surfaces", r.multisampling_surfaces);
+             r.multisampling_samples = args.value("multisampling_samples", r.multisampling_samples);
              r.wind_shadow_pages_per_frame = args.value("wind_shadow_pages_per_frame", r.wind_shadow_pages_per_frame);
              return CommandResult::success(render_settings_json(state));
          }});

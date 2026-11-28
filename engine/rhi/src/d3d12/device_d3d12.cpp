@@ -2070,7 +2070,8 @@ PipelineHandle D3D12Device::create_pipeline(const GraphicsPipelineDesc& desc) {
     GIANT_ASSERT(desc.color_count <= k_max_color_targets, "too many colour targets");
     GIANT_ASSERT(desc.depth == DepthMode::none || is_depth(desc.depth_format),
                  "depth testing needs a depth format");
-    GIANT_ASSERT(desc.samples == 1 || desc.samples == 4, "a pipeline draws 1 or 4 samples a pixel");
+    GIANT_ASSERT(desc.samples == 1 || desc.samples == 4 || desc.samples == 8,
+                 "a pipeline draws 1, 4 or 8 samples a pixel");
     const bool mesh = desc.geometry == GeometryStage::mesh;
     const ShaderCode geometry = mesh ? desc.mesh : desc.vertex;
     if (geometry.empty() || desc.pixel.empty()) {
