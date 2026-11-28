@@ -41,6 +41,7 @@ giant_shaders(render
     shaders/raster.slang:vs_cut:vertex:raster_cut_vs
     shaders/raster.slang:ps_cut:pixel:raster_cut_ps
     shaders/raster.slang:ps_cut_samples:pixel:raster_cut_samples_ps
+    shaders/raster.slang:ps_cut_samples8:pixel:raster_cut_samples8_ps
     shaders/raster.slang:ps_shadow_cut:pixel:raster_shadow_cut_ps
     shaders/shadow_clear.slang:cs_pages:compute:shadow_clear_pages_cs
     shaders/shadow_clear.slang:cs_words:compute:shadow_clear_words_cs
@@ -77,6 +78,7 @@ giant_shaders(render
     shaders/smaa.slang:ps_blend:pixel:smaa_blend_ps
     shaders/samples.slang:vs_main:vertex:samples_vs
     shaders/samples.slang:ps_main:pixel:samples_ps
+    shaders/samples.slang:ps_main8:pixel:samples8_ps
     shaders/shrink.slang:vs_main:vertex:shrink_vs
     shaders/shrink.slang:ps_main:pixel:shrink_ps
     shaders/voxels.slang:vs_main:vertex:voxels_vs

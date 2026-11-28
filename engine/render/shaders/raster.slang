@@ -310,7 +310,7 @@ uint2 ps_cut(PsCutIn i) : SV_Target {
     return i.vis;
 }
 
-// Cut-out materials drawn with four samples a pixel (multisampling): how
+// Cut-out materials drawn with four or eight samples a pixel (multisampling): how
 // many of the pixel's samples the cut-out keeps, from how far its alpha is
 // over the cutoff against how fast it changes across the pixel, so a leaf's
 // edge inside its card is as smooth as the card's own edge (cut whole
@@ -321,16 +321,16 @@ uint2 ps_cut(PsCutIn i) : SV_Target {
 // and hide each other wholly. The alpha is read inside the card: a pixel whose middle the
 // card does not cover is drawn for the samples it does, and the uv at its
 // middle would be past the card's edge (in an atlas, in the next leaf).
-[shader("pixel")]
-uint2 ps_cut_samples(PsCutIn i, in uint covered : SV_Coverage, out uint coverage : SV_Coverage) : SV_Target {
-    coverage = 0xFu;
+uint2 cut_samples<let N : uint>(PsCutIn i, uint covered, out uint coverage) {
+    coverage = (1u << N) - 1u;
     if (i.cut.x != 0xFFFFFFFFu) {
+        const uint n = N; // 4 or 8
         // The middle of the samples the card covers, from the pixel's
         // middle, and the uv there (uv is linear across the screen as far
         // as a pixel goes).
         float2 middle = float2(0.0, 0.0);
         float samples = 0.0;
-        [unroll] for (uint s = 0; s < 4; ++s) {
+        [unroll] for (uint s = 0; s < N; ++s) {
             if ((covered & (1u << s)) != 0u) {
                 middle += GetRenderTargetSamplePosition(int(s));
                 samples += 1.0;
@@ -342,16 +342,40 @@ uint2 ps_cut_samples(PsCutIn i, in uint covered : SV_Coverage, out uint coverage
                                 .SampleGrad(get_sampler(k_sampler_anisotropic_wrap), inside, ddx(i.uv), ddy(i.uv))
                                 .a;
         const float kept = saturate((alpha - asfloat(i.cut.y)) / max(fwidth(alpha), 1.0e-4) + 0.5);
-        const uint count = uint(round(kept * 4.0));
+        const uint count = uint(round(kept * float(n)));
         if (count == 0u) {
             discard;
         }
-        // 1: one sample; 2: two opposite ones; 3: all but one; 4: all.
-        const uint turn = (i.vis.y * 5u + (i.vis.y >> 2u)) & 3u;
-        coverage = count == 1u ? 1u << turn : count == 2u ? ((turn & 1u) != 0u ? 0x6u : 0x9u)
-                 : count == 3u ? 0xFu ^ (1u << turn) : 0xFu;
+        const uint hash = i.vis.y * 5u + (i.vis.y >> 2u);
+        if (n == 4u) {
+            // 1: one sample; 2: two opposite ones; 3: all but one; 4: all.
+            const uint turn = hash & 3u;
+            coverage = count == 1u ? 1u << turn : count == 2u ? ((turn & 1u) != 0u ? 0x6u : 0x9u)
+                     : count == 3u ? 0xFu ^ (1u << turn) : 0xFu;
+        } else {
+            // Eight: so many in a row of an order in which neighbours lie
+            // far apart in the pixel (0, 1, 2, 5, 3, 6, 7, 4), from the
+            // triangle's place on.
+            uint mask = 0u;
+            [unroll] for (uint k = 0; k < 8; ++k) {
+                if (k < count) {
+                    mask |= 1u << ((0x47635210u >> (4u * ((hash + k) & 7u))) & 0xFu);
+                }
+            }
+            coverage = mask;
+        }
     }
     return i.vis;
+}
+
+[shader("pixel")]
+uint2 ps_cut_samples(PsCutIn i, in uint covered : SV_Coverage, out uint coverage : SV_Coverage) : SV_Target {
+    return cut_samples<4>(i, covered, coverage);
+}
+
+[shader("pixel")]
+uint2 ps_cut_samples8(PsCutIn i, in uint covered : SV_Coverage, out uint coverage : SV_Coverage) : SV_Target {
+    return cut_samples<8>(i, covered, coverage);
 }
 
 // Sun shadow pages: the pass covers one level's window (16 x 16 pages of

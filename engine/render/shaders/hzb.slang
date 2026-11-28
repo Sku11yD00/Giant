@@ -4,14 +4,14 @@
 #include "common.slang"
 
 struct HzbPush {
-    uint depth;      // read descriptor of the depth texture (cs_first; cs_first_samples: the four-sample one)
+    uint depth;      // read descriptor of the depth texture (cs_first; cs_first_samples: the multisampled one)
     uint hzb;        // write descriptor
     uint width;      // depth texture size
     uint height;
     uint hzb_width;  // mip 0
     uint hzb_height;
     uint mip;        // the mip this dispatch writes (cs_down: 1 and up)
-    uint pad;
+    uint samples;    // cs_first_samples: samples a pixel of `depth` (4 or 8)
 };
 ConstantBuffer<HzbPush> push : register(b0);
 
@@ -37,7 +37,7 @@ void cs_first(uint3 id : SV_DispatchThreadID) {
     write_buffer(push.hzb).Store((id.y * push.hzb_width + id.x) * 4, asuint(farthest));
 }
 
-// The same from depth drawn with four samples a pixel (multisampling): the
+// The same from depth drawn with several samples a pixel (multisampling): the
 // farthest of every sample, so nothing seen through part of a pixel is
 // taken for hidden.
 [shader("compute")]
@@ -54,7 +54,7 @@ void cs_first_samples(uint3 id : SV_DispatchThreadID) {
     float farthest = 1.0;
     for (uint y = y0; y < y1; ++y) {
         for (uint x = x0; x < x1; ++x) {
-            [unroll] for (uint s = 0; s < 4; ++s) {
+            for (uint s = 0; s < push.samples; ++s) {
                 farthest = min(farthest, depth.Load(int2(int(x), int(y)), int(s)));
             }
         }

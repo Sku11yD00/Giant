@@ -189,7 +189,7 @@ struct TextureDesc {
     // count, so a one-layer array keeps its shader-side type. More than one
     // layer needs it.
     bool array = false;
-    // Samples a pixel: 1, or 4 for a multisampled target (a render or depth
+    // Samples a pixel: 1, or 4 or 8 for a multisampled target (a render or depth
     // target, sampled as well if shaders read it: as a Texture2DMS, each
     // sample on its own; one mip, one layer, never shader-written, made
     // without contents and not read back). Drawn into only by pipelines of
@@ -276,8 +276,8 @@ struct GraphicsPipelineDesc {
     DepthMode depth = DepthMode::none;
     CullMode cull = CullMode::back; // front faces wind counter-clockwise
     BlendMode blend = BlendMode::opaque;
-    // Samples a pixel of its targets (TextureDesc::samples): 1 or 4. With 4
-    // the pixel shader still runs once a pixel; each sample keeps what covers
+    // Samples a pixel of its targets (TextureDesc::samples): 1, 4 or 8. With
+    // more than 1 the pixel shader still runs once a pixel; each sample keeps what covers
     // it (and the shader may narrow that with SV_Coverage).
     u32 samples = 1;
     const char* name = "pipeline";
