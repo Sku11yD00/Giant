@@ -898,9 +898,10 @@ an offline cooker can use it without a device.
   polished floor; sky seen through gaps in a crown takes the clouds as the
   half-size cloud image has them for the crown's pixel.
   Eight samples (`multisampling_samples` 8; 4 as it comes): the same
-  with eight-sample twins of the raster pipelines, the sorting pass and
-  the depth pyramid's start told the count, and a cut-out's share in
-  eighths. An edge then fades in by eighths: with four, a trunk a pixel
+  with eight-sample twins of the raster pipelines, of the sorting pass
+  and of the cut-out's coverage (shares in eighths; each made for its
+  count, so four samples cost what they did), and the depth pyramid's
+  start told the count. An edge then fades in by eighths: with four, a trunk a pixel
   wide against bright ground still changed by a quarter of their
   difference from one frame to the next, which showed (the owner's
   probes, 2026-11-27). The word a pixel is the same for both

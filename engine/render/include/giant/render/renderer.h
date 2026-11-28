@@ -1514,6 +1514,7 @@ private:
     std::array<rhi::PipelineHandle, 4> m_raster_vertex_samples8;
     bool m_samples8_ready = false;
     rhi::PipelineHandle m_sort_samples;
+    rhi::PipelineHandle m_sort_samples8; // the same for eight samples a pixel
     rhi::PipelineHandle m_hzb_first_samples;
     bool m_samples_ready = false; // those pipelines were made
     rhi::PipelineHandle m_resolve;

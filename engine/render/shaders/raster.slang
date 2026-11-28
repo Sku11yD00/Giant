@@ -321,18 +321,17 @@ uint2 ps_cut(PsCutIn i) : SV_Target {
 // and hide each other wholly. The alpha is read inside the card: a pixel whose middle the
 // card does not cover is drawn for the samples it does, and the uv at its
 // middle would be past the card's edge (in an atlas, in the next leaf).
-[shader("pixel")]
-uint2 ps_cut_samples(PsCutIn i, in uint covered : SV_Coverage, out uint coverage : SV_Coverage) : SV_Target {
-    coverage = 0xFFu;
+uint2 cut_samples<let N : uint>(PsCutIn i, uint covered, out uint coverage) {
+    coverage = (1u << N) - 1u;
     if (i.cut.x != 0xFFFFFFFFu) {
-        const uint n = GetRenderTargetSampleCount(); // 4 or 8
+        const uint n = N; // 4 or 8
         // The middle of the samples the card covers, from the pixel's
         // middle, and the uv there (uv is linear across the screen as far
         // as a pixel goes).
         float2 middle = float2(0.0, 0.0);
         float samples = 0.0;
-        [unroll] for (uint s = 0; s < 8; ++s) {
-            if (s < n && (covered & (1u << s)) != 0u) {
+        [unroll] for (uint s = 0; s < N; ++s) {
+            if ((covered & (1u << s)) != 0u) {
                 middle += GetRenderTargetSamplePosition(int(s));
                 samples += 1.0;
             }
@@ -367,6 +366,16 @@ uint2 ps_cut_samples(PsCutIn i, in uint covered : SV_Coverage, out uint coverage
         }
     }
     return i.vis;
+}
+
+[shader("pixel")]
+uint2 ps_cut_samples(PsCutIn i, in uint covered : SV_Coverage, out uint coverage : SV_Coverage) : SV_Target {
+    return cut_samples<4>(i, covered, coverage);
+}
+
+[shader("pixel")]
+uint2 ps_cut_samples8(PsCutIn i, in uint covered : SV_Coverage, out uint coverage : SV_Coverage) : SV_Target {
+    return cut_samples<8>(i, covered, coverage);
 }
 
 // Sun shadow pages: the pass covers one level's window (16 x 16 pages of

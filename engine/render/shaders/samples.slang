@@ -36,14 +36,12 @@ struct SamplesPush {
     uint visible;        // read: the visible list ((instance, cluster) entries)
     uint visible_offset;
     uint surfaces;       // of a pixel that are listed to be shaded, its own with them (2 to 4)
-    uint samples;        // a pixel in `vis` and `depth`: 4 or 8
 };
 ConstantBuffer<SamplesPush> push : register(b0);
 
 // Depths (reverse-Z: near over the distance) this near where the slope puts
 // them, as a share of the nearer's, run on: half a percent of the distance.
 static const float k_same_surface = 0.005;
-static const uint k_most_samples = 8;
 
 [shader("vertex")]
 float4 vs_main(uint vertex_id : SV_VertexID) : SV_Position {
@@ -57,36 +55,25 @@ struct Sorted {
     float depth : SV_Depth;
 };
 
-[shader("pixel")]
-Sorted ps_main(float4 position : SV_Position) {
-    const int2 pixel = int2(position.xy);
+// For N samples a pixel (a pass of its own for each count: the one for four
+// does four samples' work, not eight's with half left out).
+Sorted sorted<let N : uint>(int2 pixel) {
     Texture2DMS<uint2> vis = read_texture_ms_uint2(push.vis);
     Texture2DMS<float> depth = read_texture_ms_float(push.depth);
-    const uint n = push.samples; // 4 or 8
-    uint2 v[k_most_samples];
-    float z[k_most_samples];
-    float2 slope[k_most_samples]; // each sample's depth's change a pixel right and down
-    float2 place[k_most_samples]; // and where in the pixel it is, from the middle
+    const uint n = N;
+    uint2 v[N];
+    float z[N];
+    float2 slope[N]; // each sample's depth's change a pixel right and down
+    float2 place[N]; // and where in the pixel it is, from the middle
     bool one = true;
     float sum_all = 0.0;
-    // (Past the count: the first sample again, not read twice, which joins
-    // its own surface below and is not counted. With four samples the pass
-    // reads four.)
-    const uint2 v_first = vis.Load(pixel, 0);
-    const float z_first = depth.Load(pixel, 0);
-    const float2 place_first = depth.GetSamplePosition(0);
-    [unroll] for (uint i = 0; i < k_most_samples; ++i) {
-        v[i] = v_first;
-        z[i] = z_first;
-        place[i] = place_first;
-        if (i != 0u && (i < 4u || n > 4u)) {
-            v[i] = vis.Load(pixel, int(i));
-            z[i] = depth.Load(pixel, int(i));
-            place[i] = depth.GetSamplePosition(int(i));
-        }
+    [unroll] for (uint i = 0; i < N; ++i) {
+        v[i] = vis.Load(pixel, int(i));
+        z[i] = depth.Load(pixel, int(i));
         slope[i] = float2(ddx(z[i]), ddy(z[i]));
+        place[i] = depth.GetSamplePosition(int(i));
         one = one && all(v[i] == v[0]);
-        sum_all += i < n ? z[i] : 0.0;
+        sum_all += z[i];
     }
     Sorted o;
     if (one) {
@@ -99,18 +86,18 @@ Sorted ps_main(float4 position : SV_Position) {
         return o;
     }
     // Each sample's instance (nothing drawn: none).
-    uint instance[k_most_samples];
-    [unroll] for (uint i = 0; i < k_most_samples; ++i) {
+    uint instance[N];
+    [unroll] for (uint i = 0; i < N; ++i) {
         instance[i] = 0xFFFFFFFFu;
-        if (v[i].x != 0u && (i < 4u || n > 4u)) { // (past the count: the first sample's triangle, the same without it)
+        if (v[i].x != 0u) {
             instance[i] = read_buffer(push.visible).Load(push.visible_offset + (v[i].x - 1u) * 8u);
         }
     }
     // Each sample joins the first earlier surface it is of (told by that
     // surface's first sample), or starts one.
-    uint leader[k_most_samples];
-    uint count[k_most_samples];
-    [unroll] for (uint i = 0; i < k_most_samples; ++i) {
+    uint leader[N];
+    uint count[N];
+    [unroll] for (uint i = 0; i < N; ++i) {
         leader[i] = i;
         count[i] = 0u;
         [unroll] for (uint j = 0; j < i; ++j) {
@@ -126,14 +113,14 @@ Sorted ps_main(float4 position : SV_Position) {
             }
         }
     }
-    [unroll] for (uint i = 0; i < k_most_samples; ++i) {
-        [unroll] for (uint j = 0; j < k_most_samples; ++j) {
-            count[j] += i < n && leader[i] == j ? 1u : 0u;
+    [unroll] for (uint i = 0; i < N; ++i) {
+        [unroll] for (uint j = 0; j < N; ++j) {
+            count[j] += leader[i] == j ? 1u : 0u;
         }
     }
     // The pixel's own: the surface with the most samples (the earliest of equals).
     uint own = 0u;
-    [unroll] for (uint i = 1; i < k_most_samples; ++i) {
+    [unroll] for (uint i = 1; i < N; ++i) {
         own = count[i] > count[own] ? i : own;
     }
     // Shown by the triangle most of its samples see (the earliest of
@@ -141,12 +128,12 @@ Sorted ps_main(float4 position : SV_Position) {
     uint shown = own;
     uint most = 0u;
     float sum = 0.0;
-    [unroll] for (uint i = 0; i < k_most_samples; ++i) {
-        if (i < n && leader[i] == own) {
+    [unroll] for (uint i = 0; i < N; ++i) {
+        if (leader[i] == own) {
             sum += z[i];
             uint alike = 0u;
-            [unroll] for (uint j = 0; j < k_most_samples; ++j) {
-                alike += j < n && leader[j] == own && all(v[j] == v[i]) ? 1u : 0u;
+            [unroll] for (uint j = 0; j < N; ++j) {
+                alike += leader[j] == own && all(v[j] == v[i]) ? 1u : 0u;
             }
             if (alike > most) {
                 most = alike;
@@ -166,7 +153,7 @@ Sorted ps_main(float4 position : SV_Position) {
         [unroll] for (uint k = 1u; k < 4u; ++k) {
             uint best = 0u;
             uint best_count = 0u;
-            [unroll] for (uint i = 0; i < k_most_samples; ++i) {
+            [unroll] for (uint i = 0; i < N; ++i) {
                 if ((taken & (1u << i)) == 0u && count[i] > best_count) {
                     best = i;
                     best_count = count[i];
@@ -181,4 +168,14 @@ Sorted ps_main(float4 position : SV_Position) {
         o.groups = word;
     }
     return o;
+}
+
+[shader("pixel")]
+Sorted ps_main(float4 position : SV_Position) {
+    return sorted<4>(int2(position.xy));
+}
+
+[shader("pixel")]
+Sorted ps_main8(float4 position : SV_Position) {
+    return sorted<8>(int2(position.xy));
 }

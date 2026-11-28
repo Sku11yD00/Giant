@@ -303,7 +303,7 @@ Renderer::~Renderer() {
           m_raster_vertex[1], m_raster_vertex[2], m_raster_vertex[3], m_shadow_mesh_cut, m_shadow_vertex_cut,
           m_raster_mesh_samples[0], m_raster_mesh_samples[1], m_raster_mesh_samples[2], m_raster_mesh_samples[3],
           m_raster_vertex_samples[0], m_raster_vertex_samples[1], m_raster_vertex_samples[2],
-          m_raster_vertex_samples[3], m_sort_samples, m_hzb_first_samples,
+          m_raster_vertex_samples[3], m_sort_samples, m_sort_samples8, m_hzb_first_samples,
           m_raster_mesh_samples8[0], m_raster_mesh_samples8[1], m_raster_mesh_samples8[2], m_raster_mesh_samples8[3],
           m_raster_vertex_samples8[0], m_raster_vertex_samples8[1], m_raster_vertex_samples8[2],
           m_raster_vertex_samples8[3],
@@ -531,7 +531,7 @@ bool Renderer::init() {
             d.samples = samples;
             d.cull = (kind & 1u) != 0u ? rhi::CullMode::none : rhi::CullMode::back;
             d.vertex = cut ? shaders::raster_cut_vs() : shaders::raster_vs();
-            d.pixel = cut ? shaders::raster_cut_samples_ps() : shaders::raster_ps();
+            d.pixel = !cut ? shaders::raster_ps() : eight ? shaders::raster_cut_samples8_ps() : shaders::raster_cut_samples_ps();
             d.name = eight ? "clusters to visibility, eight samples (vertex)"
                            : "clusters to visibility, four samples (vertex)";
             rhi::PipelineHandle& vertex = eight ? m_raster_vertex_samples8[kind] : m_raster_vertex_samples[kind];
@@ -560,6 +560,10 @@ bool Renderer::init() {
         sort.depth = rhi::DepthMode::write;
         sort.name = "multisampling: sort samples";
         m_sort_samples = m_device.create_pipeline(sort);
+        sort.pixel = shaders::samples8_ps();
+        sort.name = "multisampling: sort eight samples";
+        m_sort_samples8 = m_device.create_pipeline(sort);
+        m_samples8_ready = m_samples8_ready && m_sort_samples8.valid();
         rhi::ComputePipelineDesc first;
         first.compute = shaders::hzb_first_samples_cs();
         first.name = "HZB: from multisampled depth";
@@ -2445,7 +2449,6 @@ void Renderer::sort_samples(rhi::CommandList& cmd, const FrameData& data, bool g
     push.vis = m_device.read_descriptor(m_vis_samples);
     push.depth = m_device.read_descriptor(m_depth_samples);
     push.surfaces = std::clamp(m_sample_surfaces, 2u, 4u);
-    push.samples = m_sample_count;
     if (gpu && m_cull.visible.valid()) {
         cmd.barrier(m_cull.visible, rhi::ResourceState::shader_read);
         push.visible = m_device.read_descriptor(m_cull.visible);
@@ -2463,7 +2466,7 @@ void Renderer::sort_samples(rhi::CommandList& cmd, const FrameData& data, bool g
     pass.colors[1] = {m_sample_groups, rhi::LoadOp::clear, {0.0f, 0.0f, 0.0f, 0.0f}};
     pass.depth = {m_depth, rhi::LoadOp::clear, 0.0f};
     cmd.begin_render_pass(pass);
-    cmd.set_pipeline(m_sort_samples);
+    cmd.set_pipeline(m_sample_count == 8 ? m_sort_samples8 : m_sort_samples);
     cmd.push(push);
     cmd.draw(3);
     cmd.end_render_pass();
