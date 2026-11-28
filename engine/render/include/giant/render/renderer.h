@@ -738,7 +738,7 @@ struct RenderSettings {
     float supersampling = 1.0f;
     // Multisampling: the visibility buffer and depth are drawn with four
     // samples a pixel, and a pixel whose samples see more than one surface
-    // (an edge) is shaded for its two main ones, mixed as their samples
+    // (an edge) is shaded for its main ones (multisampling_surfaces), mixed as their samples
     // stand to each other; a pixel inside a surface is shaded once, as
     // without. An edge crossing a
     // pixel then changes it in four steps where one look flips it outright,
@@ -760,8 +760,12 @@ struct RenderSettings {
     // four (the inside of a far forest's crowns, trunks before crowns
     // before ground) the ones left out still come and go as the camera
     // moves. More: those are shaded too, and such a pixel costs as many
-    // shadings.
-    u32 multisampling_surfaces = 2;
+    // shadings. 3 as it comes: on the valley's far tree line it left 0.52%
+    // of the pixels jumping against 0.93% with 2, more than eight samples
+    // with 2 did (0.70%) for the same time and half the memory (the
+    // owner's probes on an RTX 5090, 2026-11-28; not measured on a
+    // mainstream card).
+    u32 multisampling_surfaces = 3;
     // Samples a pixel the visibility buffer and depth are drawn with: 4 or
     // 8 (anything else: 4). An edge crossing a pixel fades in by that many
     // steps, so with 8 thin far things (trunks, railings) against a bright
@@ -1609,7 +1613,7 @@ private:
     rhi::TextureHandle m_sample_groups; // r32_uint (samples.slang)
     bool m_multisampled = false;        // this frame draws into them
     u32 m_sample_count = 0;             // samples a pixel they were made with (4 or 8; 0: not made)
-    u32 m_sample_surfaces = 2;          // RenderSettings::multisampling_surfaces this frame
+    u32 m_sample_surfaces = 3;          // RenderSettings::multisampling_surfaces this frame
     u32 m_samples_failed = 0;           // the count they could not be made with at this size (not tried again until the size changes or multisampling is turned off and on)
     rhi::TextureHandle m_edges;   // SMAA edges (rgba8_unorm)
     rhi::TextureHandle m_weights; // SMAA blend weights (rgba8_unorm)

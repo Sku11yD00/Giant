@@ -860,23 +860,24 @@ an offline cooker can use it without a device.
   depths go to the one-sample visibility buffer and depth that every
   later pass reads, so ambient occlusion, contact shadows, water,
   particles, hair and the screen's reflections work as before, on the
-  pixel's main surface. The other surfaces (at most three) go into a
-  word a pixel (`m_sample_groups`), and `resolve.slang` shades the one
-  with the most samples once more, along one of its samples, and mixes
-  the two as their samples stand to each other (a third and fourth
-  surface, the inside of a far crown mostly, are left out as it comes: a
-  pixel is shaded twice at the most; `multisampling_surfaces` 3 or 4
-  lists and shades those too, in one loop over the pixel's surfaces so
-  that the shading is in the shader once), each lit one weighed by 1 over 1 + its exposed brightness so
+  pixel's main surface. The other surfaces, the ones with
+  the most samples first, go into a word a pixel (`m_sample_groups`),
+  and `resolve.slang` shades each of them once more, along one of its
+  samples, and mixes them all as their samples stand to each other
+  (`multisampling_surfaces`, 2 to 4, says how many of a pixel's surfaces
+  are listed and shaded, its own with them: 3 as it comes, so a third
+  surface, the inside of a far crown mostly, is shaded too and a fourth
+  left out; in one loop over the pixel's surfaces so that the shading
+  is in the shader once), each lit one weighed by 1 over 1 + its exposed brightness so
   that one bright sample does not leave the edge jagged (giving way to
   the plain mean where something is many times white, a lamp, so that
   bloom gets a small bright thing's whole light wherever it sits in the
   pixel); where part of the pixel is the plain background or a debug
   colour, the lit part is exposed and tone mapped there. A pixel's
-  other surface takes the screen's one-a-pixel images (ambient
+  other surfaces take the screen's one-a-pixel images (ambient
   occlusion, contact shadows, characters' occlusion) only where they
-  it lies right by the own surface (a crease), traces no voxel
-  reflection cone and asks for no texture detail; the ground behind an edge gets
+  lie right by the own surface (a crease), trace no voxel
+  reflection cone and ask for no texture detail; the ground behind an edge gets
   its layers from `terrain.slang`, which fills the pixel's texel for it
   when the pixel's own surface is not ground. Cut-out materials keep a
   share of the samples by how far their alpha is over the cutoff against
@@ -918,8 +919,22 @@ an offline cooker can use it without a device.
   passes 0.08 to 0.13, the sorting pass 0.05), 3.56 with three surfaces,
   3.76 with four. The other surfaces' shading has no reflection cone,
   but all else: shadows, bounce light, lamps, fog, and the far field's
-  march for sky and far samples. Eight samples are not
-  measured yet. It has no line in the frame budget below yet.
+  march for sky and far samples. The probe of 2026-11-28
+  (the same card, size and place): 2.53 without; four samples 3.27 with
+  two surfaces and 3.65 with three; eight samples 3.62 with two, 3.89
+  with three, 4.08 with four. In its pictures, of the far tree line's
+  pixels, those whose brightness jumps by more than 60 of 255 from
+  frame to frame as the camera moves: 2.69% without, 0.93% with four
+  samples and two surfaces, 0.52% with three, 0.70% with eight and two,
+  0.42% with eight and three, 0.37% with eight and four (eight halves
+  an edge's step; fewer pixels cross the mark, not half as many). So
+  the defaults: four samples and three surfaces, 1.1 ms over none on
+  that card: a third surface took more flicker away than four more
+  samples, for the same time there and half the memory. On a mainstream
+  card (RTX 3060 class) none of this is measured: a third surface is
+  all shading, eight samples mostly raster and memory, so the balance
+  may differ there. A known gap in the frame budget below, which has no
+  line for it yet.
 - **Growing (nothing thinner than a pixel).** A trunk, railing or mast
   thinner than a pixel covers a pixel's centre in one frame and falls
   between two in the next, so far forests blinked as the camera moved, and

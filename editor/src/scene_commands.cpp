@@ -2291,7 +2291,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                 {"multisampling",
                  {{"type", "boolean"},
                   {"description", "Edges drawn with several samples a pixel (multisampling_samples): a pixel an edge crosses is shaded for "
-                                  "its two main surfaces, mixed by their shares, so edges are smooth and small "
+                                  "its main surfaces (multisampling_surfaces), mixed by their shares, so edges are smooth and small "
                                   "far things (a forest's crowns) shimmer much less as the camera moves, without "
                                   "blending frames. Pixels inside a surface are shaded once, as without. Default on."}}},
                 {"multisampling_surfaces",
@@ -2299,7 +2299,7 @@ void register_scene_commands(ai::CommandRegistry& registry, EditorState& state) 
                   {"description", "Of the surfaces an edge pixel's samples see, how many are shaded (its "
                                   "own with them, the ones with the most samples first). 2: an edge between "
                                   "two things is smooth. 3 or 4: pixels that hold more (the inside of a far "
-                                  "forest) are smooth too, each costing as many shadings. Default 2."}}},
+                                  "forest) are smooth too, each costing as many shadings. Default 3."}}},
                 {"multisampling_samples",
                  {{"type", "integer"}, {"enum", Json::array({4, 8})},
                   {"description", "Samples a pixel that multisampling draws edges with: 4 or 8. An edge "
