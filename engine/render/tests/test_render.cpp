@@ -2873,6 +2873,13 @@ GIANT_TEST("render: d3d12 multisampled, a pixel that holds three surfaces shows 
     const std::vector<int> two = draw(2);
     const std::vector<int> three = draw(3);
     const std::vector<int> four = draw(4);
+    // As the setting comes: three.
+    const std::vector<int> usual = draw(RenderSettings{}.multisampling_surfaces);
+    int from_three = 0;
+    for (usize i = 0; i < usual.size(); ++i) {
+        from_three = std::max(from_three, std::abs(usual[i] - three[i]));
+    }
+    GIANT_CHECK(RenderSettings{}.multisampling_surfaces == 3 && from_three <= 1);
     // Where two and four differ: the pixels that hold three surfaces (the
     // crossing, and the upper sheet's other long edge where it crosses the
     // lower one's, if that edge parts a pixel's samples too).
