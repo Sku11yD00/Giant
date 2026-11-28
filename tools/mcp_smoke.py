@@ -23,7 +23,7 @@ import time
 from gate_person import write_person
 from n1_gate import ENTITIES, STREET_X, build_gate_scene, flight_path
 
-TIMEOUT = 3000  # seconds for the whole run (the gates are heavy on the software renderer with GPU validation: 1300-1500 s on Windows CI runners by N3 part 4, whose speed varies 2x; each gate prints its time)
+TIMEOUT = 4500  # seconds for the whole run (the gates are heavy on the software renderer with GPU validation: 1400 s on the faster Windows CI runners and 2900 s on the slower by 2026-11-28, edge multisampling in; each gate prints its time)
 LATE_READ_SECONDS = 2.0  # how late late_reader_gate reads a reply
 
 
