@@ -20,7 +20,7 @@ import time
 from gate_common import Editor
 from mcp_smoke import write_bumpy_sphere_glb
 
-TIMEOUT = 300  # seconds for each run
+TIMEOUT = 900  # seconds for each run
 
 
 class Run(Editor):
@@ -31,11 +31,17 @@ class Run(Editor):
         super().__init__(program or os.path.abspath(sys.argv[1]), [*sys.argv[2:], *options], "game_smoke", TIMEOUT, cwd, env)
 
     def until(self, what, done):
-        """Polls (each call is a frame of the program) until `done()` is true."""
-        end = time.monotonic() + 60
-        while time.monotonic() < end:
+        """Polls (each call is a frame of the program) until `done()` is true:
+        for a minute, and for 60 frames where they take longer than that (a
+        software GPU on a slow machine draws a frame in seconds: a minute was
+        17 frames there, too few for a saved game to begin), five minutes at
+        the most."""
+        begun = time.monotonic()
+        polls = 0
+        while time.monotonic() < begun + 60 or (polls < 60 and time.monotonic() < begun + 300):
             if done():
                 return
+            polls += 1
             time.sleep(0.01)
         raise RuntimeError("never happened: " + what)
 
